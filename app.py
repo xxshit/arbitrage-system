@@ -2023,11 +2023,36 @@ def daily_report_trends():
     return jsonify({"updated_at": snapshot["updated_at"], "rising": sorted(valid, key=lambda item: item["change_24h"], reverse=True)[:20], "falling": sorted(valid, key=lambda item: item["change_24h"])[:20], "horn_30m": [signal_payload(item) for item in horn_rows if item.timeframe == "30m"], "horn_4h": [signal_payload(item) for item in horn_rows if item.timeframe == "4h"]})
 
 
-def ake_thought_snapshot():
-    symbol = "AKE/USDT"
+THOUGHT_WATCHLIST = {
+    "AKE/USDT": {
+        "entry": 0.00085,
+        "entry_time": "2026-07-16 19:07",
+        "fallback": {
+            "support": 0.000763,
+            "resistance": 0.0009878,
+            "oi_value": 47099459.34,
+            "oi_change_pct": 79.4,
+            "ratio_value": 0.4,
+            "ratio_change_pct": 0.55,
+            "cvd": 34382209.74,
+            "change_30m": 13.77,
+            "change_4h": 65.97,
+        },
+    },
+    "US/USDT": {
+        "entry": None,
+        "entry_time": "重点反转观察",
+        "fallback": {},
+    },
+}
+
+
+def thought_snapshot(symbol):
+    config = THOUGHT_WATCHLIST[symbol]
     raw_symbol = symbol.replace("/", "")
-    entry = 0.00085
-    entry_time = "2026-07-16 19:07"
+    entry = config.get("entry")
+    entry_time = config.get("entry_time") or "重点观察"
+    fallback_overrides = config.get("fallback") or {}
     now = datetime.now(SHANGHAI_TZ)
     fallback = {
         "symbol": symbol,
@@ -2035,21 +2060,22 @@ def ake_thought_snapshot():
         "entry_time": entry_time,
         "last": None,
         "profit_pct": None,
-        "support": 0.000763,
-        "resistance": 0.0009878,
-        "oi_value": 47099459.34,
-        "oi_change_pct": 79.4,
-        "ratio_value": 0.4,
-        "ratio_change_pct": 0.55,
-        "cvd": 34382209.74,
-        "change_30m": 13.77,
-        "change_4h": 65.97,
+        "support": None,
+        "resistance": None,
+        "oi_value": None,
+        "oi_change_pct": None,
+        "ratio_value": None,
+        "ratio_change_pct": None,
+        "cvd": None,
+        "change_30m": None,
+        "change_4h": None,
         "funding_rate": None,
         "basis": None,
         "validation": {},
         "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "fallback",
     }
+    fallback.update(fallback_overrides)
     try:
         ticker = get_json("https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({"symbol": raw_symbol}), timeout=8)
         k30 = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "30m", "limit": 60}), timeout=8)
@@ -2084,7 +2110,7 @@ def ake_thought_snapshot():
         return {
             **fallback,
             "last": last,
-            "profit_pct": percent_delta(last, entry),
+            "profit_pct": percent_delta(last, entry) if entry else None,
             "support": support,
             "resistance": resistance,
             "oi_value": oi_last,
@@ -2103,6 +2129,14 @@ def ake_thought_snapshot():
         return fallback
 
 
+def ake_thought_snapshot():
+    return thought_snapshot("AKE/USDT")
+
+
+def thought_watch_snapshots():
+    return [thought_snapshot(symbol) for symbol in THOUGHT_WATCHLIST]
+
+
 def thought_push_direction(analysis):
     validation = analysis.get("validation") or {}
     checks = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
@@ -2115,6 +2149,14 @@ def thought_push_direction(analysis):
         return "bullish"
     if bearish_count == 3:
         return "bearish"
+    reversal_count = sum(item["price_change"] <= -0.8 and item["cvd"] < 0 for item in valid)
+    pressure = (
+        any(item["oi_change"] <= -1.0 for item in valid)
+        or (analysis.get("funding_rate") is not None and analysis.get("funding_rate") < 0)
+        or (analysis.get("basis") is not None and abs(analysis.get("basis")) >= 1.0)
+    )
+    if reversal_count >= 2 and pressure:
+        return "reversal"
     return None
 
 
@@ -2124,7 +2166,7 @@ def thought_signal_key(analysis, direction):
     support = analysis.get("support") or 0
     if direction == "bullish" and resistance and last >= resistance * 0.995:
         return "bullish-near-breakout"
-    if direction == "bearish" and support and last <= support * 1.005:
+    if direction in {"bearish", "reversal"} and support and last <= support * 1.005:
         return "bearish-near-breakdown"
     return f"{direction}-resonance"
 
@@ -2140,16 +2182,20 @@ def thought_lark_message(analysis, direction):
             f"CVD {lark_compact_number(item.get('cvd'))}，"
             f"成交额 {lark_compact_number(item.get('volume'))}"
         )
-    direction_text = "看涨/转强" if direction == "bullish" else "看跌/做空观察"
+    direction_text = "看涨/转强" if direction == "bullish" else ("看跌/做空观察" if direction == "bearish" else "涨势反转预警")
     direction_color = "cus-bull" if direction == "bullish" else "cus-bear"
     direction_icon = "● ⬆" if direction == "bullish" else "● ⬇"
-    title = f"{analysis['symbol'].split('/')[0]}思路盯盘：{'向上突破确认' if direction == 'bullish' else '做空机会确认'}"
+    title = f"{analysis['symbol'].split('/')[0]}思路盯盘：{'向上突破确认' if direction == 'bullish' else ('做空机会确认' if direction == 'bearish' else '高位反转预警')}"
     support = analysis.get("support")
     resistance = analysis.get("resistance")
     judgement = (
         f"价格重新靠近或站上 {lark_price_value(resistance)}，近 30M/1H/2H 出现价格转强、持仓增加、多空人数比下降、CVD 上涨的犄型共振，说明主力仍在向上推而不是立即出货。"
         if direction == "bullish"
-        else f"价格跌向或跌破 {lark_price_value(support)}，近 30M/1H/2H 出现价格走弱、持仓增加、多空人数比回升、CVD 转负，说明空头主动性增强；若反抽无法收回支撑，可按做空机会观察。"
+        else (
+            f"价格跌向或跌破 {lark_price_value(support)}，近 30M/1H/2H 出现价格走弱、持仓增加、多空人数比回升、CVD 转负，说明空头主动性增强；若反抽无法收回支撑，可按做空机会观察。"
+            if direction == "bearish"
+            else f"高涨幅后近端结构开始转弱，CVD 转负并伴随持仓/资金费/基差中的至少一项恶化；这不等于立刻做空，但需要按涨势反转预警处理。"
+        )
     )
     return "\n".join([
         f"方向：<font color='{direction_color}'>{direction_icon} {direction_text}</font>",
@@ -2169,27 +2215,34 @@ def send_thought_analysis_push():
     webhook = os.getenv("LARK_THOUGHT_ANALYSIS_WEBHOOK", "").strip()
     if not webhook:
         return False
-    analysis = ake_thought_snapshot()
-    if analysis.get("source") != "live":
+    sections = []
+    push_records = []
+    for analysis in thought_watch_snapshots():
+        if analysis.get("source") != "live":
+            continue
+        direction = thought_push_direction(analysis)
+        if not direction:
+            continue
+        signal_key = thought_signal_key(analysis, direction)
+        existing = LarkPushState.query.filter_by(channel="thought_analysis", symbol=analysis["symbol"], signal_key=signal_key).first()
+        if existing and (datetime.now() - existing.pushed_at).total_seconds() < 6 * 3600:
+            continue
+        sections.append(thought_lark_message(analysis, direction))
+        push_records.append((existing, analysis, signal_key))
+    if not sections:
         return False
-    direction = thought_push_direction(analysis)
-    if not direction:
-        return False
-    signal_key = thought_signal_key(analysis, direction)
-    existing = LarkPushState.query.filter_by(channel="thought_analysis", symbol=analysis["symbol"], signal_key=signal_key).first()
-    if existing and (datetime.now() - existing.pushed_at).total_seconds() < 6 * 3600:
-        return False
-    payload = lark_trend_card([thought_lark_message(analysis, direction)])
+    payload = lark_trend_card(sections)
     try:
         request_obj = Request(webhook, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json", "User-Agent": "ArbiScope/1.0"})
         with urlopen(request_obj, timeout=10) as response:
             result = json.loads(response.read().decode("utf-8"))
         if not (result.get("code", 0) == 0 or result.get("StatusCode", 0) == 0):
             return False
-        if existing:
-            existing.pushed_at = datetime.now()
-        else:
-            db.session.add(LarkPushState(channel="thought_analysis", symbol=analysis["symbol"], signal_key=signal_key))
+        for existing, analysis, signal_key in push_records:
+            if existing:
+                existing.pushed_at = datetime.now()
+            else:
+                db.session.add(LarkPushState(channel="thought_analysis", symbol=analysis["symbol"], signal_key=signal_key))
         db.session.commit()
         return True
     except Exception:
@@ -2217,9 +2270,54 @@ def test_thought_analysis_push():
         return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 500
 
 
+def thought_us_item(us):
+    return {
+        "symbol": us["symbol"],
+        "entry": us["entry"],
+        "entry_time": us["entry_time"],
+        "last": us["last"],
+        "profit_pct": us["profit_pct"],
+        "support": us["support"],
+        "resistance": us["resistance"],
+        "oi_value": us["oi_value"],
+        "oi_change_pct": us["oi_change_pct"],
+        "ratio_value": us["ratio_value"],
+        "ratio_change_pct": us["ratio_change_pct"],
+        "cvd": us["cvd"],
+        "change_30m": us["change_30m"],
+        "change_4h": us["change_4h"],
+        "validation": us.get("validation") or {},
+        "source": us["source"],
+        "screenshot_url": None,
+        "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "US 为新增重点观察，等待第一次反转验证。"},
+        "my_thesis": "你的主线思路：US 和 AKE 一样属于阶段涨幅过大的山寨币，而当前大盘整体偏熊，一个山寨能逆势大涨，后面大概率会出现猛烈回撤或大砸。现在重点不是追涨，而是盯涨势什么时候反转。",
+        "assistant_thesis": "我的验证思路：US 的反转提醒不能只看价格跌一根 K。需要看到高位结构转弱、CVD 转负，并且持仓、资金费、基差/价差至少有一项开始恶化；如果同时出现放量冲高回落、OI 快速掉落或异常扩张后滞涨，反转概率会明显提高。",
+        "challenge_points": [
+            "需要警惕：涨幅过大不等于马上能空，强庄币可能继续逼空或高位横盘很久。",
+            "反转确认：必须等价格跌破近端支撑后反抽失败，或出现放量冲高回落、CVD 背离、OI 异常变化等组合证据。",
+            "提醒边界：单独资金费转负、单独基差扩大、单独价格回调，都只算预警，不算完整反转。"
+        ],
+        "validation_view": "US 当前进入涨势反转盯盘：重点看价格是否跌破近端结构，CVD 是否转负，持仓是否掉落或异常扩张后滞涨，资金费是否转负，基差/价差是否异常拉开。满足多条件共振才通过走势机器人推送。",
+        "take_profit": [
+            "当前无持仓记录，不做止盈计划；这里只记录反转观察。",
+            "如果后续出现做空机会，优先等跌破支撑后的反抽失败，而不是第一根阴线追空。",
+        ],
+        "stop_loss": [
+            "若尝试做空，价格重新站回跌破位并且 CVD 转正，应按反转失败处理。",
+            "如果 OI 继续扩张但价格重新突破压力位，说明仍可能逼空，不应硬扛空单。",
+        ],
+        "review_notes": [
+            "新增重点观察：US 涨幅过大且大盘环境偏弱，后续重点盯涨势反转。",
+            "反转触发框架：价格走弱 + CVD 转负 + OI/资金费/基差价差至少一项恶化。",
+            "执行约束：只在多项证据共振时推送，不因单次回调或插针提醒。",
+        ],
+    }
+
+
 @app.get("/api/daily-report/thoughts")
 def daily_report_thoughts():
     ake = ake_thought_snapshot()
+    us = thought_snapshot("US/USDT")
     return jsonify({
         "updated_at": ake["updated_at"],
         "items": [{
@@ -2272,7 +2370,7 @@ def daily_report_thoughts():
                 "需要修正：不能只盯多空人数比下跌；当前窗口首尾已经小幅回升，说明散户空头进一步拥挤的条件变弱。",
                 "后续验证：如果价格创新高但 CVD 不再创新高，或者 OI 上升但价格滞涨，要把判断从吸筹延续切换为高位换手/派发风险。",
             ],
-        }]
+        }, thought_us_item(us)]
     })
 
 
@@ -2570,7 +2668,7 @@ def background_announcement_scan():
             except Exception:
                 with app.app_context():
                     db.session.rollback()
-        time.sleep(300)
+        time.sleep(60)
 
 
 def background_daily_horn_scan():
@@ -2626,7 +2724,7 @@ def background_thought_analysis_push():
         except Exception:
             with app.app_context():
                 db.session.rollback()
-        time.sleep(60)
+        time.sleep(300)
 
 
 def start_background_workers():

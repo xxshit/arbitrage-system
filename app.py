@@ -2098,13 +2098,16 @@ def thought_snapshot(symbol):
             oi_window = oi[-candle_count:]
             ratio_window = ratios[-candle_count:]
             if len(window_rows) < candle_count or len(oi_window) < candle_count or len(ratio_window) < candle_count:
-                return {"price_change": None, "oi_change": None, "ratio_change": None, "cvd": None, "volume": None}
+                return {"price_change": None, "oi_change": None, "ratio_change": None, "cvd": None, "volume": None, "volume_ratio": None}
             price_change = percent_delta(float(window_rows[-1][4]), float(window_rows[0][1]))
             oi_change = percent_delta(float(oi_window[-1].get("sumOpenInterestValue", 0) or 0), float(oi_window[0].get("sumOpenInterestValue", 0) or 0))
             ratio_change = percent_delta(float(ratio_window[-1].get("longShortRatio", 0) or 0), float(ratio_window[0].get("longShortRatio", 0) or 0))
             cvd_value = sum((2 * float(row[10]) - float(row[7])) for row in window_rows)
             volume = sum(float(row[7]) for row in window_rows)
-            return {"price_change": price_change, "oi_change": oi_change, "ratio_change": ratio_change, "cvd": cvd_value, "volume": volume}
+            prior_rows = closed30[-(candle_count + 10):-candle_count] if len(closed30) >= candle_count + 10 else []
+            prior_average = (sum(float(row[7]) for row in prior_rows) / len(prior_rows) * candle_count) if prior_rows else None
+            volume_ratio = volume / prior_average if prior_average else None
+            return {"price_change": price_change, "oi_change": oi_change, "ratio_change": ratio_change, "cvd": cvd_value, "volume": volume, "volume_ratio": volume_ratio}
         index_price = float(premium.get("indexPrice", 0) or 0)
         mark_price = float(premium.get("markPrice", 0) or 0)
         return {
@@ -2143,6 +2146,11 @@ def thought_push_direction(analysis):
     valid = [item for item in checks if item.get("price_change") is not None and item.get("oi_change") is not None and item.get("ratio_change") is not None and item.get("cvd") is not None]
     if len(valid) < 3:
         return None
+    volume_spike = any((item.get("volume_ratio") or 0) >= 2.5 for item in valid)
+    funding_negative = analysis.get("funding_rate") is not None and analysis.get("funding_rate") < 0
+    basis_opened = analysis.get("basis") is not None and abs(analysis.get("basis")) >= 1.0
+    if volume_spike and funding_negative and basis_opened:
+        return "distribution"
     bullish_count = sum(item["price_change"] >= 0.8 and item["oi_change"] >= 1.0 and item["ratio_change"] <= -0.3 and item["cvd"] > 0 for item in valid)
     bearish_count = sum(item["price_change"] <= -0.8 and item["oi_change"] >= 1.0 and item["ratio_change"] >= 0.3 and item["cvd"] < 0 for item in valid)
     if bullish_count == 3:
@@ -2166,7 +2174,7 @@ def thought_signal_key(analysis, direction):
     support = analysis.get("support") or 0
     if direction == "bullish" and resistance and last >= resistance * 0.995:
         return "bullish-near-breakout"
-    if direction in {"bearish", "reversal"} and support and last <= support * 1.005:
+    if direction in {"bearish", "reversal", "distribution"} and support and last <= support * 1.005:
         return "bearish-near-breakdown"
     return f"{direction}-resonance"
 
@@ -2180,12 +2188,13 @@ def thought_lark_message(analysis, direction):
             f"持仓 {lark_plain_value(item.get('oi_change'), 2, '%')}，"
             f"多空人数比 {lark_plain_value(item.get('ratio_change'), 2, '%')}，"
             f"CVD {lark_compact_number(item.get('cvd'))}，"
-            f"成交额 {lark_compact_number(item.get('volume'))}"
+            f"成交额 {lark_compact_number(item.get('volume'))}，"
+            f"放量倍数 {lark_plain_value(item.get('volume_ratio'), 2, 'x')}"
         )
-    direction_text = "看涨/转强" if direction == "bullish" else ("看跌/做空观察" if direction == "bearish" else "涨势反转预警")
+    direction_text = "看涨/转强" if direction == "bullish" else ("看跌/做空观察" if direction == "bearish" else ("出货三件套预警" if direction == "distribution" else "涨势反转预警"))
     direction_color = "cus-bull" if direction == "bullish" else "cus-bear"
     direction_icon = "● ⬆" if direction == "bullish" else "● ⬇"
-    title = f"{analysis['symbol'].split('/')[0]}思路盯盘：{'向上突破确认' if direction == 'bullish' else ('做空机会确认' if direction == 'bearish' else '高位反转预警')}"
+    title = f"{analysis['symbol'].split('/')[0]}思路盯盘：{'向上突破确认' if direction == 'bullish' else ('做空机会确认' if direction == 'bearish' else ('出货三件套确认' if direction == 'distribution' else '高位反转预警'))}"
     support = analysis.get("support")
     resistance = analysis.get("resistance")
     judgement = (
@@ -2194,7 +2203,11 @@ def thought_lark_message(analysis, direction):
         else (
             f"价格跌向或跌破 {lark_price_value(support)}，近 30M/1H/2H 出现价格走弱、持仓增加、多空人数比回升、CVD 转负，说明空头主动性增强；若反抽无法收回支撑，可按做空机会观察。"
             if direction == "bearish"
-            else f"高涨幅后近端结构开始转弱，CVD 转负并伴随持仓/资金费/基差中的至少一项恶化；这不等于立刻做空，但需要按涨势反转预警处理。"
+            else (
+                f"出现大量放量、BN 资金费转负、BN 基差打开三件套。我的判断：这更接近主力出货/强制换手预警，不一定立刻追空，但必须停止按普通洗盘理解；后续重点看放量后是否跌破支撑、CVD 是否继续转负、反抽是否无力。"
+                if direction == "distribution"
+                else f"高涨幅后近端结构开始转弱，CVD 转负并伴随持仓/资金费/基差中的至少一项恶化；这不等于立刻做空，但需要按涨势反转预警处理。"
+            )
         )
     )
     return "\n".join([
@@ -2291,6 +2304,8 @@ def thought_us_item(us):
         "cvd": us["cvd"],
         "change_30m": us["change_30m"],
         "change_4h": us["change_4h"],
+        "funding_rate": us["funding_rate"],
+        "basis": us["basis"],
         "validation": us.get("validation") or {},
         "source": us["source"],
         "screenshot_url": None,
@@ -2302,7 +2317,7 @@ def thought_us_item(us):
             "反转确认：必须等价格跌破近端支撑后反抽失败，或出现放量冲高回落、CVD 背离、OI 异常变化等组合证据。",
             "提醒边界：单独资金费转负、单独基差扩大、单独价格回调，都只算预警，不算完整反转。"
         ],
-        "validation_view": "US 当前进入涨势反转盯盘：重点看价格是否跌破近端结构，CVD 是否转负，持仓是否掉落或异常扩张后滞涨，资金费是否转负，基差/价差是否异常拉开。满足多条件共振才通过走势机器人推送。",
+        "validation_view": "US 当前进入涨势反转盯盘：重点看价格是否跌破近端结构，CVD 是否转负，持仓是否掉落或异常扩张后滞涨，资金费是否转负，基差/价差是否异常拉开。若出现大量放量 + 资金费转负 + 基差打开，直接按出货三件套预警推送，并附带分析。",
         "take_profit": [
             "当前无持仓记录，不做止盈计划；这里只记录反转观察。",
             "如果后续出现做空机会，优先等跌破支撑后的反抽失败，而不是第一根阴线追空。",
@@ -2313,7 +2328,7 @@ def thought_us_item(us):
         ],
         "review_notes": [
             "新增重点观察：US 涨幅过大且大盘环境偏弱，后续重点盯涨势反转。",
-            "反转触发框架：价格走弱 + CVD 转负 + OI/资金费/基差价差至少一项恶化。",
+            "反转触发框架：价格走弱 + CVD 转负 + OI/资金费/基差价差至少一项恶化；若大量放量、资金费转负、基差打开同时出现，提升为出货三件套预警。",
             "执行约束：只在多项证据共振时推送，不因单次回调或插针提醒。",
         ],
     }
@@ -2345,6 +2360,8 @@ def daily_report_thoughts():
             "cvd": ake["cvd"],
             "change_30m": ake["change_30m"],
             "change_4h": ake["change_4h"],
+            "funding_rate": ake["funding_rate"],
+            "basis": ake["basis"],
             "validation": ake.get("validation") or {},
             "source": ake["source"],
             "screenshot_url": "/static/thoughts/ake_coinglass_20260716.png",
@@ -2357,7 +2374,7 @@ def daily_report_thoughts():
                 "需要修正：多空人数比如果开始回升，说明散户空头拥挤度下降，不能继续按“散户持续做空给主力接多单”这一条单独判断。",
                 "新的风控边界：资金费转负、基差拉开、价差拉开很适合做出货预警，但不能单独作为唯一证据；高位横盘派发也可能在资金费还没明显转负时发生。"
             ],
-            "validation_view": "已止盈后进入二次机会盯盘：多头机会看犄型再共振，即价格转强、持仓增加、多空人数比下降、CVD 上涨；空头机会看结构失效，即价格走弱、持仓增加、多空人数比回升、CVD 转负。只有近 30M、1H、2H 同时共振，才触发走势机器人推送。",
+            "validation_view": "已止盈后进入二次机会盯盘：多头机会看犄型再共振，即价格转强、持仓增加、多空人数比下降、CVD 上涨；空头机会看结构失效，即价格走弱、持仓增加、多空人数比回升、CVD 转负。若大量放量、资金费转负、基差打开同时出现，直接按出货三件套预警推送，并附带分析。",
             "take_profit": [
                 "已执行：0.00092 左右止盈，约相对 0.00085 入场获得 8% 左右收益，本次交易按盈利完成记录。",
                 "复盘修正：这次 0.00092 止盈可能偏早。若后续仍无放量出货、持仓不掉、基差/价差未异常拉开、资金费未恶化，可以考虑保留底仓或等待二次确认，而不是小回调直接全平。",
@@ -2375,6 +2392,7 @@ def daily_report_thoughts():
                 "止盈检讨：从底部约 0.00018 到 0.0009 以上已经约 5 倍，但没有明显放大量、持仓没掉，说明主力未必已经进入出货段；0.00092 附近的小回调可能更像诱导平多，完全止盈可能错过主升延续。",
                 "正确点：价格、CVD、持仓共振上行，确实支持原先的犄型延续假设。",
                 "出货预警框架：真正要防主力出货，应重点盯狂暴放量、持仓掉落或异常扩张后滞涨、CVD 背离、基差/价差拉开、资金费快速转负；这些条件越多共振，越接近出货确认。",
+                "强提醒规则：AKE 若同时出现大量放量、资金费转负、基差打开，必须提醒，并按主力出货/强制换手预警给出分析。",
                 "新增观察：用户认为大涨前的回调可能是诱导别人平多。后续要验证回调是否只洗出短线多头，而不是主力派发；判断重点是回调时 OI 是否稳定、CVD 是否快速转负、关键支撑是否被有效跌破。",
                 "后续任务：继续盯 AKE 的新多/新空机会。多头按犄型再共振推送；空头按跌破支撑后的新空共振推送，不因单根 K 线波动提醒。",
                 "需要修正：不能只盯多空人数比下跌；当前窗口首尾已经小幅回升，说明散户空头进一步拥挤的条件变弱。",

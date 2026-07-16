@@ -2140,16 +2140,16 @@ def thought_lark_message(analysis, direction):
             f"CVD {lark_compact_number(item.get('cvd'))}，"
             f"成交额 {lark_compact_number(item.get('volume'))}"
         )
-    direction_text = "看涨/转强" if direction == "bullish" else "看跌/转弱"
+    direction_text = "看涨/转强" if direction == "bullish" else "看跌/做空观察"
     direction_color = "cus-bull" if direction == "bullish" else "cus-bear"
     direction_icon = "● ⬆" if direction == "bullish" else "● ⬇"
-    title = f"{analysis['symbol'].split('/')[0]}思路盯盘：{'向上突破确认' if direction == 'bullish' else '向下转弱确认'}"
+    title = f"{analysis['symbol'].split('/')[0]}思路盯盘：{'向上突破确认' if direction == 'bullish' else '做空机会确认'}"
     support = analysis.get("support")
     resistance = analysis.get("resistance")
     judgement = (
         f"价格重新靠近或站上 {lark_price_value(resistance)}，近 30M/1H/2H 出现价格转强、持仓增加、多空人数比下降、CVD 上涨的犄型共振，说明主力仍在向上推而不是立即出货。"
         if direction == "bullish"
-        else f"价格跌向 {lark_price_value(support)}，持仓仍扩张但 CVD 转弱，多空人数比反向回升，需要按结构失效处理。"
+        else f"价格跌向或跌破 {lark_price_value(support)}，近 30M/1H/2H 出现价格走弱、持仓增加、多空人数比回升、CVD 转负，说明空头主动性增强；若反抽无法收回支撑，可按做空机会观察。"
     )
     return "\n".join([
         f"方向：<font color='{direction_color}'>{direction_icon} {direction_text}</font>",
@@ -2241,14 +2241,14 @@ def daily_report_thoughts():
             "source": ake["source"],
             "screenshot_url": "/static/thoughts/ake_coinglass_20260716.png",
             "thesis_win_rate": {"wins": 2, "losses": 0, "pending": 1, "rate": 100.0, "note": "AKE 已按用户思路完成一次盈利止盈；样本仍少，只作为当前复盘统计。"},
-            "my_thesis": "你的主线思路：犄型走势必须是持仓上涨，同时多空人数比呈对称下跌，符合主力做多、散户做空；如果 CVD 也上涨，更有力说明主动买入资金在推进，主力可能仍在布置多单。AKE 入场点 0.00085，已在 0.00092 左右止盈，本次走势判断记为正确。你新增观察：当前大涨前的回调可能是在诱导别人平多。",
-            "assistant_thesis": "我的验证思路：这次 AKE 从 0.00085 到 0.00092 左右的止盈验证了犄型走势的有效性。后续若继续观察，重点不是追认已经盈利的旧仓，而是验证“回调诱导平多”是否成立：回调时价格不破关键支撑，持仓不塌，CVD 或承接不明显转弱，随后重新放量上破，才说明诱导平多后继续拉升的概率提高。",
+            "my_thesis": "你的主线思路：犄型走势必须是持仓上涨，同时多空人数比呈对称下跌，符合主力做多、散户做空；如果 CVD 也上涨，更有力说明主动买入资金在推进，主力可能仍在布置多单。AKE 入场点 0.00085，已在 0.00092 左右止盈，本次走势判断记为正确。当前进入二次机会盯盘：多头看回调是否诱导平多后再拉，空头看结构是否真正失效。",
+            "assistant_thesis": "我的验证思路：这次 AKE 从 0.00085 到 0.00092 左右的止盈验证了犄型走势的有效性。后续不追认旧仓，只找新机会。多头机会必须看到回调不破关键支撑、持仓不塌、CVD 不持续转负，随后重新放量上破；空头机会必须看到价格跌破支撑后反抽失败，持仓扩张、CVD 转负、多空人数比回升，说明主动空头开始占优。",
             "challenge_points": [
                 "不完全认可：把正资金费率直接理解为主力希望散户做空，这个推断证据不足。正资金费只能说明多头付费，是否为主力诱空还需要头部账户、成交量和后续价格确认。",
                 "需要警惕：如果价格继续上冲但 CVD 走平或下滑，说明主动买入不足，原来的多头延续逻辑会减弱。",
                 "需要修正：多空人数比如果开始回升，说明散户空头拥挤度下降，不能继续按“散户持续做空给主力接多单”这一条单独判断。"
             ],
-            "validation_view": "盯盘验证以犄型走势为核心：持仓必须上涨，多空人数比必须下跌，CVD 最好同步上涨；价格只作为结构确认，不单独作为推送理由。只有这些条件在近 30M、1H、2H 重新共振，才触发走势机器人推送。",
+            "validation_view": "已止盈后进入二次机会盯盘：多头机会看犄型再共振，即价格转强、持仓增加、多空人数比下降、CVD 上涨；空头机会看结构失效，即价格走弱、持仓增加、多空人数比回升、CVD 转负。只有近 30M、1H、2H 同时共振，才触发走势机器人推送。",
             "take_profit": [
                 "已执行：0.00092 左右止盈，约相对 0.00085 入场获得 8% 左右收益，本次交易按盈利完成记录。",
                 f"{max(ake['resistance'] or 0, ake['entry'] * 1.16):.8f} 附近：第一止盈区，约等于你的入场价上方 16% 且接近近期 30M 压力位，适合先减一部分锁住利润。",
@@ -2264,6 +2264,7 @@ def daily_report_thoughts():
                 "已验证：用户在 0.00085 做多、0.00092 左右止盈，方向判断正确，犄型走势这次确实给出了有效的偏多线索。",
                 "正确点：价格、CVD、持仓共振上行，确实支持原先的犄型延续假设。",
                 "新增观察：用户认为大涨前的回调可能是诱导别人平多。后续要验证回调是否只洗出短线多头，而不是主力派发；判断重点是回调时 OI 是否稳定、CVD 是否快速转负、关键支撑是否被有效跌破。",
+                "后续任务：继续盯 AKE 的新多/新空机会。多头按犄型再共振推送；空头按跌破支撑后的新空共振推送，不因单根 K 线波动提醒。",
                 "需要修正：不能只盯多空人数比下跌；当前窗口首尾已经小幅回升，说明散户空头进一步拥挤的条件变弱。",
                 "后续验证：如果价格创新高但 CVD 不再创新高，或者 OI 上升但价格滞涨，要把判断从吸筹延续切换为高位换手/派发风险。",
             ],

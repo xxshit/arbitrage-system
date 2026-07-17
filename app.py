@@ -205,6 +205,18 @@ class LarkPushState(db.Model):
     __table_args__ = (db.UniqueConstraint("channel", "symbol", "signal_key", name="uq_lark_push_state"),)
 
 
+class AutomationStatus(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    task_key = db.Column(db.String(80), nullable=False, unique=True, index=True)
+    label = db.Column(db.String(120), nullable=False)
+    last_started_at = db.Column(db.DateTime)
+    last_finished_at = db.Column(db.DateTime)
+    last_success_at = db.Column(db.DateTime)
+    last_error_at = db.Column(db.DateTime)
+    last_error = db.Column(db.String(1000))
+    updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+
+
 class TransferNetworkSnapshot(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     exchange = db.Column(db.String(30), nullable=False)
@@ -417,6 +429,59 @@ def mark_announced_delistings(groups):
     delisted = announced_delisted_symbols()
     for group in groups:
         group["delisting_announced"] = group["symbol"] in delisted
+
+
+AUTOMATION_LABELS = {
+    "announcement_scan": "上下架公告抓取",
+    "daily_horn_scan": "日报趋势扫描",
+    "daily_lark_trend_push": "日报趋势推送",
+    "thought_analysis_push": "思路分析盯盘推送",
+    "transfer_network_sync": "充提网络同步",
+    "index_component_sync": "指数成分同步",
+}
+
+
+def mark_automation_status(task_key, state, error=None, label=None):
+    now = datetime.now()
+    status = AutomationStatus.query.filter_by(task_key=task_key).first()
+    if not status:
+        status = AutomationStatus(task_key=task_key, label=label or AUTOMATION_LABELS.get(task_key, task_key))
+        db.session.add(status)
+    status.label = label or AUTOMATION_LABELS.get(task_key, status.label)
+    status.updated_at = now
+    if state == "started":
+        status.last_started_at = now
+    elif state == "success":
+        status.last_finished_at = now
+        status.last_success_at = now
+        status.last_error = None
+    elif state == "error":
+        status.last_finished_at = now
+        status.last_error_at = now
+        status.last_error = str(error)[:1000] if error else "unknown error"
+    db.session.commit()
+
+
+def automation_payload(task_key):
+    status = AutomationStatus.query.filter_by(task_key=task_key).first()
+
+    def fmt(value):
+        return value.replace(tzinfo=timezone.utc).astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S") if value else None
+
+    return {
+        "task_key": task_key,
+        "label": AUTOMATION_LABELS.get(task_key, task_key),
+        "last_started_at": fmt(status.last_started_at) if status else None,
+        "last_finished_at": fmt(status.last_finished_at) if status else None,
+        "last_success_at": fmt(status.last_success_at) if status else (datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d 08:00:00") if task_key == "daily_lark_trend_push" and lark_daily_trend_already_pushed(datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")) else None),
+        "last_error_at": fmt(status.last_error_at) if status else None,
+        "last_error": status.last_error if status else None,
+        "ran_today": bool((status and status.last_success_at and status.last_success_at.astimezone(SHANGHAI_TZ).date() == datetime.now(SHANGHAI_TZ).date()) or (task_key == "daily_lark_trend_push" and lark_daily_trend_already_pushed(datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")))),
+    }
+
+
+def automation_statuses(*task_keys):
+    return {key: automation_payload(key) for key in task_keys}
 
 
 def as_available(value, default=False):
@@ -2045,7 +2110,7 @@ def daily_report_trends():
     report_date = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
     horn_rows = DailyHornSignal.query.filter_by(report_date=report_date).order_by(DailyHornSignal.score.desc()).all()
     signal_payload = lambda item: {"symbol": item.symbol, "timeframe": item.timeframe, "price_change": item.price_change, "oi_change": item.oi_change, "oi_value": item.oi_value, "ratio_change": item.ratio_change, "ratio_value": item.ratio_value, "cvd_confirmed": item.cvd_confirmed, "score": item.score}
-    return jsonify({"updated_at": snapshot["updated_at"], "rising": sorted(valid, key=lambda item: item["change_24h"], reverse=True)[:20], "falling": sorted(valid, key=lambda item: item["change_24h"])[:20], "horn_30m": [signal_payload(item) for item in horn_rows if item.timeframe == "30m"], "horn_4h": [signal_payload(item) for item in horn_rows if item.timeframe == "4h"]})
+    return jsonify({"updated_at": snapshot["updated_at"], "rising": sorted(valid, key=lambda item: item["change_24h"], reverse=True)[:20], "falling": sorted(valid, key=lambda item: item["change_24h"])[:20], "horn_30m": [signal_payload(item) for item in horn_rows if item.timeframe == "30m"], "horn_4h": [signal_payload(item) for item in horn_rows if item.timeframe == "4h"], "automation_status": automation_statuses("daily_horn_scan", "daily_lark_trend_push")})
 
 
 THOUGHT_WATCHLIST = {
@@ -2344,6 +2409,9 @@ def thought_us_item(us):
         "validation": us.get("validation") or {},
         "source": us["source"],
         "screenshot_url": None,
+        "thought_summary": "US 目前只做高涨幅反转观察，不因涨多直接做空，等待结构走弱、CVD 转负和资金/基差恶化共振。",
+        "user_mistakes": ["当前暂无已验证交易，先不统计你的判断偏差。"],
+        "assistant_mistakes": ["需要避免因高涨幅本身过早给出反转结论。"],
         "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "US 为新增重点观察，等待第一次反转验证。"},
         "my_thesis": "你的主线思路：US 和 AKE 一样属于阶段涨幅过大的山寨币，而当前大盘整体偏熊，一个山寨能逆势大涨，后面大概率会出现猛烈回撤或大砸。现在重点不是追涨，而是盯涨势什么时候反转。",
         "assistant_thesis": "我的验证思路：US 的反转提醒不能只看价格跌一根 K。需要看到高位结构转弱、CVD 转负，并且持仓、资金费、基差/价差至少有一项开始恶化；如果同时出现放量冲高回落、OI 快速掉落或异常扩张后滞涨，反转概率会明显提高。",
@@ -2396,6 +2464,9 @@ def thought_t_item(t):
         "validation": t.get("validation") or {},
         "source": t["source"],
         "screenshot_url": "/static/thoughts/t_coinglass_20260717.png",
+        "thought_summary": "T 是做空持仓思路：前期犄型主升后出现负资费、负基差和结算周期缩短，当前重点验证 0.0045 附近反抽是否失败。",
+        "user_mistakes": ["风险点：负资费会增加做空持仓成本，若价格横盘不跌，不能只靠负资费继续硬扛。"],
+        "assistant_mistakes": ["需要持续验证 0.0045 是否真正反抽失败，不能只因为前期出货迹象就忽略二次吸筹可能。"],
         "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "T 为新增做空思路，等待后续验证。"},
         "my_thesis": "你的主线思路：T 在 7 月 11 日到 7 月 12 日出现持仓涨、多空人数比跌、CVD 涨的典型犄型走势，币价从约 0.003 拉到约 0.006，接近翻倍。拉升过程中放量拉基差，资费跟随基差走，在结算时顶满，且结算周期从 4H 变成 1H。你认为这是主力出货换手信号。后续价格缩量下跌，中间几次小反弹依然维持 1H 结算，多头每小时收资费，更像诱多。今天 11 点到 13 点左右反弹到 0.0045 附近，放量、基差到 -1% 以下、资费负到约 -0.3%，你判断仍是下跌行情中的诱多，所以在 0.0045 左右开空。",
         "assistant_thesis": "我的验证思路：你的空单逻辑是连贯的，核心不是单纯看跌，而是看到前期主升后的出货换手特征：高位放量、基差打开、资费极端化、结算周期缩短、随后缩量下跌。当前 0.0045 附近的反弹如果不能有效收回前高，且 CVD 不持续转正、持仓扩张但价格滞涨、负资费和负基差继续维持，那么更支持诱多后的下跌延续。风险点是：若价格重新站稳 0.0045 上方并放量突破，CVD 转正，基差快速修复，说明空头逻辑被削弱。",
@@ -2453,6 +2524,15 @@ def daily_report_thoughts():
             "validation": ake.get("validation") or {},
             "source": ake["source"],
             "screenshot_url": "/static/thoughts/ake_coinglass_20260716.png",
+            "thought_summary": "AKE 的核心结论：0.00085 做多思路已验证，0.00092 止盈盈利但偏保守；若正资费和正基差仍在，不能轻易推送看空。",
+            "user_mistakes": [
+                "0.00092 全部止盈可能偏早：底部到高位已涨约 5 倍，但未见明显巨量出货、持仓也未快速掉落。",
+                "正资费不能单独解释成主力一定在诱空，只能作为合约多头拥挤和结构偏强的证据之一。",
+            ],
+            "assistant_mistakes": [
+                "之前对 AKE 的看空推送过早，忽略了正资费 + 正基差代表合约溢价仍在。",
+                "以后 AKE/US 这类盯盘币，只要正资费和正基差同时存在，就阻止普通看空/反转推送。",
+            ],
             "thesis_win_rate": {"wins": 2, "losses": 0, "pending": 1, "rate": 100.0, "note": "AKE 已按用户思路完成一次盈利止盈；样本仍少，只作为当前复盘统计。"},
             "my_thesis": "你的主线思路：犄型走势必须是持仓上涨，同时多空人数比呈对称下跌，符合主力做多、散户做空；如果 CVD 也上涨，更有力说明主动买入资金在推进。AKE 从底部约 0.00018 拉到 0.0009 以上，已经接近 5 倍，但过程中没有明显放大量、持仓也没掉，所以 0.00092 左右的小回调更可能是诱导散户平多，而不是主力已经完成出货。真正出货更可能是狂暴放量、持仓异常变化、基差/价差拉开，并且资金费被打成负数。",
             "assistant_thesis": "我的验证思路：这次 0.00092 止盈是盈利交易，但从复盘角度看可能偏保守。后续不追认旧仓，只找新机会；如果回调不破关键支撑、持仓不塌、CVD 不持续转负，随后重新放量上破，说明诱导平多后再拉的概率提高。真正出货预警需要多条件确认：巨量冲高或砸盘、OI 快速回落或异常扩张后价格滞涨、CVD 背离、基差/价差明显拉开、资金费转负或快速恶化。",
@@ -2494,7 +2574,14 @@ def daily_report_thoughts():
 def daily_report_listings():
     cutoff = datetime.now() - timedelta(days=30)
     events = ListingEvent.query.filter(ListingEvent.occurred_at >= cutoff).order_by(ListingEvent.occurred_at.desc()).limit(100).all()
-    return jsonify({"events": [{"exchange": item.exchange, "symbol": item.symbol if "/" in item.symbol else (item.symbol[:-4] + "/USDT" if item.symbol.endswith("USDT") else item.symbol), "type": item.event_type, "title": item.title, "source_url": item.source_url, "occurred_at": item.occurred_at.strftime("%m-%d %H:%M:%S"), "effective_at": item.effective_at.strftime("%Y-%m-%d %H:%M UTC+8") if item.effective_at else None} for item in events]})
+    return jsonify({"events": [{"exchange": item.exchange, "symbol": item.symbol if "/" in item.symbol else (item.symbol[:-4] + "/USDT" if item.symbol.endswith("USDT") else item.symbol), "type": item.event_type, "title": item.title, "source_url": item.source_url, "occurred_at": item.occurred_at.strftime("%m-%d %H:%M:%S"), "effective_at": item.effective_at.strftime("%Y-%m-%d %H:%M UTC+8") if item.effective_at else None} for item in events], "automation_status": automation_statuses("announcement_scan")})
+
+
+@app.get("/api/automation-status")
+def automation_status_api():
+    keys = request.args.get("keys", "")
+    task_keys = [key.strip() for key in keys.split(",") if key.strip()] or list(AUTOMATION_LABELS)
+    return jsonify({"statuses": automation_statuses(*task_keys), "updated_at": datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")})
 
 
 @app.get("/api/gainers-losers")
@@ -2782,11 +2869,14 @@ def background_announcement_scan():
         if now.hour >= ANNOUNCEMENT_SCAN_HOUR and LAST_ANNOUNCEMENT_SCAN_DATE != now.date():
             try:
                 with app.app_context():
+                    mark_automation_status("announcement_scan", "started")
                     scan_exchange_announcements()
+                    mark_automation_status("announcement_scan", "success")
                 LAST_ANNOUNCEMENT_SCAN_DATE = now.date()
-            except Exception:
+            except Exception as exc:
                 with app.app_context():
                     db.session.rollback()
+                    mark_automation_status("announcement_scan", "error", exc)
         time.sleep(60)
 
 
@@ -2798,16 +2888,25 @@ def background_daily_horn_scan():
         if now.hour == HORN_SCAN_HOUR and LAST_HORN_SCAN_DATE != now.date():
             try:
                 with app.app_context():
+                    mark_automation_status("daily_horn_scan", "started")
                     if not lark_daily_trend_already_pushed(report_date):
                         scan_daily_horn_signals()
+                        mark_automation_status("daily_horn_scan", "success")
+                        mark_automation_status("daily_lark_trend_push", "started")
                         if send_daily_lark_trend_report():
                             mark_lark_daily_trend_pushed(report_date)
+                            mark_automation_status("daily_lark_trend_push", "success")
+                        else:
+                            mark_automation_status("daily_lark_trend_push", "error", "未发送：无 webhook、无候选或 Lark 返回失败")
+                    else:
+                        mark_automation_status("daily_horn_scan", "success")
                     LAST_HORN_SCAN_DATE = now.date()
                     if lark_daily_trend_already_pushed(report_date):
                         LAST_LARK_TREND_PUSH_DATE = now.date()
-            except Exception:
+            except Exception as exc:
                 with app.app_context():
                     db.session.rollback()
+                    mark_automation_status("daily_horn_scan", "error", exc)
         time.sleep(60)
 
 
@@ -2816,10 +2915,13 @@ def background_transfer_network_sync():
     while True:
         try:
             with app.app_context():
+                mark_automation_status("transfer_network_sync", "started")
                 refresh_public_transfer_networks()
-        except Exception:
+                mark_automation_status("transfer_network_sync", "success")
+        except Exception as exc:
             with app.app_context():
                 db.session.rollback()
+                mark_automation_status("transfer_network_sync", "error", exc)
         time.sleep(TRANSFER_NETWORK_SYNC_SECONDS)
 
 
@@ -2828,9 +2930,13 @@ def background_index_component_sync():
     while True:
         try:
             with app.app_context():
+                mark_automation_status("index_component_sync", "started")
                 refresh_index_components()
-        except Exception:
-            db.session.rollback()
+                mark_automation_status("index_component_sync", "success")
+        except Exception as exc:
+            with app.app_context():
+                db.session.rollback()
+                mark_automation_status("index_component_sync", "error", exc)
         time.sleep(INDEX_COMPONENT_REFRESH_SECONDS)
 
 
@@ -2839,10 +2945,13 @@ def background_thought_analysis_push():
     while True:
         try:
             with app.app_context():
+                mark_automation_status("thought_analysis_push", "started")
                 send_thought_analysis_push()
-        except Exception:
+                mark_automation_status("thought_analysis_push", "success")
+        except Exception as exc:
             with app.app_context():
                 db.session.rollback()
+                mark_automation_status("thought_analysis_push", "error", exc)
         time.sleep(300)
 
 

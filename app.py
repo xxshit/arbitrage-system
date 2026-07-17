@@ -1044,13 +1044,38 @@ def backfill_price_history(groups, batch_size=2):
 
 
 def create_alert(symbol, alert_type, message, row, strategy="spot_futures", long_exchange=None, short_exchange="Binance"):
-    recent = AlertEvent.query.filter_by(symbol=symbol, strategy=strategy).order_by(AlertEvent.created_at.desc()).first()
-    if recent:
-        open_expanded = abs(row["open_spread"] or 0) >= abs(recent.open_spread or 0) + 0.2
-        basis_expanded = abs(row["basis"] or 0) >= abs(recent.basis or 0) + 0.2
-        if not alert_type.startswith("rapid_") and not (open_expanded or basis_expanded):
+    recent = AlertEvent.query.filter_by(
+        symbol=symbol,
+        strategy=strategy,
+        alert_type=alert_type,
+        long_exchange=long_exchange,
+        short_exchange=short_exchange,
+    ).order_by(AlertEvent.created_at.desc()).first()
+    current_open = float(row.get("open_spread") or 0)
+    current_basis = float(row.get("basis") or 0)
+    if "basis" in alert_type:
+        current_abs = abs(current_basis)
+        recent_abs = abs(recent.basis or 0) if recent else None
+    else:
+        current_abs = abs(current_open)
+        recent_abs = abs(recent.open_spread or 0) if recent else None
+    if recent and current_abs < recent_abs + 0.2:
+        return
+    recent_window = datetime.now() - timedelta(minutes=30)
+    recent_same_type = AlertEvent.query.filter(
+        AlertEvent.symbol == symbol,
+        AlertEvent.strategy == strategy,
+        AlertEvent.alert_type == alert_type,
+        AlertEvent.created_at >= recent_window,
+    ).all()
+    if recent_same_type:
+        if "basis" in alert_type:
+            peak_abs = max(abs(item.basis or 0) for item in recent_same_type)
+        else:
+            peak_abs = max(abs(item.open_spread or 0) for item in recent_same_type)
+        if current_abs < peak_abs + 0.2:
             return
-        # 扩大后的确认信号作为新的时间线节点保留；界面会按币种聚合，避免重复卡片。
+    # 扩大后的确认信号作为新的时间线节点保留；界面会按币种聚合，避免重复卡片。
     db.session.add(AlertEvent(symbol=symbol, strategy=strategy, long_exchange=long_exchange, short_exchange=short_exchange, alert_type=alert_type, message=message, open_spread=row["open_spread"], close_spread=row["close_spread"], basis=row["basis"], funding_rate=row["funding_rate"]))
 
 
@@ -1200,7 +1225,7 @@ def evaluate_alerts(groups):
                 alert_type, exchange = active_pump_key[1], active_pump_key[2]
                 label = "合约拉升" if alert_type == "futures_pump" else "现货拉升"
                 if validate_spot_alert_quote(symbol, row, alert_type):
-                    create_alert(symbol, alert_type, f"{exchange} 现货与 Binance 合约出现确认后的{label}", row)
+                    create_alert(symbol, alert_type, f"{exchange} 现货与 Binance 合约出现确认后的{label}", row, "spot_futures", row["long_exchange"], "Binance")
                 else:
                     PUMP_CANDIDATES.pop(active_pump_key, None)
     db.session.commit()

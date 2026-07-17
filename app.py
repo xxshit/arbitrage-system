@@ -2180,13 +2180,17 @@ def thought_push_direction(analysis):
     volume_spike = any((item.get("volume_ratio") or 0) >= 2.5 for item in valid)
     funding_negative = analysis.get("funding_rate") is not None and analysis.get("funding_rate") < 0
     basis_opened = analysis.get("basis") is not None and abs(analysis.get("basis")) >= 1.0
+    contract_premium_alive = (
+        analysis.get("funding_rate") is not None and analysis.get("funding_rate") > 0
+        and analysis.get("basis") is not None and analysis.get("basis") > 0
+    )
     if volume_spike and funding_negative and basis_opened:
         return "distribution"
     bullish_count = sum(item["price_change"] >= 0.8 and item["oi_change"] >= 1.0 and item["ratio_change"] <= -0.3 and item["cvd"] > 0 for item in valid)
     bearish_count = sum(item["price_change"] <= -0.8 and item["oi_change"] >= 1.0 and item["ratio_change"] >= 0.3 and item["cvd"] < 0 for item in valid)
     if bullish_count == 3:
         return "bullish"
-    if bearish_count == 3:
+    if bearish_count == 3 and not contract_premium_alive:
         return "bearish"
     reversal_count = sum(item["price_change"] <= -0.8 and item["cvd"] < 0 for item in valid)
     pressure = (
@@ -2194,7 +2198,7 @@ def thought_push_direction(analysis):
         or (analysis.get("funding_rate") is not None and analysis.get("funding_rate") < 0)
         or (analysis.get("basis") is not None and abs(analysis.get("basis")) >= 1.0)
     )
-    if reversal_count >= 2 and pressure:
+    if reversal_count >= 2 and pressure and not contract_premium_alive:
         return "reversal"
     return None
 
@@ -2573,7 +2577,7 @@ def simple_arbitrage_thinking():
                 continue
             for row in group["rows"]:
                 if row["open_spread"] > 0 and row["funding_rate"] > 0.005:
-                    spot_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": "Binance", "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_rate"], "funding_current": row["funding_rate"], "funding_previous": row.get("funding_previous"), "funding_24h": row.get("funding_24h"), "funding_3d": row.get("funding_3d"), "long_is_spot": True, "short_is_spot": False, "long_open_interest": None, "short_open_interest": row.get("futures_open_interest"), "long_volume": row.get("spot_volume"), "short_volume": row.get("futures_volume")})
+                    spot_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": "Binance", "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_rate"], "funding_current": row["funding_rate"], "funding_previous": row.get("funding_previous"), "funding_24h": row.get("funding_24h"), "funding_3d": row.get("funding_3d"), "long_is_spot": True, "short_is_spot": False, "long_interval": None, "short_interval": row.get("funding_interval_hours"), "long_open_interest": None, "short_open_interest": row.get("futures_open_interest"), "long_volume": row.get("spot_volume"), "short_volume": row.get("futures_volume")})
     dual_simple = []
     if dual_snapshot:
         dual_stats = funding_statistics([group["symbol"].replace("/", "") for group in dual_snapshot["symbols"]])
@@ -2583,7 +2587,7 @@ def simple_arbitrage_thinking():
                 # Current net funding must be positive and the Binance settlement side
                 # must also have remained positive across recent periods.
                 if row["open_spread"] > 0 and (row.get("funding_difference") or 0) > 0.005 and positive_binance_funding_streak(group["symbol"], minimum=0, periods=3):
-                    dual_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": row["short_exchange"], "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_difference"], "funding_current": row.get("funding_difference"), "funding_previous": stats.get("previous"), "funding_24h": stats.get("day_1"), "funding_3d": stats.get("day_3"), "long_is_spot": False, "short_is_spot": False, "long_open_interest": row.get("long_open_interest"), "short_open_interest": row.get("short_open_interest"), "long_volume": row.get("long_volume"), "short_volume": row.get("short_volume")})
+                    dual_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": row["short_exchange"], "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_difference"], "funding_current": row.get("funding_difference"), "funding_previous": stats.get("previous"), "funding_24h": stats.get("day_1"), "funding_3d": stats.get("day_3"), "long_is_spot": False, "short_is_spot": False, "long_interval": row.get("long_funding_interval_hours"), "short_interval": row.get("short_funding_interval_hours"), "long_open_interest": row.get("long_open_interest"), "short_open_interest": row.get("short_open_interest"), "long_volume": row.get("long_volume"), "short_volume": row.get("short_volume")})
     return jsonify({"spot_simple": sorted(spot_simple, key=lambda item: item["open_spread"], reverse=True), "dual_simple": sorted(dual_simple, key=lambda item: item["open_spread"], reverse=True)})
 
 

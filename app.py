@@ -2069,6 +2069,12 @@ THOUGHT_WATCHLIST = {
         "entry_time": "重点反转观察",
         "fallback": {},
     },
+    "T/USDT": {
+        "entry": 0.0045,
+        "entry_time": "2026-07-17 11:00-13:00 区间",
+        "side": "short",
+        "fallback": {},
+    },
 }
 
 
@@ -2359,10 +2365,63 @@ def thought_us_item(us):
     }
 
 
+def thought_t_item(t):
+    short_profit = percent_delta(t["entry"], t["last"]) if t.get("last") and t.get("entry") else None
+    return {
+        "symbol": t["symbol"],
+        "trade_side": "做空",
+        "trade_status": "持仓中",
+        "entry": t["entry"],
+        "entry_time": t["entry_time"],
+        "exit": None,
+        "exit_time": None,
+        "last": t["last"],
+        "profit_pct": short_profit,
+        "realized_profit_pct": None,
+        "support": t["support"],
+        "resistance": t["resistance"],
+        "oi_value": t["oi_value"],
+        "oi_change_pct": t["oi_change_pct"],
+        "ratio_value": t["ratio_value"],
+        "ratio_change_pct": t["ratio_change_pct"],
+        "cvd": t["cvd"],
+        "change_30m": t["change_30m"],
+        "change_4h": t["change_4h"],
+        "funding_rate": t["funding_rate"],
+        "basis": t["basis"],
+        "validation": t.get("validation") or {},
+        "source": t["source"],
+        "screenshot_url": None,
+        "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "T 为新增做空思路，等待后续验证。"},
+        "my_thesis": "你的主线思路：T 在 7 月 11 日到 7 月 12 日出现持仓涨、多空人数比跌、CVD 涨的典型犄型走势，币价从约 0.003 拉到约 0.006，接近翻倍。拉升过程中放量拉基差，资费跟随基差走，在结算时顶满，且结算周期从 4H 变成 1H。你认为这是主力出货换手信号。后续价格缩量下跌，中间几次小反弹依然维持 1H 结算，多头每小时收资费，更像诱多。今天 11 点到 13 点左右反弹到 0.0045 附近，放量、基差到 -1% 以下、资费负到约 -0.3%，你判断仍是下跌行情中的诱多，所以在 0.0045 左右开空。",
+        "assistant_thesis": "我的验证思路：你的空单逻辑是连贯的，核心不是单纯看跌，而是看到前期主升后的出货换手特征：高位放量、基差打开、资费极端化、结算周期缩短、随后缩量下跌。当前 0.0045 附近的反弹如果不能有效收回前高，且 CVD 不持续转正、持仓扩张但价格滞涨、负资费和负基差继续维持，那么更支持诱多后的下跌延续。风险点是：若价格重新站稳 0.0045 上方并放量突破，CVD 转正，基差快速修复，说明空头逻辑被削弱。",
+        "challenge_points": [
+            "需要警惕：负资金费会让做空方付费，如果价格长时间横盘不跌，持仓成本会变高。",
+            "反证条件：价格放量重新站稳 0.0045 上方，CVD 转正，基差从 -1% 以下快速修复，说明这次可能不是诱多而是重新吸筹。",
+            "执行重点：不要只因为资费负就加空，必须看价格是否反抽失败、量能是否衰减、持仓是否配合。"
+        ],
+        "validation_view": "T 当前按做空持仓盯盘：入场约 0.0045。继续看 0.0045 附近是否反抽失败，CVD 是否继续弱，基差是否维持负扩张，资费是否仍极端负值。若价格跌破近端支撑且反抽无力，空单逻辑增强；若放量站回 0.0045 上方并修复基差，空单逻辑降级。",
+        "take_profit": [
+            "第一观察：若价格从 0.0045 下方继续走弱，先看前低附近是否放量承接。",
+            "若跌破前低且 CVD 继续转负，可保留部分空单看下跌延续。",
+        ],
+        "stop_loss": [
+            "若价格放量站稳 0.0045 上方，且 CVD 转正、基差快速修复，应视为空单逻辑减弱。",
+            "若负资费维持但价格不跌反涨，说明空头拥挤，不能只靠资费继续硬扛。",
+        ],
+        "review_notes": [
+            "新增做空思路：T 0.0045 附近建立空单。",
+            "核心依据：前期犄型主升后出现基差、资费、结算周期异常，疑似出货换手；后续缩量下跌与多次小反弹更像诱多。",
+            "后续验证：重点跟踪价格是否反抽失败、CVD 是否继续弱、基差/资费是否维持极端、持仓是否出现出货后的衰减。",
+        ],
+    }
+
+
 @app.get("/api/daily-report/thoughts")
 def daily_report_thoughts():
     ake = ake_thought_snapshot()
     us = thought_snapshot("US/USDT")
+    t = thought_snapshot("T/USDT")
     return jsonify({
         "updated_at": ake["updated_at"],
         "items": [{
@@ -2423,7 +2482,7 @@ def daily_report_thoughts():
                 "需要修正：不能只盯多空人数比下跌；当前窗口首尾已经小幅回升，说明散户空头进一步拥挤的条件变弱。",
                 "后续验证：如果价格创新高但 CVD 不再创新高，或者 OI 上升但价格滞涨，要把判断从吸筹延续切换为高位换手/派发风险。",
             ],
-        }, thought_us_item(us)]
+        }, thought_us_item(us), thought_t_item(t)]
     })
 
 
@@ -2508,20 +2567,23 @@ def simple_arbitrage_thinking():
     dual_snapshot = load_latest_dual_futures_snapshot()
     spot_simple = []
     if spot_snapshot:
+        enrich_funding_statistics(spot_snapshot["symbols"])
         for group in spot_snapshot["symbols"]:
             if is_rwa_stock_pair(group["symbol"]) or not positive_binance_funding_streak(group["symbol"]):
                 continue
             for row in group["rows"]:
                 if row["open_spread"] > 0 and row["funding_rate"] > 0.005:
-                    spot_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": "Binance", "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_rate"], "long_is_spot": True, "short_is_spot": False, "long_open_interest": None, "short_open_interest": row.get("futures_open_interest"), "long_volume": row.get("spot_volume"), "short_volume": row.get("futures_volume")})
+                    spot_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": "Binance", "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_rate"], "funding_current": row["funding_rate"], "funding_previous": row.get("funding_previous"), "funding_24h": row.get("funding_24h"), "funding_3d": row.get("funding_3d"), "long_is_spot": True, "short_is_spot": False, "long_open_interest": None, "short_open_interest": row.get("futures_open_interest"), "long_volume": row.get("spot_volume"), "short_volume": row.get("futures_volume")})
     dual_simple = []
     if dual_snapshot:
+        dual_stats = funding_statistics([group["symbol"].replace("/", "") for group in dual_snapshot["symbols"]])
         for group in dual_snapshot["symbols"]:
+            stats = dual_stats.get(group["symbol"].replace("/", ""), {})
             for row in group["rows"]:
                 # Current net funding must be positive and the Binance settlement side
                 # must also have remained positive across recent periods.
                 if row["open_spread"] > 0 and (row.get("funding_difference") or 0) > 0.005 and positive_binance_funding_streak(group["symbol"], minimum=0, periods=3):
-                    dual_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": row["short_exchange"], "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_difference"], "long_is_spot": False, "short_is_spot": False, "long_open_interest": row.get("long_open_interest"), "short_open_interest": row.get("short_open_interest"), "long_volume": row.get("long_volume"), "short_volume": row.get("short_volume")})
+                    dual_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": row["short_exchange"], "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_difference"], "funding_current": row.get("funding_difference"), "funding_previous": stats.get("previous"), "funding_24h": stats.get("day_1"), "funding_3d": stats.get("day_3"), "long_is_spot": False, "short_is_spot": False, "long_open_interest": row.get("long_open_interest"), "short_open_interest": row.get("short_open_interest"), "long_volume": row.get("long_volume"), "short_volume": row.get("short_volume")})
     return jsonify({"spot_simple": sorted(spot_simple, key=lambda item: item["open_spread"], reverse=True), "dual_simple": sorted(dual_simple, key=lambda item: item["open_spread"], reverse=True)})
 
 

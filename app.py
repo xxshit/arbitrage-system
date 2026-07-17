@@ -2490,7 +2490,7 @@ def thought_us_item(us):
     return {
         "symbol": us["symbol"],
         "trade_side": "观察",
-        "trade_status": "反转盯盘",
+        "trade_status": "新高拉盘 / 反转盯盘",
         "entry": us["entry"],
         "entry_time": us["entry_time"],
         "exit": None,
@@ -2512,18 +2512,18 @@ def thought_us_item(us):
         "validation": us.get("validation") or {},
         "source": us["source"],
         "screenshot_url": None,
-        "thought_summary": "US 目前只做高涨幅反转观察，不因涨多直接做空，等待结构走弱、CVD 转负和资金/基差恶化共振。",
-        "user_mistakes": ["当前暂无已验证交易，先不统计你的判断偏差。"],
-        "assistant_mistakes": ["需要避免因高涨幅本身过早给出反转结论。"],
-        "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "US 为新增重点观察，等待第一次反转验证。"},
-        "my_thesis": "你的主线思路：US 和 AKE 一样属于阶段涨幅过大的山寨币，而当前大盘整体偏熊，一个山寨能逆势大涨，后面大概率会出现猛烈回撤或大砸。现在重点不是追涨，而是盯涨势什么时候反转。",
-        "assistant_thesis": "我的验证思路：US 的反转提醒不能只看价格跌一根 K。需要看到高位结构转弱、CVD 转负，并且持仓、资金费、基差/价差至少有一项开始恶化；如果同时出现放量冲高回落、OI 快速掉落或异常扩张后滞涨，反转概率会明显提高。",
+        "thought_summary": "US 先按“新高无明显上方套牢盘 + 筹码可能集中 + 后续必有派发/砸盘窗口”盯盘。现在不能因为涨多就提前做空；真正的提醒点是放量失败、资金费转负、基差打开、OI/CVD/多空人数比出现出货共振。",
+        "user_mistakes": ["当前暂无已验证交易，先不统计你的判断偏差；后续如果提前做空或过早否定主升，会单独复盘。"],
+        "assistant_mistakes": ["需要避免因高涨幅本身过早给出反转结论；新高币上方阻力弱，主力可以继续左手倒右手推高。"],
+        "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "US 为新增重点观察，等待第一次反转/延续验证。"},
+        "my_thesis": "你的主线思路：US 是 2025 年 12 月前后上线的新币，不算老币；上市后长期下跌，早期手里有货的散户大概率已经抛掉。最近约一个半月涨幅很大并不断破新高，上方几乎没有历史套牢阻力，筹码可能更集中在主力手里。只要主力愿意，可以通过左手倒右手继续拉盘；但涨幅越大，后面某个时刻一定会有派发和砸盘窗口。",
+        "assistant_thesis": "我的验证思路：官方资料显示 US 总量 100 亿，TGE 流通约 22.2%，投资人与核心贡献者 TGE 全锁并有 1 年 cliff；这说明 2026 年 12 月附近会有更大的解锁压力，但当前阶段更像“流通盘被交易结构控制”的盘口博弈。短线不适合只因新高去空，重点盯：高位放量不涨、CVD 转弱、OI 异常扩张后滞涨、资金费由正转负、基差/开差突然拉开、以及解锁/质押释放窗口。",
         "challenge_points": [
             "需要警惕：涨幅过大不等于马上能空，强庄币可能继续逼空或高位横盘很久。",
             "反转确认：必须等价格跌破近端支撑后反抽失败，或出现放量冲高回落、CVD 背离、OI 异常变化等组合证据。",
-            "提醒边界：单独资金费转负、单独基差扩大、单独价格回调，都只算预警，不算完整反转。"
+            "官方面约束：US 的团队/投资人 cliff 主要在 TGE 后 1 年，当前月度释放更偏社区/基金会；它不是马上到巨额 VC cliff 的结构，但后续 2026-12 附近要单独拉高风险等级。"
         ],
-        "validation_view": "US 当前进入涨势反转盯盘：重点看价格是否跌破近端结构，CVD 是否转负，持仓是否掉落或异常扩张后滞涨，资金费是否转负，基差/价差是否异常拉开。若出现大量放量 + 资金费转负 + 基差打开，直接按出货三件套预警推送，并附带分析。",
+        "validation_view": "US 当前进入“继续拉升 vs 高位派发”盯盘：只要价格继续新高、回调缩量、OI 不塌、CVD 不持续转负，就不能急着判空；若出现大量放量 + 资金费转负 + 基差打开，或放量冲高失败后 CVD/OI 同步走坏，直接按出货三件套预警推送，并附带分析。",
         "take_profit": [
             "当前无持仓记录，不做止盈计划；这里只记录反转观察。",
             "如果后续出现做空机会，优先等跌破支撑后的反抽失败，而不是第一根阴线追空。",
@@ -2533,7 +2533,8 @@ def thought_us_item(us):
             "如果 OI 继续扩张但价格重新突破压力位，说明仍可能逼空，不应硬扛空单。",
         ],
         "review_notes": [
-            "新增重点观察：US 涨幅过大且大盘环境偏弱，后续重点盯涨势反转。",
+            "官方资料记录：US 是 Talus Network 的 Sui 原生资产，总量 100 亿；TGE 流通约 22.2%，团队和投资人 TGE 全锁，1 年 cliff 后线性释放。",
+            "盘口推演记录：上市后长期下跌会清洗早期散户，新高后上方套牢盘弱，主力继续拉升的阻力可能很小；但涨幅越大，后面派发/砸盘越需要重点盯。",
             "反转触发框架：价格走弱 + CVD 转负 + OI/资金费/基差价差至少一项恶化；若大量放量、资金费转负、基差打开同时出现，提升为出货三件套预警。",
             "执行约束：只在多项证据共振时推送，不因单次回调或插针提醒。",
         ],
@@ -2679,6 +2680,66 @@ def daily_report_listings():
     cutoff = datetime.now() - timedelta(days=30)
     events = ListingEvent.query.filter(ListingEvent.occurred_at >= cutoff).order_by(ListingEvent.occurred_at.desc()).limit(100).all()
     return jsonify({"events": [{"exchange": item.exchange, "symbol": item.symbol if "/" in item.symbol else (item.symbol[:-4] + "/USDT" if item.symbol.endswith("USDT") else item.symbol), "type": item.event_type, "title": item.title, "source_url": item.source_url, "occurred_at": item.occurred_at.strftime("%m-%d %H:%M:%S"), "effective_at": item.effective_at.strftime("%Y-%m-%d %H:%M UTC+8") if item.effective_at else None} for item in events], "automation_status": automation_statuses("announcement_scan")})
+
+
+TOKEN_HEDGE_PROFILES = [
+    {
+        "symbol": "LAB/USDT",
+        "name": "LAB",
+        "status": "样本复盘",
+        "risk_level": "极高",
+        "official_facts": [
+            "已确认有交易所上线公告与官方空投/交易活动文档；公开资料能确认空投、交易激励、质押池等参与路径。",
+            "已确认官方 Telegram 曾公布 14D / 60D / 180D 质押池，且可在 claim portal 查看质押状态。",
+            "暂未从官方公开页面确认“0.2 质押价”这一精确细节，需要后续从活动页面快照、链上记录或用户截图继续补证。",
+        ],
+        "market_thesis": "LAB 是“低成本参与者 + 高位合约套保 + 主力拉爆套保空单 + 解锁前砸回低位”的典型观察样本。后续遇到类似币，不能只看现货涨幅，要同时看质押/空投成本、解锁时间、合约持仓、负资费和基差。",
+        "watch_rules": [
+            "活动/质押成本远低于二级价格，且上线后合约深度快速变厚，要默认存在大量套保空单。",
+            "如果价格被拉到活动成本的数十倍，同时 OI 暴涨、资金费极端、基差失真，要警惕主力正在收割套保盘。",
+            "解锁前若出现放量滞涨、负资费、基差/价差异常拉开，优先标为高位派发/砸盘风险。",
+        ],
+        "sources": [
+            {"label": "LBank LAB 上线公告", "url": "https://www.lbk.pub/support/articles/2050601904370614272"},
+            {"label": "LAB Season 1 Airdrop", "url": "https://docs.lab.pro/lab-loyalty-airdrop/season-1-loyalty-airdrop"},
+            {"label": "LAB Season 2 Trading Airdrop", "url": "https://docs.lab.pro/lab-loyalty-airdrop/season-2-trading-airdrop"},
+            {"label": "LAB 质押池公告", "url": "https://t.me/s/lab_trade/450"},
+        ],
+    },
+    {
+        "symbol": "US/USDT",
+        "name": "Talus Network",
+        "status": "重点盯盘",
+        "risk_level": "高",
+        "official_facts": [
+            "官方文档显示 $US 是 Talus Network 的 Sui 原生资产，总量 10,000,000,000，固定总量。",
+            "官方解锁结构显示 TGE 约 22.2% 流通；投资人与核心贡献者在 TGE 无流通，1 年 cliff 后按月线性释放。",
+            "官方质押计划存在 3 / 6 / 12 个月期限，初始 APY 曾为 160% / 240% / 360%，新质押 APY 会按存入规模动态调整。",
+            "交易所公告显示 US 在 2025-12-11 前后集中上线多个现货市场，Binance USUSDT 永续合约于 2025-12-12 18:45（UTC+8）附近上线。",
+        ],
+        "market_thesis": "US 上线后长期下跌，早期散户筹码可能已被充分清洗；近期约一个半月持续走强并破新高，上方历史套牢盘弱，筹码集中时主力确实可以继续左手倒右手拉盘。现在不能因涨多直接做空，重点盯未来放量失败、负资费、基差打开、OI/CVD 走坏的反转窗口。",
+        "watch_rules": [
+            "延续信号：新高后回调缩量、OI 不塌、CVD 不持续转负、资金费/基差没有极端恶化，可以继续按强庄延续看。",
+            "出货三件套：大量放量 + 资金费转负 + 基差打开；若同时价格冲高失败或跌破近端结构，直接升级为趋势分析推送。",
+            "解锁日历：月度社区/基金会释放需要持续记录；2026-12 附近的 1 年 cliff 后投资人/核心贡献者释放，要提前单独拉高风险等级。",
+        ],
+        "sources": [
+            {"label": "Talus $US 官方说明", "url": "https://docs.talus.foundation/token/us"},
+            {"label": "官方分配与解锁", "url": "https://docs.talus.foundation/token/us/allocations-and-unlock-schedule"},
+            {"label": "官方 $US Staking", "url": "https://docs.talus.foundation/token/staking"},
+            {"label": "XT US 上线公告", "url": "https://xtsupport.zendesk.com/hc/en-us/articles/53216586567577-XT-Announcement-US-Talus-Network-Pre-Market-Trading-Closed-Upcoming-Spot-Listing"},
+            {"label": "Binance 永续上线记录", "url": "https://www.chaincatcher.com/en/article/2228915"},
+        ],
+    },
+]
+
+
+@app.get("/api/token-hedge/profiles")
+def token_hedge_profiles():
+    return jsonify({
+        "updated_at": datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        "profiles": TOKEN_HEDGE_PROFILES,
+    })
 
 
 @app.get("/api/automation-status")

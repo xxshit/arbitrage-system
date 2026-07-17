@@ -1909,11 +1909,43 @@ def trend_key_levels(symbol, timeframe):
 def compact_trend_judgement(items, support, resistance):
     frames = {item.timeframe: item for item in items}
     primary = frames.get("4h") or frames.get("30m")
+    short = frames.get("30m")
+    long = frames.get("4h")
     resonance = len(items) > 1
     cvd_ok = all(item.cvd_confirmed for item in items)
-    core = "30M 与 4H 同向共振，价格、OI 与人数比结构完整。" if resonance else f"{primary.timeframe.upper()} 结构成立，暂未形成双周期共振。"
-    flow = "主动买入 CVD 同步确认，延续性偏强。" if cvd_ok else "CVD 尚未确认，需防止冲高后的量价背离。"
-    levels = f"守住 {support:.6g} 偏多结构延续；接近 {resistance:.6g} 观察放量突破或承压。" if support and resistance else "关键位数据暂未同步，重点观察近期平台高低点。"
+    strong = primary.score >= 85
+    overheated = (primary.price_change or 0) > 70 and (primary.oi_change or 0) > 90
+    ratio_drop = primary.ratio_change or 0
+    oi_text = f"持仓增加 {primary.oi_change:+.1f}%"
+    ratio_text = f"多空人数比下降 {abs(ratio_drop):.1f}%"
+    if resonance and cvd_ok and strong:
+        core = f"30M 与 4H 同时共振，{oi_text}、{ratio_text}，主动买入也在跟，属于比较标准的犄型主升结构。"
+    elif resonance and not cvd_ok:
+        core = f"30M 与 4H 结构同向，但 CVD 没有完全确认，说明价格和持仓在推，主动买入并不够干净，要防冲高后的背离。"
+    elif long and not short:
+        core = f"4H 结构成立但 30M 没跟上，像大级别趋势里的短线休整；如果 30M 重新放量转强，再看共振加强。"
+    elif short and not long:
+        core = f"30M 先走强但 4H 还没确认，更像短线点火；要等 4H 持仓继续上、人数比继续下，才能升级成趋势机会。"
+    else:
+        core = f"{primary.timeframe.upper()} 结构成立，但暂时不是最完整的共振，只能按候选观察。"
+
+    if overheated:
+        flow = "涨幅和持仓扩张都很猛，优势是主力推动明显，缺点是短线拥挤，接近压力位时要看是否放量承接。"
+    elif cvd_ok and primary.ratio_change < -20:
+        flow = "CVD 上涨且人数比明显下跌，说明主动买入在推，散户侧仍有做空/不追多的对手盘，延续性比普通拉升更好。"
+    elif cvd_ok:
+        flow = "CVD 是正向确认，但人数比下跌幅度不算极端，属于偏强而非无脑追涨。"
+    else:
+        flow = "CVD 没给足确认，若后续价格新高但 CVD 不新高，要把它从主升候选降级成冲高派发观察。"
+
+    if support and resistance:
+        width = (resistance - support) / support * 100 if support else 0
+        if width < 6:
+            levels = f"关键位：{support:.6g} 是近端防守，{resistance:.6g} 是上沿；区间不宽，突破要看量，不放量容易假突破。"
+        else:
+            levels = f"关键位：守住 {support:.6g} 结构还在，向上看 {resistance:.6g}；若接近上沿放量不涨，优先防派发。"
+    else:
+        levels = "关键位暂未同步，先看最近平台低点是否守住，以及新高时成交量能不能跟。"
     return core + flow + levels
 
 
@@ -2051,18 +2083,27 @@ def send_daily_lark_trend_report():
                 return f"近{timeframe.upper()}：暂无完整结构"
             price_color = lark_signed_color(item.price_change)
             oi_color = lark_signed_color(item.oi_change)
-            ratio_color = lark_signed_color(item.ratio_change)
+            ratio_color = "cus-bear" if item.ratio_change and item.ratio_change < 0 else lark_signed_color(item.ratio_change)
             return (
                 f"近{timeframe.upper()}：价格 <font color='{price_color}'>{item.price_change:+.2f}%</font>"
-                f"｜持仓 <font color='{oi_color}'>{item.oi_change:+.2f}%</font>"
-                f"｜多空人数比 <font color='{ratio_color}'>{item.ratio_change:+.2f}%</font>"
+                f"｜持仓 <font color='{oi_color}'>{item.oi_change:+.2f}%</font>（{lark_large_value(item.oi_value)}）"
+                f"｜多空人数比 <font color='{ratio_color}'>{item.ratio_change:+.2f}%</font>（{lark_ratio_value(item.ratio_value)}）"
                 f"｜CVD {lark_cvd_label(item.cvd_change)}"
             )
 
+        short_item = rows.get("30m")
+        long_item = rows.get("4h")
+        if short_item and long_item:
+            setup_title = "双周期犄型共振"
+        elif long_item:
+            setup_title = "4H 主结构成立，30M 等回踩确认"
+        else:
+            setup_title = "30M 短线点火，等待 4H 跟随"
         levels_text = f"向下看 {support:.6g}｜向上看 {resistance:.6g}" if support and resistance else "关键位暂未同步"
         sections.append("\n".join([
-            f"{lark_dot_label('⬆ 看涨 / ' + ('较强' if resonance >= 85 else '观察'), 'cus-bull')}",
+            f"{lark_dot_label('↑ 看涨 / ' + ('较强' if resonance >= 85 else '观察'), 'cus-bull')}",
             f"**{index}. {symbol}**　{lark_dot_label(f'结构分 {resonance:.1f}', lark_score_color(resonance))}",
+            f"结构：{setup_title}",
             f"时间：{report_date} 08:00",
             metric_line("30m"),
             metric_line("4h"),

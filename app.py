@@ -2468,6 +2468,136 @@ def thought_lark_db_fallback_message(analysis, direction):
     ])
 
 
+def thought_direction_badge(direction):
+    bullish = direction in {"bullish", "bullish_db_watch"}
+    distribution = direction == "distribution"
+    if bullish:
+        return "方向：<font color='cus-bull'>●●●</font> 🟦⬆️ 看涨/转强"
+    if distribution:
+        return "方向：<font color='cus-bear'>●●●</font> 🟦⬇️ 派发预警"
+    return "方向：<font color='cus-bear'>●●●</font> 🟦⬇️ 看跌/转弱"
+
+
+def thought_window_line(validation, label, key):
+    item = validation.get(key) or {}
+    price = item.get("price_change")
+    oi = item.get("oi_change")
+    ratio = item.get("ratio_change")
+    cvd = item.get("cvd")
+    volume_ratio = item.get("volume_ratio")
+    return (
+        f"近{label}：价格 {lark_plain_value(price, 2, '%')}，"
+        f"持仓 {lark_plain_value(oi, 2, '%')}，"
+        f"多空人数比 {lark_plain_value(ratio, 2, '%')}，"
+        f"CVD {lark_compact_number(cvd)}，"
+        f"放量 {lark_plain_value(volume_ratio, 2, 'x')}"
+    )
+
+
+def thought_structure_summary(analysis, direction):
+    validation = analysis.get("validation") or {}
+    windows = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
+    valid = [item for item in windows if item]
+    if not valid:
+        if direction == "bullish_db_watch":
+            return "BN 资费和 BN 基差仍为正，合约端仍保持溢价；只要回调不放量砸穿，先按多头结构未破观察。"
+        if direction == "bearish_db_watch":
+            return "BN 资费与基差继续偏负，反弹如果无法修复负基差，更像下跌途中的诱多修复。"
+        return "当前结构以盘口快照为主，重点看资费、基差、持仓和成交量是否继续同向恶化。"
+    price_up = sum((item.get("price_change") or 0) > 0 for item in valid)
+    oi_up = sum((item.get("oi_change") or 0) > 0 for item in valid)
+    ratio_down = sum((item.get("ratio_change") or 0) < 0 for item in valid)
+    cvd_up = sum((item.get("cvd") or 0) > 0 for item in valid)
+    vol_hot = any((item.get("volume_ratio") or 0) >= 2.0 for item in valid)
+    if direction in {"bullish", "bullish_db_watch"}:
+        if price_up >= 2 and oi_up >= 2 and ratio_down >= 2 and cvd_up >= 2:
+            base = "30MIN/1H/2H 至少两档同时满足价格走强、持仓增加、人数比下跌、CVD 为正，属于更完整的犄型偏多结构。"
+        elif price_up >= 2 and oi_up >= 2:
+            base = "价格和持仓已经偏强，但人数比或 CVD 没有完全跟上，属于多头结构观察，不适合无脑追，只能看回踩后是否继续放量承接。"
+        else:
+            base = "短线有转强迹象，但多周期共振还不完整，需要等 30MIN、1H、2H 继续同步。"
+        if vol_hot:
+            base += " 量能已经放大，优势是主力推动更明显，风险是接近压力带时如果放量不涨，就要防高位换手。"
+        return base
+    if direction == "distribution":
+        return "出现放量、资费恶化、基差打开的组合，更接近主力高位换手/派发预警；这里重点不是立刻追空，而是看放量后是否跌破关键防守区。"
+    if price_up >= 2 and oi_up >= 2 and ratio_down <= 1:
+        return "价格反弹但人数比没有形成犄型反向下跌，若同时资费/基差偏弱，更像反弹诱多，不是健康主升。"
+    return "多周期结构开始转弱，若反抽无法重新站回关键区间，空头结构会继续增强。"
+
+
+def thought_key_zone(analysis):
+    support = analysis.get("support")
+    resistance = analysis.get("resistance")
+    last = analysis.get("last")
+    if support and resistance:
+        defend_low = support
+        defend_high = support * 1.018
+        attack_low = resistance * 0.985
+        attack_high = resistance * 1.018
+        return (
+            f"关键区间：防守带 {lark_price_value(defend_low)}-{lark_price_value(defend_high)}；"
+            f"突破观察带 {lark_price_value(attack_low)}-{lark_price_value(attack_high)}。"
+            "防守带放量跌破，结构降级；突破带放量站稳，才算继续转强。"
+        )
+    if last:
+        return (
+            f"关键区间：现价 {lark_price_value(last)} 附近先看承接；"
+            f"短线防守带 {lark_price_value(last * 0.97)}-{lark_price_value(last * 0.985)}，"
+            f"突破观察带 {lark_price_value(last * 1.018)}-{lark_price_value(last * 1.04)}。"
+        )
+    return "关键区间：等待下一轮价格快照更新后确认。"
+
+
+def thought_lark_message(analysis, direction):
+    if analysis.get("source") == "db_fallback" or direction in {"bullish_db_watch", "bearish_db_watch"}:
+        return thought_lark_db_fallback_message(analysis, direction)
+    symbol = analysis["symbol"]
+    validation = analysis.get("validation") or {}
+    title_map = {
+        "bullish": "结构转强确认",
+        "bearish": "转弱观察",
+        "reversal": "涨势反转预警",
+        "distribution": "高位派发预警",
+    }
+    return "\n".join([
+        thought_direction_badge(direction),
+        f"{symbol.split('/')[0]}思路盯盘：{title_map.get(direction, '结构观察')}",
+        f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"价格：{lark_price_value(analysis.get('last'))}，BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}，BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        thought_window_line(validation, "30MIN", "30m"),
+        thought_window_line(validation, "1H", "1h"),
+        thought_window_line(validation, "2H", "2h"),
+        f"判断：{thought_structure_summary(analysis, direction)}",
+        thought_key_zone(analysis),
+        f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
+    ])
+
+
+def thought_lark_db_fallback_message(analysis, direction):
+    context = thought_market_context(analysis.get("symbol"))
+    if context:
+        analysis = {**analysis, **{key: value for key, value in context.items() if value is not None}}
+    symbol = analysis["symbol"]
+    bullish = direction == "bullish_db_watch"
+    judgement = (
+        "BN 资费仍为正、BN 基差仍为正，且合约成交量明显大于现货成交量，说明合约端多头结构还没被破坏。这里不追涨，只盯回调是否缩量、基差是否继续为正、资费是否突然转负。"
+        if bullish
+        else "BN 资费偏负、BN 基差负向打开，若反弹仍无法修复负基差和负资费，更像诱多后的下行延续。这里重点看反抽能否站回压力带。"
+    )
+    return "\n".join([
+        thought_direction_badge(direction),
+        f"{symbol.split('/')[0]}思路盯盘：结构观察",
+        f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"价格：{lark_price_value(analysis.get('last'))}，BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}，BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        f"合约持仓：{lark_compact_number(analysis.get('oi_value'))}，合约成交额：{lark_compact_number(analysis.get('futures_volume'))}，现货成交额：{lark_compact_number(analysis.get('spot_volume'))}",
+        f"合约/现货量比：{lark_plain_value(analysis.get('futures_spot_volume_ratio'), 2, 'x')}，开差：{lark_plain_value(analysis.get('open_spread'), 4, '%')}，平差：{lark_plain_value(analysis.get('close_spread'), 4, '%')}",
+        f"判断：{judgement}",
+        thought_key_zone(analysis),
+        f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
+    ])
+
+
 def send_thought_analysis_push():
     webhook = os.getenv("LARK_THOUGHT_ANALYSIS_WEBHOOK", "").strip()
     if not webhook:

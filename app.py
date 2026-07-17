@@ -2858,11 +2858,25 @@ def alerts():
     def alert_group_payload(symbol, items):
         timeline = [event_payload(item) for item in items[:20]]
         latest = timeline[0]
+        spread_items = [item for item in items if item.alert_type == "rapid_spread" and item.open_spread is not None]
+        basis_items = [item for item in items if ("basis" in item.alert_type) and item.basis is not None]
+        if not spread_items:
+            spread_items = [item for item in items if item.open_spread is not None]
+        if not basis_items:
+            basis_items = [item for item in items if item.basis is not None]
+        max_spread_item = max(spread_items, key=lambda item: abs(item.open_spread or 0), default=None)
+        max_basis_item = max(basis_items, key=lambda item: abs(item.basis or 0), default=None)
         return {
             "symbol": symbol,
             "latest": latest,
             "first_at": timeline[-1]["created_at"],
             "alert_count": len(items),
+            "move_peaks": {
+                "open_spread": max_spread_item.open_spread if max_spread_item else None,
+                "open_spread_at": max_spread_item.created_at.strftime("%m-%d %H:%M:%S") if max_spread_item else None,
+                "basis": max_basis_item.basis if max_basis_item else None,
+                "basis_at": max_basis_item.created_at.strftime("%m-%d %H:%M:%S") if max_basis_item else None,
+            },
             "timeline": timeline,
         }
 

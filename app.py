@@ -2225,7 +2225,53 @@ def thought_snapshot(symbol):
             "source": "live",
         }
     except Exception:
+        return thought_snapshot_from_db(symbol, fallback)
+
+
+def thought_snapshot_from_db(symbol, fallback):
+    context = thought_market_context(symbol)
+    if not context:
         return fallback
+    entry = fallback.get("entry")
+    futures_mid = context.get("last")
+    return {
+        **fallback,
+        **context,
+        "profit_pct": percent_delta(futures_mid, entry) if futures_mid and entry else None,
+        "support": None,
+        "resistance": None,
+        "oi_change_pct": None,
+        "ratio_value": None,
+        "ratio_change_pct": None,
+        "cvd": None,
+        "change_30m": None,
+        "change_4h": None,
+        "validation": {},
+        "source": "db_fallback",
+    }
+
+
+def thought_market_context(symbol):
+    market_rows = LatestMarketSnapshot.query.filter_by(symbol=symbol).order_by(LatestMarketSnapshot.captured_at.desc()).all()
+    if not market_rows:
+        return None
+    preferred = next((row for row in market_rows if row.long_exchange == "Binance"), None) or market_rows[0]
+    futures_mid = ((preferred.short_bid or 0) + (preferred.short_ask or 0)) / 2 if preferred.short_bid and preferred.short_ask else None
+    spot_volume = max([row.spot_volume or 0 for row in market_rows] or [0])
+    futures_volume = preferred.futures_volume
+    volume_ratio = (futures_volume / spot_volume) if futures_volume and spot_volume else None
+    return {
+        "last": futures_mid,
+        "oi_value": preferred.futures_open_interest,
+        "funding_rate": preferred.funding_rate,
+        "basis": preferred.basis,
+        "open_spread": preferred.open_spread,
+        "close_spread": preferred.close_spread,
+        "spot_volume": spot_volume,
+        "futures_volume": futures_volume,
+        "futures_spot_volume_ratio": volume_ratio,
+        "updated_at": preferred.captured_at.strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
 def ake_thought_snapshot():
@@ -2241,7 +2287,7 @@ def thought_push_direction(analysis):
     checks = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
     valid = [item for item in checks if item.get("price_change") is not None and item.get("oi_change") is not None and item.get("ratio_change") is not None and item.get("cvd") is not None]
     if len(valid) < 3:
-        return None
+        return thought_db_fallback_direction(analysis)
     volume_spike = any((item.get("volume_ratio") or 0) >= 2.5 for item in valid)
     funding_negative = analysis.get("funding_rate") is not None and analysis.get("funding_rate") < 0
     basis_opened = analysis.get("basis") is not None and abs(analysis.get("basis")) >= 1.0
@@ -2265,6 +2311,25 @@ def thought_push_direction(analysis):
     )
     if reversal_count >= 2 and pressure and not contract_premium_alive:
         return "reversal"
+    return thought_db_fallback_direction(analysis)
+
+
+def thought_db_fallback_direction(analysis):
+    context = thought_market_context(analysis.get("symbol"))
+    if context:
+        analysis = {**analysis, **{key: value for key, value in context.items() if value is not None}}
+    symbol = analysis.get("symbol")
+    funding = analysis.get("funding_rate")
+    basis = analysis.get("basis")
+    oi_value = analysis.get("oi_value") or 0
+    volume_ratio = analysis.get("futures_spot_volume_ratio") or 0
+    open_spread = analysis.get("open_spread")
+    if symbol == "AKE/USDT" and funding is not None and basis is not None:
+        if funding > 0 and basis > 0 and oi_value >= 10_000_000 and volume_ratio >= 20:
+            return "bullish_db_watch"
+    if symbol == "T/USDT" and funding is not None and basis is not None:
+        if funding < 0 and basis <= -1.0 and (open_spread is None or open_spread <= -1.0):
+            return "bearish_db_watch"
     return None
 
 
@@ -2280,6 +2345,8 @@ def thought_signal_key(analysis, direction):
 
 
 def thought_lark_message(analysis, direction):
+    if analysis.get("source") == "db_fallback" or direction in {"bullish_db_watch", "bearish_db_watch"}:
+        return thought_lark_db_fallback_message(analysis, direction)
     validation = analysis.get("validation") or {}
     def row(label, key):
         item = validation.get(key) or {}
@@ -2324,6 +2391,42 @@ def thought_lark_message(analysis, direction):
     ])
 
 
+def thought_lark_db_fallback_message(analysis, direction):
+    context = thought_market_context(analysis.get("symbol"))
+    if context:
+        analysis = {**analysis, **{key: value for key, value in context.items() if value is not None}}
+    symbol = analysis["symbol"]
+    bullish = direction == "bullish_db_watch"
+    direction_text = "看涨 / 多头结构仍在" if bullish else "看跌 / 空头结构仍在"
+    direction_color = "cus-bull" if bullish else "cus-bear"
+    direction_icon = "● 上" if bullish else "● 下"
+    if bullish:
+        judgement = (
+            "BN 资费仍为正、BN 基差仍为正，且 Binance 合约成交量明显大于现货成交量，说明合约端多头结构还没有失效。"
+            "这类信号不是完整犄型共振，因为当前缺少 CVD 与多空人数比确认；但它足够提醒我们继续盯是否重新放量上推。"
+        )
+        key_levels = "向下看最近回调低点是否被放量跌破；向上看前高附近是否重新放量突破。缺少实时 K 线关键位时，以 CoinGlass 图表为准。"
+    else:
+        judgement = (
+            "BN 资费为负、BN 基差明显负向打开，现多期空与期多期空结构都偏向空头压力。"
+            "这和 T 的做空思路一致：若反弹无法修复负基差和负资费，更像诱多后的下行延续。"
+            "当前缺少 CVD 与多空人数比确认，所以只作为结构提醒，不当成完整共振。"
+        )
+        key_levels = "向上看 0.0045-0.0047 一带能否重新站稳；向下看前低与放量跌破后的延续性。"
+    return "\n".join([
+        f"方向：<font color='{direction_color}'>{direction_icon} {direction_text}</font>",
+        f"{symbol.split('/')[0]}思路盯盘：结构观察提醒",
+        f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"价格：{lark_price_value(analysis.get('last'))}，BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}，BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        f"持仓：{lark_compact_number(analysis.get('oi_value'))}，合约成交额：{lark_compact_number(analysis.get('futures_volume'))}，现货成交额：{lark_compact_number(analysis.get('spot_volume'))}",
+        f"合约/现货量比：{lark_plain_value(analysis.get('futures_spot_volume_ratio'), 2, 'x')}，开差：{lark_plain_value(analysis.get('open_spread'), 4, '%')}，平差：{lark_plain_value(analysis.get('close_spread'), 4, '%')}",
+        f"判断：{judgement}",
+        f"关键位：{key_levels}",
+        "备注：这是 MySQL 快照降级提醒，缺少 CVD 与多空人数比确认；等完整指标恢复后，仍以完整共振规则为准。",
+        f"K线：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
+    ])
+
+
 def send_thought_analysis_push():
     webhook = os.getenv("LARK_THOUGHT_ANALYSIS_WEBHOOK", "").strip()
     if not webhook:
@@ -2331,7 +2434,7 @@ def send_thought_analysis_push():
     sections = []
     push_records = []
     for analysis in thought_watch_snapshots():
-        if analysis.get("source") != "live":
+        if analysis.get("source") not in {"live", "db_fallback"}:
             continue
         direction = thought_push_direction(analysis)
         if not direction:

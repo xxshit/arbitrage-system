@@ -2653,6 +2653,34 @@ def positive_binance_funding_streak(symbol, minimum=0.005, periods=3):
     return len(rows) == periods and all(row.funding_rate > minimum for row in rows)
 
 
+def spot_futures_simple_funding_threshold(interval_hours):
+    try:
+        interval = int(float(interval_hours or 0))
+    except (TypeError, ValueError):
+        interval = 0
+    if interval == 8:
+        return 0.01
+    if interval == 4:
+        return 0.005
+    if interval == 1:
+        return 0.005
+    return 0.005
+
+
+def spot_futures_funding_meets_simple_standard(symbol, interval_hours):
+    """My simple-question filter: previous and every period in the last 24H must meet the low-insurance funding floor."""
+    minimum = spot_futures_simple_funding_threshold(interval_hours)
+    try:
+        interval = int(float(interval_hours or 0))
+    except (TypeError, ValueError):
+        interval = 0
+    expected_periods = max(1, int(24 / interval)) if interval in {1, 2, 4, 8} else 3
+    rows = FundingRateRecord.query.filter_by(symbol=symbol.replace("/", "")).order_by(FundingRateRecord.funding_time.desc()).limit(expected_periods).all()
+    if len(rows) < expected_periods:
+        return False
+    return all(row.funding_rate >= minimum for row in rows)
+
+
 @app.get("/api/arbitrage-thinking/simple")
 def simple_arbitrage_thinking():
     spot_snapshot = load_latest_market_snapshot()
@@ -2661,10 +2689,11 @@ def simple_arbitrage_thinking():
     if spot_snapshot:
         enrich_funding_statistics(spot_snapshot["symbols"])
         for group in spot_snapshot["symbols"]:
-            if is_rwa_stock_pair(group["symbol"]) or not positive_binance_funding_streak(group["symbol"]):
+            if is_rwa_stock_pair(group["symbol"]):
                 continue
             for row in group["rows"]:
-                if row["open_spread"] > 0 and row["funding_rate"] > 0.005:
+                minimum_funding = spot_futures_simple_funding_threshold(row.get("funding_interval_hours"))
+                if row["open_spread"] > 0 and row["funding_rate"] >= minimum_funding and spot_futures_funding_meets_simple_standard(group["symbol"], row.get("funding_interval_hours")):
                     spot_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": "Binance", "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_rate"], "funding_current": row["funding_rate"], "funding_previous": row.get("funding_previous"), "funding_24h": row.get("funding_24h"), "funding_3d": row.get("funding_3d"), "long_is_spot": True, "short_is_spot": False, "long_interval": None, "short_interval": row.get("funding_interval_hours"), "long_open_interest": None, "short_open_interest": row.get("futures_open_interest"), "long_volume": row.get("spot_volume"), "short_volume": row.get("futures_volume")})
     dual_simple = []
     if dual_snapshot:

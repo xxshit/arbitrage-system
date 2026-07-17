@@ -7,7 +7,7 @@
 - MariaDB 程序目录：`F:\mysql\mariadb-11.8.6-winx64`
 - MariaDB 数据目录：`F:\mysql\data`
 - Windows 服务名：`ArbitrageMariaDB`
-- 服务启动方式：自动启动
+- 服务启动方式：手动启动（按你的要求，不随 Windows 开机自动启动）
 
 ## 项目连接
 

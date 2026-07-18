@@ -3,4 +3,5 @@
 __pycache__/
 instance/
 backups/
+logs/
 *.pyc

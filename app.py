@@ -2056,6 +2056,7 @@ def fetch_horn_continuation_metrics(symbol):
         if len(structure_values) < 12:
             return None
         structure_bottom = percentile(structure_values, 20)
+        structure_hard_floor = percentile(structure_values, 10)
         structure_mid = (structure_bottom + peak_oi) / 2 if structure_bottom else None
         if not structure_bottom:
             return None
@@ -2075,6 +2076,13 @@ def fetch_horn_continuation_metrics(symbol):
         price_change = percent_delta(float(closed[-1][4]), float(closed[0][4]))
         cvd_change = sum((2 * float(row[10]) - float(row[7])) for row in closed)
         if None in (oi_change, ratio_change, price_change):
+            return None
+        oi_floor_broken = (
+            structure_hard_floor is not None
+            and current_oi < structure_hard_floor
+            and current_oi < start_oi
+        )
+        if oi_floor_broken and cvd_change <= 0:
             return None
         price_score = max(0, min(price_change / 80, 1)) * 8
         oi_multiple_score = max(0, min((oi_multiple - 1) / 0.7, 1)) * 26

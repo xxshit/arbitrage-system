@@ -1855,8 +1855,58 @@ def fetch_horn_metrics(symbol, timeframe):
         return None
 
 
+def fetch_horn_continuation_metrics(symbol):
+    raw_symbol = symbol.replace("/", "")
+    try:
+        window = 150
+        oi = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": window}), timeout=6)
+        ratios = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": window}), timeout=6)
+        klines = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "30m", "limit": window + 1}), timeout=6)
+        closed = klines[:-1]
+        if len(oi) < 24 or len(ratios) < 24 or len(closed) < 24:
+            return None
+        oi_values = [float(row.get("sumOpenInterestValue", 0) or 0) for row in oi]
+        ratio_values = [float(row.get("longShortRatio", 0) or 0) for row in ratios]
+        current_oi = oi_values[-1]
+        start_oi = max(oi_values[0], 1e-9)
+        peak_oi = max(oi_values) or current_oi
+        retention = current_oi / peak_oi if peak_oi else 0
+        oi_multiple = current_oi / start_oi if start_oi else 0
+        oi_change = percent_delta(current_oi, start_oi)
+        ratio_value = ratio_values[-1]
+        ratio_change = percent_delta(ratio_value, ratio_values[0])
+        price_change = percent_delta(float(closed[-1][4]), float(closed[0][4]))
+        cvd_change = sum((2 * float(row[10]) - float(row[7])) for row in closed)
+        if None in (oi_change, ratio_change, price_change):
+            return None
+        price_score = max(0, min(price_change / 80, 1)) * 18
+        oi_multiple_score = max(0, min((oi_multiple - 1) / 1.2, 1)) * 22
+        retention_score = max(0, min((retention - 0.45) / 0.35, 1)) * 20
+        ratio_level_score = max(0, min((1.05 - ratio_value) / 0.65, 1)) * 14
+        ratio_change_score = max(0, min(abs(ratio_change) / 45, 1)) * 10 if ratio_change < 0 else 0
+        price_structure_score = directional_consistency([row[4] for row in closed[-50:]], "up") * 8
+        cvd_score = 8 if cvd_change > 0 else 0
+        score = price_score + oi_multiple_score + retention_score + ratio_level_score + ratio_change_score + price_structure_score + cvd_score
+        if not (price_change > 8 and oi_multiple >= 1.3 and retention >= 0.55 and (ratio_value <= 0.9 or ratio_change < -15) and score >= 55):
+            return None
+        return {
+            "symbol": symbol,
+            "timeframe": "continue",
+            "price_change": price_change,
+            "oi_change": oi_change,
+            "oi_value": current_oi,
+            "ratio_change": ratio_change,
+            "ratio_value": ratio_value,
+            "cvd_change": cvd_change,
+            "cvd_confirmed": cvd_change > 0,
+            "score": round(score, 1),
+        }
+    except Exception:
+        return None
+
+
 def scan_daily_horn_signals():
-    """Run once each morning: price up, account ratio down, OI up; CVD is a confirmation label."""
+    """Run once each morning: startup horn + continuation horn; CVD is a confirmation label."""
     snapshot = load_latest_market_snapshot()
     if not snapshot:
         return 0
@@ -1870,7 +1920,7 @@ def scan_daily_horn_signals():
             momentum = row.get(field)
             if momentum and momentum > 0:
                 candidates.append((momentum, group["symbol"], timeframe))
-    candidates = sorted(candidates, reverse=True)[:80]
+    candidates = sorted(candidates, reverse=True)[:100]
     signals = []
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(fetch_horn_metrics, symbol, timeframe) for _, symbol, timeframe in candidates]
@@ -1878,9 +1928,21 @@ def scan_daily_horn_signals():
             item = future.result()
             if item and item["price_change"] > 0 and item["oi_change"] > 0 and item["ratio_change"] < 0:
                 signals.append(item)
+    continuation_symbols = []
+    seen_symbols = set()
+    for _, symbol, _ in candidates:
+        if symbol not in seen_symbols:
+            seen_symbols.add(symbol)
+            continuation_symbols.append(symbol)
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(fetch_horn_continuation_metrics, symbol) for symbol in continuation_symbols[:80]]
+        for future in as_completed(futures):
+            item = future.result()
+            if item:
+                signals.append(item)
     report_date = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
     DailyHornSignal.query.filter_by(report_date=report_date).delete()
-    selected = [item for timeframe in ("30m", "4h") for item in sorted((value for value in signals if value["timeframe"] == timeframe), key=lambda value: value["score"], reverse=True)[:20]]
+    selected = [item for timeframe in ("30m", "4h", "continue") for item in sorted((value for value in signals if value["timeframe"] == timeframe), key=lambda value: value["score"], reverse=True)[:20]]
     for item in selected:
         db.session.add(DailyHornSignal(report_date=report_date, **item))
     db.session.commit()
@@ -1913,9 +1975,10 @@ def trend_key_levels(symbol, timeframe):
 
 def compact_trend_judgement(items, support, resistance):
     frames = {item.timeframe: item for item in items}
-    primary = frames.get("4h") or frames.get("30m")
+    primary = frames.get("4h") or frames.get("30m") or frames.get("continue")
     short = frames.get("30m")
     long = frames.get("4h")
+    continuation = frames.get("continue")
     resonance = len(items) > 1
     cvd_ok = all(item.cvd_confirmed for item in items)
     strong = primary.score >= 85
@@ -1923,7 +1986,9 @@ def compact_trend_judgement(items, support, resistance):
     ratio_drop = primary.ratio_change or 0
     oi_text = f"持仓增加 {primary.oi_change:+.1f}%"
     ratio_text = f"多空人数比下降 {abs(ratio_drop):.1f}%"
-    if resonance and cvd_ok and strong:
+    if continuation and not (short or long):
+        core = "犄角延续型：前期持仓爆发后仍保留大部分仓位，多空人数比继续压低，价格结构仍在延续。"
+    elif resonance and cvd_ok and strong:
         core = f"30M 与 4H 同时共振，{oi_text}、{ratio_text}，主动买入也在跟，属于比较标准的犄型主升结构。"
     elif resonance and not cvd_ok:
         core = f"30M 与 4H 结构同向，但 CVD 没有完全确认，说明价格和持仓在推，主动买入并不够干净，要防冲高后的背离。"
@@ -1934,7 +1999,9 @@ def compact_trend_judgement(items, support, resistance):
     else:
         core = f"{primary.timeframe.upper()} 结构成立，但暂时不是最完整的共振，只能按候选观察。"
 
-    if overheated:
+    if continuation and cvd_ok:
+        flow = "CVD 仍然正向累积，不能只因 OI 从峰值小幅回落就剔除；继续盯放量、资费和基差是否转坏。"
+    elif overheated:
         flow = "涨幅和持仓扩张都很猛，优势是主力推动明显，缺点是短线拥挤，接近压力位时要看是否放量承接。"
     elif cvd_ok and primary.ratio_change < -20:
         flow = "CVD 上涨且人数比明显下跌，说明主动买入在推，散户侧仍有做空/不追多的对手盘，延续性比普通拉升更好。"
@@ -2066,7 +2133,7 @@ def send_daily_lark_trend_report():
     for index, (resonance, symbol, items) in enumerate(candidates, 1):
         for item in items:
             if item.oi_value is None or item.ratio_value is None:
-                fresh = fetch_horn_metrics(symbol, item.timeframe)
+                fresh = fetch_horn_continuation_metrics(symbol) if item.timeframe == "continue" else fetch_horn_metrics(symbol, item.timeframe)
                 if fresh:
                     item.oi_value = fresh.get("oi_value")
                     item.ratio_value = fresh.get("ratio_value")
@@ -2084,13 +2151,14 @@ def send_daily_lark_trend_report():
 
         def metric_line(timeframe):
             item = rows.get(timeframe)
+            label = "延续" if timeframe == "continue" else timeframe.upper()
             if not item:
-                return f"近{timeframe.upper()}：暂无完整结构"
+                return f"近{label}：暂无完整结构"
             price_color = lark_signed_color(item.price_change)
             oi_color = lark_signed_color(item.oi_change)
             ratio_color = "cus-bear" if item.ratio_change and item.ratio_change < 0 else lark_signed_color(item.ratio_change)
             return (
-                f"近{timeframe.upper()}：价格 <font color='{price_color}'>{item.price_change:+.2f}%</font>"
+                f"近{label}：价格 <font color='{price_color}'>{item.price_change:+.2f}%</font>"
                 f"｜持仓 <font color='{oi_color}'>{item.oi_change:+.2f}%</font>（{lark_large_value(item.oi_value)}）"
                 f"｜多空人数比 <font color='{ratio_color}'>{item.ratio_change:+.2f}%</font>（{lark_ratio_value(item.ratio_value)}）"
                 f"｜CVD {lark_cvd_label(item.cvd_change)}"
@@ -2098,10 +2166,13 @@ def send_daily_lark_trend_report():
 
         short_item = rows.get("30m")
         long_item = rows.get("4h")
+        continue_item = rows.get("continue")
         if short_item and long_item:
             setup_title = "双周期犄型共振"
         elif long_item:
             setup_title = "4H 主结构成立，30M 等回踩确认"
+        elif continue_item:
+            setup_title = "犄角延续型，结构分参与前三排序"
         else:
             setup_title = "30M 短线点火，等待 4H 跟随"
         levels_text = f"向下看 {support:.6g}｜向上看 {resistance:.6g}" if support and resistance else "关键位暂未同步"
@@ -2112,6 +2183,7 @@ def send_daily_lark_trend_report():
             f"时间：{report_date} 08:00",
             metric_line("30m"),
             metric_line("4h"),
+            metric_line("continue") if "continue" in rows else "",
             f"判断：{compact_trend_judgement(items, support, resistance)}",
             f"关键位：{levels_text}",
             f"COINGLASS：[https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}](https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')})",
@@ -2146,7 +2218,7 @@ def mark_lark_daily_trend_pushed(report_date):
 def daily_report_trends():
     snapshot = load_latest_market_snapshot()
     if not snapshot:
-        return jsonify({"updated_at": None, "rising": [], "falling": [], "horn_30m": [], "horn_4h": []})
+        return jsonify({"updated_at": None, "rising": [], "falling": [], "horn_30m": [], "horn_4h": [], "horn_continue": []})
     enrich_price_changes(snapshot["symbols"])
     rows = [
         {"symbol": group["symbol"], "change_24h": group["rows"][0].get("change_24h"), "change_7d": group["rows"][0].get("change_7d")}
@@ -2156,7 +2228,7 @@ def daily_report_trends():
     report_date = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
     horn_rows = DailyHornSignal.query.filter_by(report_date=report_date).order_by(DailyHornSignal.score.desc()).all()
     signal_payload = lambda item: {"symbol": item.symbol, "timeframe": item.timeframe, "price_change": item.price_change, "oi_change": item.oi_change, "oi_value": item.oi_value, "ratio_change": item.ratio_change, "ratio_value": item.ratio_value, "cvd_confirmed": item.cvd_confirmed, "score": item.score}
-    return jsonify({"updated_at": snapshot["updated_at"], "rising": sorted(valid, key=lambda item: item["change_24h"], reverse=True)[:20], "falling": sorted(valid, key=lambda item: item["change_24h"])[:20], "horn_30m": [signal_payload(item) for item in horn_rows if item.timeframe == "30m"], "horn_4h": [signal_payload(item) for item in horn_rows if item.timeframe == "4h"], "automation_status": automation_statuses("daily_horn_scan", "daily_lark_trend_push")})
+    return jsonify({"updated_at": snapshot["updated_at"], "rising": sorted(valid, key=lambda item: item["change_24h"], reverse=True)[:20], "falling": sorted(valid, key=lambda item: item["change_24h"])[:20], "horn_30m": [signal_payload(item) for item in horn_rows if item.timeframe == "30m"], "horn_4h": [signal_payload(item) for item in horn_rows if item.timeframe == "4h"], "horn_continue": [signal_payload(item) for item in horn_rows if item.timeframe == "continue"], "automation_status": automation_statuses("daily_horn_scan", "daily_lark_trend_push")})
 
 
 THOUGHT_WATCHLIST = {

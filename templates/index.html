@@ -11,13 +11,14 @@
     <nav>
       <a class="active" data-view="dashboard" href="#dashboard">▦ &nbsp;机会看板</a>
       <a data-view="dual-futures" href="#dual-futures">⇄ &nbsp;期多期空套利</a>
-      <a data-view="spot-futures" href="#spot-futures">◐ &nbsp;现多期空套利</a>
-      <div class="spot-period-nav" aria-label="Binance 合约结算周期筛选"><button class="spot-period-filter active" data-spot-period="all" onclick="setSpotFundingInterval('all')">全部</button><button class="spot-period-filter" data-spot-period="1H" onclick="setSpotFundingInterval('1H')">1H</button><button class="spot-period-filter" data-spot-period="4H" onclick="setSpotFundingInterval('4H')">4H</button><button class="spot-period-filter" data-spot-period="8H" onclick="setSpotFundingInterval('8H')">8H</button></div>
+      <a data-view="spot-futures" data-subnav="spot-period-nav" href="#spot-futures">◐ &nbsp;现多期空套利</a>
+      <div class="spot-period-nav nav-sub hidden" aria-label="Binance 合约结算周期筛选"><button class="spot-period-filter active" data-spot-period="all" onclick="setSpotFundingInterval('all')">全部</button><button class="spot-period-filter" data-spot-period="1H" onclick="setSpotFundingInterval('1H')">1H</button><button class="spot-period-filter" data-spot-period="4H" onclick="setSpotFundingInterval('4H')">4H</button><button class="spot-period-filter" data-spot-period="8H" onclick="setSpotFundingInterval('8H')">8H</button></div>
       <a data-view="funding-trend" href="#funding-trend">↗ &nbsp;主升正资费套利榜</a>
-      <div class="daily-nav"><span>日报</span><a data-view="daily-trends" href="#daily-trends">趋势推送</a><a data-view="daily-thoughts" href="#daily-thoughts">思路分析</a><a data-view="daily-listings" href="#daily-listings">上下架信息</a></div>
+      <a data-view="thinking" href="#thinking">✦ &nbsp;我的套利思维</a>
+      <a data-view="daily-trends" data-subnav="daily-nav" href="#daily-trends">◆ &nbsp;日报</a>
+      <div class="daily-nav nav-sub hidden"><a data-view="daily-trends" href="#daily-trends">趋势推送</a><a data-view="daily-thoughts" href="#daily-thoughts">思路分析</a><a data-view="daily-listings" href="#daily-listings">上下架信息</a></div>
       <a data-view="alerts" href="#alerts">◉ &nbsp;报警中心</a>
       <a data-view="token-hedge" href="#token-hedge">◎ &nbsp;官方动态研究</a>
-      <a data-view="thinking" href="#thinking">✦ &nbsp;我的套利思维</a>
       <a data-view="strategies" href="#strategies">◌ &nbsp;策略管理</a>
       <a data-view="risk" href="#risk">◇ &nbsp;风险提示</a>
     </nav>

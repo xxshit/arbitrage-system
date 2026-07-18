@@ -1909,6 +1909,10 @@ def fetch_t_micro_metrics(raw_symbol):
     }
 
 
+BINANCE_FUTURES_DEPTH_MAX_LIMIT = 1000
+BINANCE_SPOT_DEPTH_MAX_LIMIT = 5000
+
+
 def fetch_ake_orderbook_wall(raw_symbol):
     """AKE 上方 0.0020-0.0023 卖墙监控。挂单只作为盘口意图线索，不直接等同真实空单。"""
     reference_buckets = [
@@ -1917,7 +1921,7 @@ def fetch_ake_orderbook_wall(raw_symbol):
         {"level": 0.0022, "upper": 0.0023, "qty": 1_000_000, "notional": 0.0022 * 1_000_000},
     ]
     try:
-        depth = get_json("https://fapi.binance.com/fapi/v1/depth?" + urlencode({"symbol": raw_symbol, "limit": 1000}), timeout=8)
+        depth = get_json("https://fapi.binance.com/fapi/v1/depth?" + urlencode({"symbol": raw_symbol, "limit": BINANCE_FUTURES_DEPTH_MAX_LIMIT}), timeout=8)
         ticker = get_json("https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({"symbol": raw_symbol}), timeout=8)
     except Exception:
         return {}
@@ -1937,16 +1941,30 @@ def fetch_ake_orderbook_wall(raw_symbol):
     last = float(ticker.get("lastPrice", 0) or 0)
     visible_high = max([price for price, _qty in asks] or [0])
     visible_depth_covers_wall = visible_high >= 0.0023
+    spot_depth = {}
+    try:
+        spot_depth = get_json("https://api.binance.com/api/v3/depth?" + urlencode({"symbol": raw_symbol, "limit": BINANCE_SPOT_DEPTH_MAX_LIMIT}), timeout=8)
+    except Exception:
+        spot_depth = {}
+    spot_asks = [(float(price), float(qty)) for price, qty in spot_depth.get("asks", [])]
+    spot_wall_qty = sum(qty for price, qty in spot_asks if 0.0020 <= price < 0.0023)
+    spot_wall_notional = sum(price * qty for price, qty in spot_asks if 0.0020 <= price < 0.0023)
+    spot_visible_high = max([price for price, _qty in spot_asks] or [0])
     return {
         "last": last,
         "buckets": buckets,
         "reference_buckets": reference_buckets,
+        "futures_depth_limit": BINANCE_FUTURES_DEPTH_MAX_LIMIT,
+        "spot_depth_limit": BINANCE_SPOT_DEPTH_MAX_LIMIT,
         "wall_qty": wall_qty,
         "wall_notional": wall_notional,
         "near_bid_qty": near_bid_qty,
         "near_bid_notional": near_bid_notional,
         "visible_high": visible_high,
         "visible_depth_covers_wall": visible_depth_covers_wall,
+        "spot_wall_qty": spot_wall_qty,
+        "spot_wall_notional": spot_wall_notional,
+        "spot_visible_high": spot_visible_high,
         "wall_low": 0.0020,
         "wall_mid": 0.00215,
         "wall_high": 0.0023,

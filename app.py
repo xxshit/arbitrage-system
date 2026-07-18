@@ -295,6 +295,20 @@ MARKET_REFRESH_METRICS = {
 }
 # 中文搜索只匹配交易所真实提供的中文币种名称，避免“币安币”这类译名误匹配 BNB。
 COIN_ALIASES = {}
+CONTRACT_SPOT_ALIASES = {
+    "1000XECUSDT": {"spot_symbol": "XECUSDT", "multiplier": 1000, "canonical": "XEC/USDT"},
+}
+
+
+def contract_spot_alias(symbol):
+    return CONTRACT_SPOT_ALIASES.get(symbol, {"spot_symbol": symbol, "multiplier": 1, "canonical": f"{symbol[:-4]}/USDT"})
+
+
+def canonical_market_symbol(symbol):
+    compact = symbol.upper().replace("/", "")
+    if compact in CONTRACT_SPOT_ALIASES:
+        return CONTRACT_SPOT_ALIASES[compact]["canonical"]
+    return f"{compact[:-4]}/USDT" if compact.endswith("USDT") else symbol.upper()
 
 
 def get_json(url, timeout=4):
@@ -1470,16 +1484,20 @@ def spot_futures_snapshot():
         futures_book, funding_item = futures_books.get(symbol), funding.get(symbol)
         if not futures_book or not funding_item:
             continue
+        alias = contract_spot_alias(symbol)
+        spot_symbol = alias["spot_symbol"]
+        multiplier = alias["multiplier"]
         rows = []
         for exchange in ("Binance", "Gate", "Bitget"):
-            book = spot_books[exchange].get(symbol)
+            raw_book = spot_books[exchange].get(spot_symbol)
+            book = {"ask": raw_book["ask"] * multiplier, "bid": raw_book["bid"] * multiplier} if raw_book and multiplier != 1 else raw_book
             if not book:
                 continue
             open_spread = (futures_book["bid"] - book["ask"]) / book["ask"] * 100
             close_spread = (futures_book["ask"] - book["bid"]) / book["bid"] * 100
             contract_basis = (float(funding_item["markPrice"]) - float(funding_item["indexPrice"])) / float(funding_item["indexPrice"]) * 100
             oi_contracts = BINANCE_OPEN_INTEREST_CACHE.get(symbol, {}).get("contracts")
-            rows.append({"long_exchange": exchange, "long_ask": book["ask"], "long_bid": book["bid"], "short_exchange": "Binance 合约", "short_bid": futures_book["bid"], "short_ask": futures_book["ask"], "basis": contract_basis, "funding_rate": float(funding_item["lastFundingRate"]) * 100, "funding_interval_hours": intervals.get(symbol, 8), "next_funding_time": datetime.fromtimestamp(int(funding_item["nextFundingTime"]) / 1000, tz=timezone.utc).astimezone().strftime("%m-%d %H:%M"), "spot_volume": spot_volumes[exchange].get(symbol), "futures_volume": futures_volumes.get(symbol), "futures_open_interest": oi_contracts * float(funding_item.get("markPrice", 0) or 0) if oi_contracts is not None else None, "open_spread": open_spread, "close_spread": close_spread})
+            rows.append({"long_exchange": exchange, "long_ask": book["ask"], "long_bid": book["bid"], "short_exchange": "Binance 合约", "short_bid": futures_book["bid"], "short_ask": futures_book["ask"], "basis": contract_basis, "funding_rate": float(funding_item["lastFundingRate"]) * 100, "funding_interval_hours": intervals.get(symbol, 8), "next_funding_time": datetime.fromtimestamp(int(funding_item["nextFundingTime"]) / 1000, tz=timezone.utc).astimezone().strftime("%m-%d %H:%M"), "spot_volume": spot_volumes[exchange].get(spot_symbol), "futures_volume": futures_volumes.get(symbol), "futures_open_interest": oi_contracts * float(funding_item.get("markPrice", 0) or 0) if oi_contracts is not None else None, "open_spread": open_spread, "close_spread": close_spread})
         if rows:
             rows_by_symbol.append({"symbol": f"{symbol[:-4]}/USDT", "rows": rows})
     rows_finished_at = time.perf_counter()
@@ -3456,8 +3474,43 @@ def gainers_losers():
         "price": contract_mid_price(group),
         "volume_24h": group["rows"][0].get("futures_volume"),
     } for group in snapshot["symbols"] if not is_rwa_stock_pair(group["symbol"])]
+    seconds = TREND_WINDOWS.get(period, 24 * 60 * 60)
+    now_bucket = int(time.time()) // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
+    target_bucket = now_bucket - seconds
+    dual_rows = LatestDualFuturesSnapshot.query.all()
+    dual_symbols = sorted({item.symbol for item in dual_rows if not is_rwa_stock_pair(item.symbol)})
+    dual_history = {
+        item.symbol: item.price
+        for item in FuturesPriceHistory.query.filter(
+            FuturesPriceHistory.symbol.in_(dual_symbols),
+            FuturesPriceHistory.bucket_at == target_bucket,
+        ).all()
+    }
+    seen_dual_symbols = set()
+    for item in dual_rows:
+        if item.symbol in seen_dual_symbols or is_rwa_stock_pair(item.symbol):
+            continue
+        current = volume = None
+        if item.long_exchange == "Binance":
+            current = (item.long_ask + item.long_bid) / 2
+            volume = item.long_volume
+        elif item.short_exchange == "Binance":
+            current = (item.short_ask + item.short_bid) / 2
+            volume = item.short_volume
+        previous = dual_history.get(item.symbol)
+        if current and previous:
+            rows.append({"symbol": item.symbol, "change": (current - previous) / previous * 100, "price": current, "volume_24h": volume})
+        seen_dual_symbols.add(item.symbol)
     rows = [row for row in rows if row["change"] is not None]
-    return jsonify({"period": period, "updated_at": snapshot["updated_at"], "rising": sorted(rows, key=lambda row: row["change"], reverse=True)[:50], "falling": sorted(rows, key=lambda row: row["change"])[:50]})
+    def dedupe(items, reverse=False):
+        best = {}
+        for row in items:
+            key = canonical_market_symbol(row["symbol"])
+            current = best.get(key)
+            if current is None or (row["change"] > current["change"] if reverse else row["change"] < current["change"]):
+                best[key] = row
+        return sorted(best.values(), key=lambda row: row["change"], reverse=reverse)[:50]
+    return jsonify({"period": period, "updated_at": snapshot["updated_at"], "rising": dedupe(rows, True), "falling": dedupe(rows, False)})
 
 
 @app.get("/api/symbol-detail")

@@ -1909,6 +1909,50 @@ def fetch_t_micro_metrics(raw_symbol):
     }
 
 
+def fetch_ake_orderbook_wall(raw_symbol):
+    """AKE 上方 0.0020-0.0023 卖墙监控。挂单只作为盘口意图线索，不直接等同真实空单。"""
+    reference_buckets = [
+        {"level": 0.0020, "upper": 0.0021, "qty": 1_100_000, "notional": 0.0020 * 1_100_000},
+        {"level": 0.0021, "upper": 0.0022, "qty": 1_200_000, "notional": 0.0021 * 1_200_000},
+        {"level": 0.0022, "upper": 0.0023, "qty": 1_000_000, "notional": 0.0022 * 1_000_000},
+    ]
+    try:
+        depth = get_json("https://fapi.binance.com/fapi/v1/depth?" + urlencode({"symbol": raw_symbol, "limit": 1000}), timeout=8)
+        ticker = get_json("https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({"symbol": raw_symbol}), timeout=8)
+    except Exception:
+        return {}
+    asks = [(float(price), float(qty)) for price, qty in depth.get("asks", [])]
+    bids = [(float(price), float(qty)) for price, qty in depth.get("bids", [])]
+    levels = [0.0020, 0.0021, 0.0022, 0.0023]
+    buckets = []
+    for level in levels:
+        upper = level + 0.0001
+        qty = sum(qty for price, qty in asks if level <= price < upper)
+        notional = sum(price * qty for price, qty in asks if level <= price < upper)
+        buckets.append({"level": level, "upper": upper, "qty": qty, "notional": notional})
+    wall_qty = sum(item["qty"] for item in buckets)
+    wall_notional = sum(item["notional"] for item in buckets)
+    near_bid_qty = sum(qty for price, qty in bids if 0.0018 <= price < 0.0020)
+    near_bid_notional = sum(price * qty for price, qty in bids if 0.0018 <= price < 0.0020)
+    last = float(ticker.get("lastPrice", 0) or 0)
+    visible_high = max([price for price, _qty in asks] or [0])
+    visible_depth_covers_wall = visible_high >= 0.0023
+    return {
+        "last": last,
+        "buckets": buckets,
+        "reference_buckets": reference_buckets,
+        "wall_qty": wall_qty,
+        "wall_notional": wall_notional,
+        "near_bid_qty": near_bid_qty,
+        "near_bid_notional": near_bid_notional,
+        "visible_high": visible_high,
+        "visible_depth_covers_wall": visible_depth_covers_wall,
+        "wall_low": 0.0020,
+        "wall_mid": 0.00215,
+        "wall_high": 0.0023,
+    }
+
+
 def fetch_liquidation_summary(symbol, lookback_minutes=240):
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - lookback_minutes * 60 * 1000
@@ -2419,6 +2463,7 @@ def thought_snapshot(symbol):
         "basis": None,
         "validation": {},
         "micro_validation": {},
+        "orderbook_wall": {},
         "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "fallback",
     }
@@ -2458,6 +2503,7 @@ def thought_snapshot(symbol):
         index_price = float(premium.get("indexPrice", 0) or 0)
         mark_price = float(premium.get("markPrice", 0) or 0)
         micro_validation = fetch_t_micro_metrics(raw_symbol) if symbol == "T/USDT" else {}
+        orderbook_wall = fetch_ake_orderbook_wall(raw_symbol) if symbol == "AKE/USDT" else {}
         return {
             **fallback,
             "last": last,
@@ -2475,6 +2521,7 @@ def thought_snapshot(symbol):
             "basis": percent_delta(mark_price, index_price) if index_price else None,
             "validation": {"30m": window_metrics(1), "1h": window_metrics(2), "2h": window_metrics(4)},
             "micro_validation": micro_validation,
+            "orderbook_wall": orderbook_wall,
             "source": "live",
         }
     except Exception:
@@ -2501,6 +2548,7 @@ def thought_snapshot_from_db(symbol, fallback):
         "change_4h": None,
         "validation": {},
         "micro_validation": {},
+        "orderbook_wall": {},
         "source": "db_fallback",
     }
 
@@ -2572,10 +2620,48 @@ def t_micro_direction(analysis):
     return None
 
 
+def ake_orderbook_wall_direction(analysis):
+    if analysis.get("symbol") != "AKE/USDT":
+        return None
+    wall = analysis.get("orderbook_wall") or {}
+    last = analysis.get("last") or wall.get("last")
+    if not last:
+        return None
+
+    wall_qty = wall.get("wall_qty") or 0
+    wall_notional = wall.get("wall_notional") or 0
+    reference_qty = sum((item.get("qty") or 0) for item in (wall.get("reference_buckets") or []))
+    wall_exists = wall_qty >= 2_000_000 or wall_notional >= 3_000 or reference_qty >= 2_000_000
+    if not wall_exists:
+        return None
+
+    validation = analysis.get("validation") or {}
+    short_windows = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
+
+    def value(row, key, default=0):
+        item = row.get(key)
+        return default if item is None else item
+
+    cvd_up = sum(value(item, "cvd") > 0 for item in short_windows)
+    oi_up = sum(value(item, "oi_change") > 0 for item in short_windows)
+    price_weak = sum(value(item, "price_change") < -0.25 for item in short_windows)
+    cvd_weak = sum(value(item, "cvd") < 0 for item in short_windows)
+    volume_active = any(value(item, "volume_ratio") >= 1.35 for item in short_windows)
+
+    if last >= 0.0022 and cvd_up >= 2 and oi_up >= 1:
+        return "ake_wall_breakout"
+    if last < 0.0020 and volume_active and (price_weak >= 2 or cvd_weak >= 2):
+        return "ake_wall_rejection"
+    return None
+
+
 def thought_push_direction(analysis):
     t_direction = t_micro_direction(analysis)
     if t_direction:
         return t_direction
+    ake_direction = ake_orderbook_wall_direction(analysis)
+    if ake_direction:
+        return ake_direction
     validation = analysis.get("validation") or {}
     checks = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
     valid = [item for item in checks if item.get("price_change") is not None and item.get("oi_change") is not None and item.get("ratio_change") is not None and item.get("cvd") is not None]
@@ -2633,6 +2719,9 @@ def thought_signal_key(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         price_bucket = int(last * 100000) if last else 0
         return f"{direction}-{price_bucket}"
+    if direction in {"ake_wall_breakout", "ake_wall_rejection"}:
+        price_bucket = int(last * 1000000) if last else 0
+        return f"{direction}-{price_bucket}"
     if direction == "bullish" and resistance and last >= resistance * 0.995:
         return "bullish-near-breakout"
     if direction in {"bearish", "reversal", "distribution"} and support and last <= support * 1.005:
@@ -2687,9 +2776,73 @@ def thought_lark_t_message(analysis, direction):
     ])
 
 
+def ake_wall_bucket_line(wall):
+    buckets = wall.get("buckets") or []
+    live_qty = sum((item.get("qty") or 0) for item in buckets)
+    if not buckets:
+        return "盘口墙：暂无深度快照"
+    if live_qty <= 0 and wall.get("reference_buckets"):
+        buckets = wall.get("reference_buckets") or []
+        parts = []
+        for item in buckets:
+            parts.append(f"{item.get('level', 0):.4f}参考≈{lark_compact_number(item.get('qty'))}")
+        visible_high = wall.get("visible_high")
+        suffix = f"；当前公开深度最高卖档仅到 {lark_price_value(visible_high)}，暂未覆盖墙区" if visible_high else ""
+        return "盘口墙：" + " ｜ ".join(parts) + suffix
+    parts = []
+    for item in buckets:
+        parts.append(f"{item.get('level', 0):.4f}≈{lark_compact_number(item.get('qty'))}")
+    return "盘口墙：" + " ｜ ".join(parts)
+
+
+def thought_lark_ake_wall_message(analysis, direction):
+    symbol = analysis["symbol"]
+    wall = analysis.get("orderbook_wall") or {}
+    validation = analysis.get("validation") or {}
+    breakout = direction == "ake_wall_breakout"
+    header = (
+        "方向：<font color='cus-bull'>● 🔵⬆️ 看涨 / 卖墙突破逼空观察</font>"
+        if breakout
+        else "方向：<font color='cus-bear'>● 🔵⬇️ 看跌 / 卖墙下方派发观察</font>"
+    )
+    title = (
+        "AKE思路盯盘：0.0020-0.0023 压力带被吃穿"
+        if breakout
+        else "AKE思路盯盘：0.0020 压力墙下方转弱"
+    )
+    judgement = (
+        "判断：0.0020-0.0023 这一段卖墙如果被主动吃穿，说明主力愿意消化这片上方压力；在 CVD 与持仓没有同步转弱前，更像是继续逼退空头/逼空的动作。这里不能直接追远端目标，重点看突破后是否继续放量、基差是否继续正向打开、爆仓是否跟随出现。"
+        if breakout
+        else "判断：如果 AKE 长时间站不上 0.0020，盘口墙仍压在上方，同时 30MIN/1H/2H 里价格或 CVD 开始转弱，就更像是在墙下派发或诱多失败。这里要防止把压力墙误读成必然逼空，主力不吃墙时，墙本身反而会成为出货天花板。"
+    )
+    key_zone = (
+        "关键位：0.0020 是压力带下沿；0.0022 是突破确认线；0.0023 上方若还能稳住，才算墙被真正消化。回落跌回 0.0020 下方，突破信号降级。"
+        if breakout
+        else "关键位：0.0020 下方继续横住但量能/CVD 走弱，要按派发风险看；重新站上 0.0022，空墙思路才重新转为逼空观察。"
+    )
+    effective_wall_qty = wall.get("wall_qty") or sum((item.get("qty") or 0) for item in (wall.get("reference_buckets") or []))
+    effective_wall_notional = wall.get("wall_notional") or sum((item.get("notional") or 0) for item in (wall.get("reference_buckets") or []))
+    return "\n".join([
+        header,
+        title,
+        f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"价格：{lark_price_value(analysis.get('last'))}，BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}，BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        ake_wall_bucket_line(wall),
+        f"卖墙合计：{lark_compact_number(effective_wall_qty)} AKE，约 {lark_compact_number(effective_wall_notional)} USDT；0.0018-0.0020 买盘约 {lark_compact_number(wall.get('near_bid_qty'))} AKE",
+        thought_window_line(validation, "30MIN", "30m"),
+        thought_window_line(validation, "1H", "1h"),
+        thought_window_line(validation, "2H", "2h"),
+        judgement,
+        key_zone,
+        f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
+    ])
+
+
 def thought_lark_message(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         return thought_lark_t_message(analysis, direction)
+    if direction in {"ake_wall_breakout", "ake_wall_rejection"}:
+        return thought_lark_ake_wall_message(analysis, direction)
     if analysis.get("source") == "db_fallback" or direction in {"bullish_db_watch", "bearish_db_watch"}:
         return thought_lark_db_fallback_message(analysis, direction)
     validation = analysis.get("validation") or {}
@@ -2856,6 +3009,8 @@ def thought_key_zone(analysis):
 def thought_lark_message(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         return thought_lark_t_message(analysis, direction)
+    if direction in {"ake_wall_breakout", "ake_wall_rejection"}:
+        return thought_lark_ake_wall_message(analysis, direction)
     if analysis.get("source") == "db_fallback" or direction in {"bullish_db_watch", "bearish_db_watch"}:
         return thought_lark_db_fallback_message(analysis, direction)
     symbol = analysis["symbol"]

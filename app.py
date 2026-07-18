@@ -1831,6 +1831,19 @@ def directional_consistency(values, direction):
     return (sum(change > 0 for change in valid) if direction == "up" else sum(change < 0 for change in valid)) / len(valid) if valid else 0.0
 
 
+def percentile(values, q):
+    cleaned = sorted(float(value) for value in values if value is not None)
+    if not cleaned:
+        return None
+    if len(cleaned) == 1:
+        return cleaned[0]
+    position = (len(cleaned) - 1) * q / 100
+    lower = int(position)
+    upper = min(lower + 1, len(cleaned) - 1)
+    weight = position - lower
+    return cleaned[lower] * (1 - weight) + cleaned[upper] * weight
+
+
 def fetch_horn_metrics(symbol, timeframe):
     raw_symbol = symbol.replace("/", "")
     try:
@@ -1841,15 +1854,16 @@ def fetch_horn_metrics(symbol, timeframe):
         closed = klines[:-1]
         if len(oi) < 2 or len(ratios) < 2 or len(closed) < 2:
             return None
+        oi_amounts = [float(row.get("sumOpenInterest", 0) or 0) for row in oi]
         oi_value = float(oi[-1].get("sumOpenInterestValue", 0) or 0)
         ratio_value = float(ratios[-1].get("longShortRatio", 0) or 0)
-        oi_change = percent_delta(oi_value, float(oi[0].get("sumOpenInterestValue", 0) or 0))
+        oi_change = percent_delta(oi_amounts[-1], oi_amounts[0])
         ratio_change = percent_delta(ratio_value, float(ratios[0].get("longShortRatio", 0) or 0))
         price_change = percent_delta(float(closed[-1][4]), float(closed[0][4]))
         cvd_change = sum((2 * float(row[10]) - float(row[7])) for row in closed)
         if None in (oi_change, ratio_change, price_change):
             return None
-        score = (min(price_change / 30, 1) * 15 + directional_consistency([row[4] for row in closed], "up") * 15 + min(oi_change / 30, 1) * 15 + directional_consistency([row.get("sumOpenInterestValue", 0) for row in oi], "up") * 15 + min(abs(ratio_change) / 25, 1) * 15 + directional_consistency([row.get("longShortRatio", 0) for row in ratios], "down") * 15 + (10 if cvd_change > 0 else 0))
+        score = (min(price_change / 30, 1) * 15 + directional_consistency([row[4] for row in closed], "up") * 15 + min(oi_change / 30, 1) * 15 + directional_consistency(oi_amounts, "up") * 15 + min(abs(ratio_change) / 25, 1) * 15 + directional_consistency([row.get("longShortRatio", 0) for row in ratios], "down") * 15 + (10 if cvd_change > 0 else 0))
         return {"symbol": symbol, "timeframe": timeframe, "price_change": price_change, "oi_change": oi_change, "oi_value": oi_value, "ratio_change": ratio_change, "ratio_value": ratio_value, "cvd_change": cvd_change, "cvd_confirmed": cvd_change > 0, "score": round(score, 1)}
     except Exception:
         return None
@@ -1865,11 +1879,27 @@ def fetch_horn_continuation_metrics(symbol):
         closed = klines[:-1]
         if len(oi) < 24 or len(ratios) < 24 or len(closed) < 24:
             return None
-        oi_values = [float(row.get("sumOpenInterestValue", 0) or 0) for row in oi]
+        oi_values = [float(row.get("sumOpenInterest", 0) or 0) for row in oi]
+        current_oi_value = float(oi[-1].get("sumOpenInterestValue", 0) or 0)
         ratio_values = [float(row.get("longShortRatio", 0) or 0) for row in ratios]
         current_oi = oi_values[-1]
         start_oi = max(oi_values[0], 1e-9)
-        peak_oi = max(oi_values) or current_oi
+        peak_index = max(range(len(oi_values)), key=lambda index: oi_values[index])
+        peak_oi = oi_values[peak_index] or current_oi
+        baseline = percentile(oi_values[:30], 50) or start_oi
+        impulse_start = 0
+        for index, value in enumerate(oi_values[:peak_index + 1]):
+            if value >= baseline * 1.25:
+                impulse_start = index
+                break
+        structure_start = max(impulse_start, peak_index - 60)
+        structure_values = oi_values[structure_start:-3] if len(oi_values[structure_start:-3]) >= 12 else oi_values[impulse_start:-3]
+        if len(structure_values) < 12:
+            return None
+        structure_bottom = percentile(structure_values, 20)
+        structure_mid = (structure_bottom + peak_oi) / 2 if structure_bottom else None
+        if not structure_bottom or current_oi < structure_bottom:
+            return None
         retention = current_oi / peak_oi if peak_oi else 0
         oi_multiple = current_oi / start_oi if start_oi else 0
         oi_change = percent_delta(current_oi, start_oi)
@@ -1887,14 +1917,16 @@ def fetch_horn_continuation_metrics(symbol):
         price_structure_score = directional_consistency([row[4] for row in closed[-50:]], "up") * 8
         cvd_score = 8 if cvd_change > 0 else 0
         score = price_score + oi_multiple_score + retention_score + ratio_level_score + ratio_change_score + price_structure_score + cvd_score
-        if not (price_change > 8 and oi_multiple >= 1.3 and retention >= 0.55 and (ratio_value <= 0.9 or ratio_change < -15) and score >= 55):
+        if structure_mid and current_oi < structure_mid:
+            score = min(score, 68)
+        if not (price_change > 8 and oi_multiple >= 1.3 and retention >= 0.55 and ratio_change < -10 and cvd_change > 0 and score >= 55):
             return None
         return {
             "symbol": symbol,
             "timeframe": "continue",
             "price_change": price_change,
             "oi_change": oi_change,
-            "oi_value": current_oi,
+            "oi_value": current_oi_value,
             "ratio_change": ratio_change,
             "ratio_value": ratio_value,
             "cvd_change": cvd_change,

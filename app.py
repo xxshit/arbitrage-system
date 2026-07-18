@@ -2671,9 +2671,9 @@ def ake_orderbook_wall_direction(analysis):
     in_wall_zone = 0.0020 <= last < 0.0022
     near_wall_lower = 0.00195 <= last < 0.0020
 
-    if last >= 0.0022 and cvd_up >= 2 and oi_up >= 1:
+    if last >= 0.0022:
         return "ake_wall_breakout"
-    if in_wall_zone and (price_up >= 1 or cvd_up >= 2 or oi_up >= 1):
+    if in_wall_zone:
         return "ake_wall_zone_strength"
     if near_wall_lower and volume_active and cvd_up >= 1:
         return "ake_wall_test"

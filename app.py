@@ -2662,14 +2662,21 @@ def ake_orderbook_wall_direction(analysis):
 
     cvd_up = sum(value(item, "cvd") > 0 for item in short_windows)
     oi_up = sum(value(item, "oi_change") > 0 for item in short_windows)
+    price_up = sum(value(item, "price_change") > 0.25 for item in short_windows)
     price_weak = sum(value(item, "price_change") < -0.25 for item in short_windows)
     cvd_weak = sum(value(item, "cvd") < 0 for item in short_windows)
     volume_active = any(value(item, "volume_ratio") >= 1.35 for item in short_windows)
     resistance = analysis.get("resistance") or 0
     wall_was_tested = last >= 0.00195 or resistance >= 0.00198
+    in_wall_zone = 0.0020 <= last < 0.0022
+    near_wall_lower = 0.00195 <= last < 0.0020
 
-    if last >= 0.00222 and cvd_up >= 2 and oi_up >= 1 and volume_active:
+    if last >= 0.0022 and cvd_up >= 2 and oi_up >= 1:
         return "ake_wall_breakout"
+    if in_wall_zone and (price_up >= 1 or cvd_up >= 2 or oi_up >= 1):
+        return "ake_wall_zone_strength"
+    if near_wall_lower and volume_active and cvd_up >= 1:
+        return "ake_wall_test"
     if wall_was_tested and last < 0.00195 and volume_active and price_weak >= 2 and cvd_weak >= 2:
         return "ake_wall_rejection"
     return None
@@ -2739,8 +2746,9 @@ def thought_signal_key(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         price_bucket = int(last * 100000) if last else 0
         return f"{direction}-{price_bucket}"
-    if direction in {"ake_wall_breakout", "ake_wall_rejection"}:
-        return f"{direction}-confirmed"
+    if direction in {"ake_wall_test", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
+        price_bucket = int(last * 1000000) if last else 0
+        return f"{direction}-{price_bucket}"
     if direction == "bullish" and resistance and last >= resistance * 0.995:
         return "bullish-near-breakout"
     if direction in {"bearish", "reversal", "distribution"} and support and last <= support * 1.005:
@@ -2819,26 +2827,26 @@ def thought_lark_ake_wall_message(analysis, direction):
     wall = analysis.get("orderbook_wall") or {}
     validation = analysis.get("validation") or {}
     breakout = direction == "ake_wall_breakout"
-    header = (
-        "方向：<font color='cus-bull'>● 🔵⬆️ 看涨 / 卖墙突破逼空观察</font>"
-        if breakout
-        else "方向：<font color='cus-bear'>● 🔵⬇️ 看跌 / 卖墙下方派发观察</font>"
-    )
-    title = (
-        "AKE思路盯盘：0.0020-0.0023 压力带被吃穿"
-        if breakout
-        else "AKE思路盯盘：0.0020 压力墙下方转弱"
-    )
-    judgement = (
-        "判断：0.0020-0.0023 这一段卖墙如果被主动吃穿，说明主力愿意消化这片上方压力；在 CVD 与持仓没有同步转弱前，更像是继续逼退空头/逼空的动作。这里不能直接追远端目标，重点看突破后是否继续放量、基差是否继续正向打开、爆仓是否跟随出现。"
-        if breakout
-        else "判断：如果 AKE 长时间站不上 0.0020，盘口墙仍压在上方，同时 30MIN/1H/2H 里价格或 CVD 开始转弱，就更像是在墙下派发或诱多失败。这里要防止把压力墙误读成必然逼空，主力不吃墙时，墙本身反而会成为出货天花板。"
-    )
-    key_zone = (
-        "关键位：0.0020 是压力带下沿；0.0022 是突破确认线；0.0023 上方若还能稳住，才算墙被真正消化。回落跌回 0.0020 下方，突破信号降级。"
-        if breakout
-        else "关键位：0.0020 下方继续横住但量能/CVD 走弱，要按派发风险看；重新站上 0.0022，空墙思路才重新转为逼空观察。"
-    )
+    if direction == "ake_wall_test":
+        header = "方向：<font color='cus-bull'>● 🔵⬆️ 观察转强 / 试探 0.0020</font>"
+        title = "AKE思路盯盘：价格开始试探卖墙下沿"
+        judgement = "判断：AKE 已经靠近 0.0020 卖墙下沿，这里不是等 0.0022 才看，而是进入主力选择方向的区域。如果 CVD 转正、持仓不掉、量能放大，说明可能开始吃墙；如果反复碰 0.0020 不上去，后面就要转为墙下失败观察。"
+        key_zone = "关键位：0.0020 是进入压力区的第一道门；站上后看 0.0021/0.0022，站不上且跌回 0.00195 下方，说明试探失败概率升高。"
+    elif direction == "ake_wall_zone_strength":
+        header = "方向：<font color='cus-bull'>● 🔵⬆️ 看涨转强 / 进入卖墙区</font>"
+        title = "AKE思路盯盘：已进入 0.0020-0.0022 卖墙区"
+        judgement = "判断：价格进入 0.0020-0.0022 区间后，如果价格、CVD 或持仓开始配合转强，就说明主力可能在吃墙或逼退挂空/卖压。这里的重点是看能不能持续推进，而不是机械等 0.0022。"
+        key_zone = "关键位：0.0020 上方是转强观察；0.0022 是卖墙上沿确认；如果冲进墙区后迅速跌回 0.0020 下方，说明吃墙失败，需要降级。"
+    elif breakout:
+        header = "方向：<font color='cus-bull'>● 🔵⬆️ 看涨 / 卖墙上沿突破</font>"
+        title = "AKE思路盯盘：0.0022 上沿被突破"
+        judgement = "判断：0.0022 上沿被突破，说明 0.0020-0.0022 这段压力已经被明显消化；在 CVD 与持仓没有同步转弱前，更像是继续逼退空头/逼空。后续重点看是否继续放量、基差是否继续正向打开、爆仓是否跟随出现。"
+        key_zone = "关键位：0.0022 上方站稳才算卖墙上沿突破；0.0023 上方若还能稳住，说明墙区被真正消化。跌回 0.0020 下方，突破信号降级。"
+    else:
+        header = "方向：<font color='cus-bear'>● 🔵⬇️ 看跌 / 墙下反复失败</font>"
+        title = "AKE思路盯盘：0.0020 试探失败后转弱"
+        judgement = "判断：如果 AKE 反复试探 0.0020 却上不去，随后跌回 0.00195 下方，同时价格和 CVD 连续转弱，就更像是在墙下派发或诱多失败。这里要防止把压力墙误读成必然逼空，主力不吃墙时，墙本身反而会成为出货天花板。"
+        key_zone = "关键位：重新站上 0.0020，才恢复卖墙区观察；站不上且继续走弱，下方先看 0.0019/0.00185。"
     effective_wall_qty = wall.get("wall_qty") or sum((item.get("qty") or 0) for item in (wall.get("reference_buckets") or []))
     effective_wall_notional = wall.get("wall_notional") or sum((item.get("notional") or 0) for item in (wall.get("reference_buckets") or []))
     return "\n".join([
@@ -2860,7 +2868,7 @@ def thought_lark_ake_wall_message(analysis, direction):
 def thought_lark_message(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         return thought_lark_t_message(analysis, direction)
-    if direction in {"ake_wall_breakout", "ake_wall_rejection"}:
+    if direction in {"ake_wall_test", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
         return thought_lark_ake_wall_message(analysis, direction)
     if analysis.get("source") == "db_fallback" or direction in {"bullish_db_watch", "bearish_db_watch"}:
         return thought_lark_db_fallback_message(analysis, direction)
@@ -3028,7 +3036,7 @@ def thought_key_zone(analysis):
 def thought_lark_message(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         return thought_lark_t_message(analysis, direction)
-    if direction in {"ake_wall_breakout", "ake_wall_rejection"}:
+    if direction in {"ake_wall_test", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
         return thought_lark_ake_wall_message(analysis, direction)
     if analysis.get("source") == "db_fallback" or direction in {"bullish_db_watch", "bearish_db_watch"}:
         return thought_lark_db_fallback_message(analysis, direction)
@@ -3091,12 +3099,11 @@ def send_thought_analysis_push():
         if not direction:
             continue
         signal_key = thought_signal_key(analysis, direction)
-        latest_symbol_push = LarkPushState.query.filter_by(channel="thought_analysis", symbol=analysis["symbol"]).order_by(LarkPushState.pushed_at.desc()).first()
-        symbol_cooldown = 12 * 3600 if analysis["symbol"] == "AKE/USDT" else 6 * 3600
-        if latest_symbol_push and (datetime.now() - latest_symbol_push.pushed_at).total_seconds() < symbol_cooldown:
-            continue
+        signal_repeat_window = 0 if analysis["symbol"] == "AKE/USDT" else 6 * 3600
         existing = LarkPushState.query.filter_by(channel="thought_analysis", symbol=analysis["symbol"], signal_key=signal_key).first()
-        if existing and (datetime.now() - existing.pushed_at).total_seconds() < symbol_cooldown:
+        if existing and signal_repeat_window and (datetime.now() - existing.pushed_at).total_seconds() < signal_repeat_window:
+            continue
+        if existing and analysis["symbol"] == "AKE/USDT":
             continue
         sections.append(thought_lark_message(analysis, direction))
         push_records.append((existing, analysis, signal_key))

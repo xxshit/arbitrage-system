@@ -2679,6 +2679,7 @@ def ake_orderbook_wall_direction(analysis):
     volume_active = any(value(item, "volume_ratio") >= 1.35 for item in short_windows)
     resistance = analysis.get("resistance") or 0
     wall_was_tested = last >= 0.00195 or resistance >= 0.00198
+    wall_spiked_above_entry = resistance >= 0.0020
     in_wall_zone = 0.0020 <= last < 0.0022
     near_wall_lower = 0.00195 <= last < 0.0020
 
@@ -2686,9 +2687,11 @@ def ake_orderbook_wall_direction(analysis):
         return "ake_wall_breakout"
     if in_wall_zone:
         return "ake_wall_zone_strength"
+    if wall_spiked_above_entry and 0.00192 <= last < 0.0020 and (oi_up >= 1 or cvd_up >= 1 or not volume_active):
+        return "ake_wall_spike_retest"
     if near_wall_lower and volume_active and cvd_up >= 1:
         return "ake_wall_test"
-    if wall_was_tested and last < 0.00195 and volume_active and price_weak >= 2 and cvd_weak >= 2:
+    if wall_was_tested and last < 0.00190 and volume_active and price_weak >= 2 and cvd_weak >= 2 and oi_up == 0:
         return "ake_wall_rejection"
     return None
 
@@ -2757,7 +2760,7 @@ def thought_signal_key(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         price_bucket = int(last * 100000) if last else 0
         return f"{direction}-{price_bucket}"
-    if direction in {"ake_wall_test", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
+    if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
         price_bucket = int(last * 1000000) if last else 0
         return f"{direction}-{price_bucket}"
     if direction == "bullish" and resistance and last >= resistance * 0.995:
@@ -2843,6 +2846,11 @@ def thought_lark_ake_wall_message(analysis, direction):
         title = "AKE思路盯盘：价格开始试探卖墙下沿"
         judgement = "判断：AKE 已经靠近 0.0020 卖墙下沿，这里不是等 0.0022 才看，而是进入主力选择方向的区域。如果 CVD 转正、持仓不掉、量能放大，说明可能开始吃墙；如果反复碰 0.0020 不上去，后面就要转为墙下失败观察。"
         key_zone = "关键位：0.0020 是进入压力区的第一道门；站上后看 0.0021/0.0022，站不上且跌回 0.00195 下方，说明试探失败概率升高。"
+    elif direction == "ake_wall_spike_retest":
+        header = "方向：<font color='cus-bull'>● 🔵⬆️ 诱空观察 / 0.002 插针回踩</font>"
+        title = "AKE思路盯盘：插上 0.002 后快速回踩"
+        judgement = "判断：AKE 插到 0.002 上方后马上回落，不能直接按失败看。0.002 一碰到，很多挂空单/追空单会被吸进来，主力未必会立刻砸盘，反而可能是在试盘和诱空。只要回踩没有放量跌穿、持仓没有塌、CVD 没有连续恶化，我更倾向继续观察后续再拉。"
+        key_zone = "关键位：0.0020 是诱空触发线；回踩守住 0.00192-0.00195，后续重新站上 0.0020 要立刻看二次进攻；只有跌破 0.00190 且价格/CVD/持仓同步转弱，才降级为墙下失败。"
     elif direction == "ake_wall_zone_strength":
         header = "方向：<font color='cus-bull'>● 🔵⬆️ 看涨转强 / 进入卖墙区</font>"
         title = "AKE思路盯盘：已进入 0.0020-0.0022 卖墙区"
@@ -2879,7 +2887,7 @@ def thought_lark_ake_wall_message(analysis, direction):
 def thought_lark_message(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         return thought_lark_t_message(analysis, direction)
-    if direction in {"ake_wall_test", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
+    if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
         return thought_lark_ake_wall_message(analysis, direction)
     if analysis.get("source") == "db_fallback" or direction in {"bullish_db_watch", "bearish_db_watch"}:
         return thought_lark_db_fallback_message(analysis, direction)
@@ -3047,7 +3055,7 @@ def thought_key_zone(analysis):
 def thought_lark_message(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         return thought_lark_t_message(analysis, direction)
-    if direction in {"ake_wall_test", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
+    if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
         return thought_lark_ake_wall_message(analysis, direction)
     if analysis.get("source") == "db_fallback" or direction in {"bullish_db_watch", "bearish_db_watch"}:
         return thought_lark_db_fallback_message(analysis, direction)

@@ -3568,6 +3568,119 @@ def simple_arbitrage_thinking():
     return jsonify({"spot_simple": sorted(spot_simple, key=lambda item: item["open_spread"], reverse=True), "dual_simple": sorted(dual_simple, key=lambda item: item["open_spread"], reverse=True)})
 
 
+def funding_trend_growth_metrics(symbol):
+    raw_symbol = symbol.replace("/", "")
+    try:
+        oi_rows = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 24}), timeout=5)
+        kline_rows = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "30m", "limit": 25}), timeout=5)[:-1]
+    except Exception:
+        return {"oi_change_12h": None, "volume_change_12h": None, "volume_ratio": None}
+    oi_change = None
+    volume_change = None
+    volume_ratio = None
+    try:
+        if len(oi_rows) >= 2:
+            first_oi = float(oi_rows[0].get("sumOpenInterestValue", 0) or 0)
+            last_oi = float(oi_rows[-1].get("sumOpenInterestValue", 0) or 0)
+            oi_change = percent_delta(last_oi, first_oi)
+        if len(kline_rows) >= 12:
+            early = sum(float(row[7]) for row in kline_rows[:12])
+            recent = sum(float(row[7]) for row in kline_rows[-12:])
+            volume_change = percent_delta(recent, early)
+            prior_average = early / 12 if early else None
+            recent_average = recent / 12 if recent else None
+            volume_ratio = recent_average / prior_average if prior_average else None
+    except Exception:
+        pass
+    return {"oi_change_12h": oi_change, "volume_change_12h": volume_change, "volume_ratio": volume_ratio}
+
+
+def funding_trend_score(row, group):
+    change_24h = group["rows"][0].get("change_24h")
+    change_3d = group["rows"][0].get("change_3d")
+    change_7d = group["rows"][0].get("change_7d")
+    funding_current = row.get("funding_rate")
+    funding_previous = row.get("funding_previous")
+    funding_24h = row.get("funding_24h")
+    funding_3d = row.get("funding_3d")
+    score = 0.0
+    score += max(0, min((change_24h or 0) / 30, 1)) * 16
+    score += max(0, min((change_3d or 0) / 80, 1)) * 14
+    score += max(0, min((change_7d or 0) / 150, 1)) * 10
+    score += 16 if (funding_current or 0) > 0 else 0
+    score += 10 if (funding_previous or 0) > 0 else 0
+    score += max(0, min((funding_24h or 0) / 0.08, 1)) * 14
+    score += max(0, min((funding_3d or 0) / 0.24, 1)) * 10
+    score += 8 if (row.get("basis") or 0) > 0 else 0
+    score += 8 if (row.get("open_spread") or 0) > 0 else 0
+    return score
+
+
+@app.get("/api/arbitrage-thinking/funding-trend")
+def funding_trend_arbitrage():
+    snapshot = load_latest_market_snapshot()
+    if not snapshot:
+        return jsonify({"updated_at": None, "items": []})
+    enrich_price_changes(snapshot["symbols"])
+    enrich_funding_statistics(snapshot["symbols"])
+    candidates = []
+    for group in snapshot["symbols"]:
+        if is_rwa_stock_pair(group["symbol"]):
+            continue
+        best = None
+        for row in group["rows"]:
+            if (row.get("funding_rate") or 0) <= 0:
+                continue
+            item = {
+                "symbol": group["symbol"],
+                "long_exchange": row["long_exchange"],
+                "short_exchange": "Binance",
+                "funding_current": row.get("funding_rate"),
+                "funding_previous": row.get("funding_previous"),
+                "funding_24h": row.get("funding_24h"),
+                "funding_3d": row.get("funding_3d"),
+                "funding_7d": row.get("funding_7d"),
+                "basis": row.get("basis"),
+                "open_spread": row.get("open_spread"),
+                "close_spread": row.get("close_spread"),
+                "change_24h": group["rows"][0].get("change_24h"),
+                "change_3d": group["rows"][0].get("change_3d"),
+                "change_7d": group["rows"][0].get("change_7d"),
+                "spot_volume": row.get("spot_volume"),
+                "futures_volume": row.get("futures_volume"),
+                "futures_open_interest": row.get("futures_open_interest"),
+                "funding_interval": row.get("funding_interval_hours"),
+            }
+            item["score"] = funding_trend_score(row, group)
+            if best is None or item["score"] > best["score"]:
+                best = item
+        if best and best["score"] >= 32:
+            candidates.append(best)
+    candidates = sorted(candidates, key=lambda item: item["score"], reverse=True)[:40]
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {executor.submit(funding_trend_growth_metrics, item["symbol"]): item for item in candidates[:24]}
+        for future in as_completed(futures):
+            item = futures[future]
+            growth = future.result()
+            item.update(growth)
+            oi_growth = growth.get("oi_change_12h")
+            volume_growth = growth.get("volume_change_12h")
+            if oi_growth is not None:
+                item["score"] += max(0, min(oi_growth / 30, 1)) * 8
+            if volume_growth is not None:
+                item["score"] += max(0, min(volume_growth / 80, 1)) * 6
+            item["score"] = round(item["score"], 1)
+    candidates = sorted(candidates, key=lambda item: item["score"], reverse=True)[:20]
+    for item in candidates:
+        if item["score"] >= 78:
+            item["level"] = "重点机会"
+        elif item["score"] >= 58:
+            item["level"] = "重点盯盘"
+        else:
+            item["level"] = "观察"
+    return jsonify({"updated_at": snapshot["updated_at"], "items": candidates})
+
+
 @app.get("/api/alerts")
 def alerts():
     all_events = AlertEvent.query.order_by(AlertEvent.created_at.desc()).limit(200).all()

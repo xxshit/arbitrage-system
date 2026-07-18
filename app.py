@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import func, inspect, text, tuple_
 
@@ -1646,6 +1646,11 @@ def opportunities():
 @app.get("/")
 def index():
     return render_template("index.html")
+
+
+@app.get("/daily-trends")
+def daily_trends_page():
+    return redirect("/#daily-trends")
 
 
 @app.get("/api/dashboard")

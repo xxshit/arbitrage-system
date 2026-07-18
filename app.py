@@ -2050,7 +2050,7 @@ def fetch_horn_continuation_metrics(symbol):
             return None
         structure_bottom = percentile(structure_values, 20)
         structure_mid = (structure_bottom + peak_oi) / 2 if structure_bottom else None
-        if not structure_bottom or current_oi < structure_bottom:
+        if not structure_bottom:
             return None
         ratio_structure_values = ratio_values[structure_start:-3] if len(ratio_values[structure_start:-3]) >= 12 else ratio_values[impulse_start:-3]
         if len(ratio_structure_values) < 12:
@@ -2058,12 +2058,12 @@ def fetch_horn_continuation_metrics(symbol):
         ratio_bottom = percentile(ratio_structure_values, 20)
         ratio_top = percentile(ratio_structure_values, 80)
         ratio_mid = (ratio_bottom + ratio_top) / 2 if ratio_bottom is not None and ratio_top is not None else None
-        if ratio_top is None or ratio_mid is None or ratio_value > ratio_top:
+        ratio_value = ratio_values[-1]
+        if ratio_top is None or ratio_mid is None:
             return None
         retention = current_oi / peak_oi if peak_oi else 0
         oi_multiple = current_oi / start_oi if start_oi else 0
         oi_change = percent_delta(current_oi, start_oi)
-        ratio_value = ratio_values[-1]
         ratio_change = percent_delta(ratio_value, ratio_values[0])
         price_change = percent_delta(float(closed[-1][4]), float(closed[0][4]))
         cvd_change = sum((2 * float(row[10]) - float(row[7])) for row in closed)
@@ -2077,11 +2077,15 @@ def fetch_horn_continuation_metrics(symbol):
         price_structure_score = directional_consistency([row[4] for row in closed[-50:]], "up") * 8
         cvd_score = 8 if cvd_change > 0 else 0
         score = price_score + oi_multiple_score + retention_score + ratio_level_score + ratio_change_score + price_structure_score + cvd_score
+        if current_oi < structure_bottom:
+            score = min(score, 72)
         if structure_mid and current_oi < structure_mid:
             score = min(score, 68)
         if ratio_value > ratio_mid:
             score = min(score, 68)
-        if not (price_change > 8 and oi_multiple >= 1.3 and retention >= 0.55 and ratio_change < -10 and cvd_change > 0 and score >= 55):
+        oi_structure_alive = oi_multiple >= 1.08 or oi_change >= 8 or retention >= 0.68
+        ratio_structure_alive = ratio_change < -10 and (ratio_value <= ratio_top or ratio_change < -25)
+        if not (price_change > 8 and oi_structure_alive and retention >= 0.55 and ratio_structure_alive and cvd_change > 0 and score >= 45):
             return None
         return {
             "symbol": symbol,

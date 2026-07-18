@@ -1844,6 +1844,71 @@ def percentile(values, q):
     return cleaned[lower] * (1 - weight) + cleaned[upper] * weight
 
 
+def fetch_t_micro_metrics(raw_symbol):
+    """T/USDT 专用 5 分钟级盯盘：捕捉横盘后的短线向上异动与反抽停滞。"""
+    try:
+        k5 = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "5m", "limit": 48}), timeout=8)
+        oi5 = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 48}), timeout=8)
+        ratios5 = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 48}), timeout=8)
+    except Exception:
+        return {}
+
+    def micro_window(candles):
+        rows = k5[-candles:]
+        oi_rows = oi5[-candles:] if isinstance(oi5, list) else []
+        ratio_rows = ratios5[-candles:] if isinstance(ratios5, list) else []
+        if len(rows) < candles:
+            return {}
+        price_change = percent_delta(float(rows[-1][4]), float(rows[0][1]))
+        quote_volume = sum(float(row[7]) for row in rows)
+        prior_rows = k5[-(candles + 12):-candles] if len(k5) >= candles + 12 else []
+        prior_volume = sum(float(row[7]) for row in prior_rows) / len(prior_rows) * candles if prior_rows else None
+        volume_ratio = quote_volume / prior_volume if prior_volume else None
+        cvd = sum((2 * float(row[10]) - float(row[7])) for row in rows)
+        oi_change = None
+        oi_value = None
+        if len(oi_rows) >= candles:
+            oi_start = float(oi_rows[0].get("sumOpenInterestValue", 0) or 0)
+            oi_end = float(oi_rows[-1].get("sumOpenInterestValue", 0) or 0)
+            oi_change = percent_delta(oi_end, oi_start)
+            oi_value = oi_end
+        ratio_change = None
+        ratio_value = None
+        if len(ratio_rows) >= candles:
+            ratio_start = float(ratio_rows[0].get("longShortRatio", 0) or 0)
+            ratio_end = float(ratio_rows[-1].get("longShortRatio", 0) or 0)
+            ratio_change = percent_delta(ratio_end, ratio_start)
+            ratio_value = ratio_end
+        high = max(float(row[2]) for row in rows)
+        low = min(float(row[3]) for row in rows)
+        return {
+            "price_change": price_change,
+            "volume": quote_volume,
+            "volume_ratio": volume_ratio,
+            "cvd": cvd,
+            "oi_change": oi_change,
+            "oi_value": oi_value,
+            "ratio_change": ratio_change,
+            "ratio_value": ratio_value,
+            "high": high,
+            "low": low,
+        }
+
+    recent_12 = k5[-12:] if len(k5) >= 12 else k5
+    recent_high = max(float(row[2]) for row in recent_12) if recent_12 else None
+    recent_low = min(float(row[3]) for row in recent_12) if recent_12 else None
+    current = float(k5[-1][4]) if k5 else None
+    return {
+        "5m": micro_window(1),
+        "15m": micro_window(3),
+        "30m": micro_window(6),
+        "current": current,
+        "recent_high": recent_high,
+        "recent_low": recent_low,
+        "range_mid": ((recent_high + recent_low) / 2) if recent_high and recent_low else None,
+    }
+
+
 def fetch_liquidation_summary(symbol, lookback_minutes=240):
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - lookback_minutes * 60 * 1000
@@ -2353,6 +2418,7 @@ def thought_snapshot(symbol):
         "funding_rate": None,
         "basis": None,
         "validation": {},
+        "micro_validation": {},
         "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "fallback",
     }
@@ -2391,6 +2457,7 @@ def thought_snapshot(symbol):
             return {"price_change": price_change, "oi_change": oi_change, "ratio_change": ratio_change, "cvd": cvd_value, "volume": volume, "volume_ratio": volume_ratio}
         index_price = float(premium.get("indexPrice", 0) or 0)
         mark_price = float(premium.get("markPrice", 0) or 0)
+        micro_validation = fetch_t_micro_metrics(raw_symbol) if symbol == "T/USDT" else {}
         return {
             **fallback,
             "last": last,
@@ -2407,6 +2474,7 @@ def thought_snapshot(symbol):
             "funding_rate": float(premium.get("lastFundingRate", 0) or 0) * 100,
             "basis": percent_delta(mark_price, index_price) if index_price else None,
             "validation": {"30m": window_metrics(1), "1h": window_metrics(2), "2h": window_metrics(4)},
+            "micro_validation": micro_validation,
             "source": "live",
         }
     except Exception:
@@ -2432,6 +2500,7 @@ def thought_snapshot_from_db(symbol, fallback):
         "change_30m": None,
         "change_4h": None,
         "validation": {},
+        "micro_validation": {},
         "source": "db_fallback",
     }
 
@@ -2467,7 +2536,46 @@ def thought_watch_snapshots():
     return [thought_snapshot(symbol) for symbol in THOUGHT_WATCHLIST]
 
 
+def t_micro_direction(analysis):
+    if analysis.get("symbol") != "T/USDT":
+        return None
+    micro = analysis.get("micro_validation") or {}
+    m5 = micro.get("5m") or {}
+    m15 = micro.get("15m") or {}
+    m30 = micro.get("30m") or {}
+    last = analysis.get("last") or micro.get("current")
+    if not last:
+        return None
+
+    def value(row, key, default=0):
+        item = row.get(key)
+        return default if item is None else item
+
+    near_floor = 0.00392 <= last <= 0.00418
+    breaks_floor_box = last >= 0.00412 and value(m5, "price_change") >= 0.45
+    short_cvd_turns_up = value(m5, "cvd") > 0 and value(m15, "cvd") > 0
+    volume_wakes = max(value(m5, "volume_ratio"), value(m15, "volume_ratio"), value(m30, "volume_ratio")) >= 1.35
+    oi_not_dumping = min(value(m5, "oi_change"), value(m15, "oi_change")) > -1.2
+    ratio_not_overheated = value(m15, "ratio_change") < 8.0
+    if near_floor and breaks_floor_box and short_cvd_turns_up and volume_wakes and oi_not_dumping and ratio_not_overheated:
+        return "t_bounce_long"
+
+    bounce_extended = last >= 0.00428
+    price_stalls = value(m5, "price_change") <= 0.15 and value(m15, "price_change") <= 0.55
+    cvd_weakens = value(m5, "cvd") < 0 or value(m15, "cvd") < 0
+    volume_hot = max(value(m5, "volume_ratio"), value(m15, "volume_ratio")) >= 1.5
+    funding_bad = analysis.get("funding_rate") is not None and analysis.get("funding_rate") < 0
+    basis_bad = analysis.get("basis") is not None and analysis.get("basis") < -0.35
+    ratio_chases = value(m15, "ratio_change") > 1.0 or value(m30, "ratio_change") > 1.5
+    if bounce_extended and price_stalls and (cvd_weakens or ratio_chases) and (volume_hot or funding_bad or basis_bad):
+        return "t_bounce_stall_short"
+    return None
+
+
 def thought_push_direction(analysis):
+    t_direction = t_micro_direction(analysis)
+    if t_direction:
+        return t_direction
     validation = analysis.get("validation") or {}
     checks = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
     valid = [item for item in checks if item.get("price_change") is not None and item.get("oi_change") is not None and item.get("ratio_change") is not None and item.get("cvd") is not None]
@@ -2522,6 +2630,9 @@ def thought_signal_key(analysis, direction):
     last = analysis.get("last") or 0
     resistance = analysis.get("resistance") or 0
     support = analysis.get("support") or 0
+    if direction in {"t_bounce_long", "t_bounce_stall_short"}:
+        price_bucket = int(last * 100000) if last else 0
+        return f"{direction}-{price_bucket}"
     if direction == "bullish" and resistance and last >= resistance * 0.995:
         return "bullish-near-breakout"
     if direction in {"bearish", "reversal", "distribution"} and support and last <= support * 1.005:
@@ -2529,7 +2640,56 @@ def thought_signal_key(analysis, direction):
     return f"{direction}-resonance"
 
 
+def t_micro_line(micro, label, key):
+    item = (micro or {}).get(key) or {}
+    return (
+        f"近{label}：价格 {lark_plain_value(item.get('price_change'), 2, '%')}｜"
+        f"持仓 {lark_plain_value(item.get('oi_change'), 2, '%')}｜"
+        f"多空人数比 {lark_plain_value(item.get('ratio_change'), 2, '%')}｜"
+        f"CVD {lark_compact_number(item.get('cvd'))}｜"
+        f"放量 {lark_plain_value(item.get('volume_ratio'), 2, 'x')}"
+    )
+
+
+def thought_lark_t_message(analysis, direction):
+    symbol = analysis["symbol"]
+    micro = analysis.get("micro_validation") or {}
+    last = analysis.get("last") or micro.get("current")
+    if direction == "t_bounce_long":
+        header = "方向：<font color='cus-bull'>●●● 🟦⬆️ 看涨 / 底部反抽启动</font>"
+        title = "T思路盯盘：0.0040-0.0041 横盘后的向上异动"
+        judgement = (
+            "判断：T 长时间在 0.0040-0.0041 附近横住，现在如果 5MIN/15MIN 出现价格上拐、CVD 转正、成交量放大，"
+            "同时持仓没有快速塌掉，我会先按你说的“主力先拉一段再继续出货”处理。这里的重点不是追长期多，"
+            "而是抓底部反抽的短线多单。"
+        )
+        key_zone = "关键位：站上 0.00412 后才算离开横盘箱体；上方先看 0.00428-0.00438，若放量冲到这里但价格不继续推进，就准备平多观察反手空。"
+    else:
+        header = "方向：<font color='cus-bear'>●●● 🟦⬇️ 平多 / 反手空观察</font>"
+        title = "T思路盯盘：反抽停滞，重新观察诱多后下跌"
+        judgement = (
+            "判断：如果价格已经离开 0.0040-0.0041 底部箱体，但 5MIN/15MIN 开始涨不动，或者放量却不再创新高，"
+            "同时 CVD 转弱、多空人数比回升、负资费/负基差仍没有修复，我会按你说的“反复上涨出货并诱多”处理。"
+            "这时不再恋多，优先平多，随后看是否能转为空单。"
+        )
+        key_zone = "关键位：反抽停滞区先看 0.00428-0.00445；若跌回 0.00412 下方，说明反抽失败概率升高，下方重新看 0.0040，甚至更低。"
+    return "\n".join([
+        header,
+        title,
+        f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"价格：{lark_price_value(last)}｜BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}｜BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        t_micro_line(micro, "5MIN", "5m"),
+        t_micro_line(micro, "15MIN", "15m"),
+        t_micro_line(micro, "30MIN", "30m"),
+        judgement,
+        key_zone,
+        f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
+    ])
+
+
 def thought_lark_message(analysis, direction):
+    if direction in {"t_bounce_long", "t_bounce_stall_short"}:
+        return thought_lark_t_message(analysis, direction)
     if analysis.get("source") == "db_fallback" or direction in {"bullish_db_watch", "bearish_db_watch"}:
         return thought_lark_db_fallback_message(analysis, direction)
     validation = analysis.get("validation") or {}
@@ -2694,6 +2854,8 @@ def thought_key_zone(analysis):
 
 
 def thought_lark_message(analysis, direction):
+    if direction in {"t_bounce_long", "t_bounce_stall_short"}:
+        return thought_lark_t_message(analysis, direction)
     if analysis.get("source") == "db_fallback" or direction in {"bullish_db_watch", "bearish_db_watch"}:
         return thought_lark_db_fallback_message(analysis, direction)
     symbol = analysis["symbol"]
@@ -2860,14 +3022,14 @@ def thought_t_item(t):
     short_profit = percent_delta(t["entry"], t["last"]) if t.get("last") and t.get("entry") else None
     return {
         "symbol": t["symbol"],
-        "trade_side": "做空",
-        "trade_status": "持仓中",
+        "trade_side": "观察",
+        "trade_status": "底部反抽盯盘 / 先多后空",
         "entry": t["entry"],
         "entry_time": t["entry_time"],
         "exit": None,
         "exit_time": None,
         "last": t["last"],
-        "profit_pct": short_profit,
+        "profit_pct": None,
         "realized_profit_pct": None,
         "support": t["support"],
         "resistance": t["resistance"],
@@ -2883,10 +3045,10 @@ def thought_t_item(t):
         "validation": t.get("validation") or {},
         "source": t["source"],
         "screenshot_url": "/static/thoughts/t_coinglass_20260717.png",
-        "thought_summary": "T 是做空持仓思路：前期犄型主升后出现负资费、负基差和结算周期缩短；这波反弹即使 CVD 上涨，只要多空人数比跟着持仓一起上涨，也更像反弹诱多里的空单布局。",
+        "thought_summary": "T 现在切换为两阶段盯盘：第一阶段看 0.0040-0.0041 横盘后的向上异动，若 5MIN/15MIN 出现放量、CVD 转强、持仓不塌，就提醒短线做多；第二阶段等反抽到 0.00428-0.00445 一带后，如果放量不涨、CVD 转弱、多空人数比回升、负资费/负基差没有修复，就提醒平多并观察反手做空。",
         "user_mistakes": ["风险点：负资费会增加做空持仓成本，若价格横盘不跌，不能只靠负资费继续硬扛。"],
         "assistant_mistakes": ["需要持续验证 0.0045 是否真正反抽失败，不能只因为前期出货迹象就忽略二次吸筹可能。"],
-        "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "T 为新增做空思路，等待后续验证。"},
+        "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "T 新剧本：底部横盘先抓反抽，反抽停滞再转空，等待后续验证。"},
         "my_thesis": "你的主线思路：T 在 7 月 11 日到 7 月 12 日出现持仓涨、多空人数比跌、CVD 涨的典型犄型走势，币价从约 0.003 拉到约 0.006，接近翻倍。拉升过程中放量拉基差，资费跟随基差走，在结算时顶满，且结算周期从 4H 变成 1H。你认为这是主力出货换手信号。后续价格缩量下跌，中间几次小反弹依然维持 1H 结算，多头每小时可以收资费，更像诱多。当前这波反弹虽然 CVD 在涨，但多空人数比也跟着持仓一起涨，你认为这不是健康主升，而是更多账户追多、主力借反弹布置空单；所以 0.0045 附近做空胜率更大。",
         "assistant_thesis": "我的验证思路：你的空单逻辑是连贯的，核心不是单纯看跌，而是看到前期主升后的出货换手特征：高位放量、基差打开、资费极端化、结算周期缩短、随后缩量下跌。对于 T，CVD 上涨不能机械解释为看多；如果 CVD 涨的同时 OI 上升、多空人数比也上升，说明反弹中有更多账户站到多头一侧，可能给主力空单提供对手盘。若价格不能有效站回 0.0045-0.0047，且负资费、负基差持续，反弹更偏诱多。风险点是：若价格放量站稳 0.0047 上方，基差修复、负资费缓和，并且后续下跌无法延续，空单逻辑才需要降级。",
         "challenge_points": [
@@ -2894,19 +3056,20 @@ def thought_t_item(t):
             "反证条件：价格放量重新站稳 0.0045 上方，CVD 转正，基差从 -1% 以下快速修复，说明这次可能不是诱多而是重新吸筹。",
             "执行重点：不要只因为资费负就加空，必须看价格是否反抽失败、量能是否衰减、持仓是否配合。"
         ],
-        "validation_view": "T 当前按做空持仓盯盘：入场约 0.0045。继续看 0.0045-0.0047 是否反抽失败；CVD 上涨不单独否定空头逻辑，关键看它是否伴随 OI 与多空人数比同步上涨。若三者同步上涨但价格无法站稳，且负资费、负基差持续，更像诱多中的空单布局；若放量站稳 0.0047 上方并修复基差，空单逻辑降级。",
+        "validation_view": "T 当前按 0.0040-0.0041 底部箱体盯盘。若价格站上 0.00412，且 5MIN/15MIN CVD 转强、成交量放大、持仓没有快速下降，就按短线反抽做多提醒；若反抽到 0.00428-0.00445 后放量不涨、CVD 转弱或多空人数比回升，同时负资费/负基差没有修复，就按平多并反手做空观察提醒。",
         "take_profit": [
-            "第一观察：若价格从 0.0045 下方继续走弱，先看前低附近是否放量承接。",
-            "若跌破前低且 CVD 继续转负，可保留部分空单看下跌延续。",
+            "短线多单第一目标：0.00428-0.00438，一旦放量冲高但价格推进变慢，优先落袋，不恋战。",
+            "若 0.00438 上方继续放量站稳且 CVD、持仓仍同步增强，可以保留小仓观察 0.00445-0.0047，但这不是主线目标。",
         ],
         "stop_loss": [
-            "若价格放量站稳 0.0045 上方，且 CVD 转正、基差快速修复，应视为空单逻辑减弱。",
-            "若负资费维持但价格不跌反涨，说明空头拥挤，不能只靠资费继续硬扛。",
+            "做多失败条件：站上 0.00412 后又跌回 0.00405-0.00408，且 CVD 转弱，说明反抽启动失败。",
+            "反手空条件：反抽后放量不涨、CVD 转弱、多空人数比回升、负资费/负基差没有修复；跌回 0.00412 下方后，下方重新看 0.0040 甚至更低。",
         ],
         "review_notes": [
             "新增做空思路：T 0.0045 附近建立空单。",
             "核心依据：前期犄型主升后出现基差、资费、结算周期异常，疑似出货换手；后续缩量下跌与多次小反弹更像诱多。",
             "后续验证：重点跟踪价格是否反抽失败；若 CVD 上涨但 OI 与多空人数比也同步上涨，需要优先按诱多/主力布空假设观察，而不是机械看多。",
+            "2026-07-18 新增剧本：0.0040-0.0041 横盘先抓向上反抽；上涨停滞后，不恋多，按主力反复拉高出货和诱多的路径观察反手空。",
         ],
     }
 

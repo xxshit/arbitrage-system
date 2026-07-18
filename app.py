@@ -1844,6 +1844,31 @@ def percentile(values, q):
     return cleaned[lower] * (1 - weight) + cleaned[upper] * weight
 
 
+def fetch_liquidation_summary(symbol, lookback_minutes=240):
+    now_ms = int(time.time() * 1000)
+    start_ms = now_ms - lookback_minutes * 60 * 1000
+    try:
+        payload = get_json("https://fapi.binance.com/fapi/v1/allForceOrders?" + urlencode({
+            "symbol": symbol.replace("/", ""),
+            "startTime": start_ms,
+            "endTime": now_ms,
+            "limit": 1000,
+        }), timeout=6)
+    except Exception:
+        return {"total_quote": 0.0, "long_quote": 0.0, "short_quote": 0.0, "count": 0, "available": False}
+    long_quote = 0.0
+    short_quote = 0.0
+    for item in payload or []:
+        qty = float(item.get("executedQty") or item.get("origQty") or 0)
+        price = float(item.get("avgPrice") or item.get("price") or 0)
+        quote = float(item.get("cumQuote") or 0) or qty * price
+        if item.get("side") == "SELL":
+            long_quote += quote
+        elif item.get("side") == "BUY":
+            short_quote += quote
+    return {"total_quote": long_quote + short_quote, "long_quote": long_quote, "short_quote": short_quote, "count": len(payload or []), "available": True}
+
+
 def fetch_horn_metrics(symbol, timeframe):
     raw_symbol = symbol.replace("/", "")
     try:
@@ -1900,6 +1925,14 @@ def fetch_horn_continuation_metrics(symbol):
         structure_mid = (structure_bottom + peak_oi) / 2 if structure_bottom else None
         if not structure_bottom or current_oi < structure_bottom:
             return None
+        ratio_structure_values = ratio_values[structure_start:-3] if len(ratio_values[structure_start:-3]) >= 12 else ratio_values[impulse_start:-3]
+        if len(ratio_structure_values) < 12:
+            return None
+        ratio_bottom = percentile(ratio_structure_values, 20)
+        ratio_top = percentile(ratio_structure_values, 80)
+        ratio_mid = (ratio_bottom + ratio_top) / 2 if ratio_bottom is not None and ratio_top is not None else None
+        if ratio_top is None or ratio_mid is None or ratio_value > ratio_top:
+            return None
         retention = current_oi / peak_oi if peak_oi else 0
         oi_multiple = current_oi / start_oi if start_oi else 0
         oi_change = percent_delta(current_oi, start_oi)
@@ -1918,6 +1951,8 @@ def fetch_horn_continuation_metrics(symbol):
         cvd_score = 8 if cvd_change > 0 else 0
         score = price_score + oi_multiple_score + retention_score + ratio_level_score + ratio_change_score + price_structure_score + cvd_score
         if structure_mid and current_oi < structure_mid:
+            score = min(score, 68)
+        if ratio_value > ratio_mid:
             score = min(score, 68)
         if not (price_change > 8 and oi_multiple >= 1.3 and retention >= 0.55 and ratio_change < -10 and cvd_change > 0 and score >= 55):
             return None

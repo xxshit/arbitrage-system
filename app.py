@@ -2665,15 +2665,18 @@ def ake_orderbook_wall_direction(analysis):
     price_weak = sum(value(item, "price_change") < -0.25 for item in short_windows)
     cvd_weak = sum(value(item, "cvd") < 0 for item in short_windows)
     volume_active = any(value(item, "volume_ratio") >= 1.35 for item in short_windows)
+    resistance = analysis.get("resistance") or 0
+    wall_was_tested = last >= 0.00195 or resistance >= 0.00198
 
-    if last >= 0.0022 and cvd_up >= 2 and oi_up >= 1:
+    if last >= 0.00222 and cvd_up >= 2 and oi_up >= 1 and volume_active:
         return "ake_wall_breakout"
-    if last < 0.0020 and volume_active and (price_weak >= 2 or cvd_weak >= 2):
+    if wall_was_tested and last < 0.00195 and volume_active and price_weak >= 2 and cvd_weak >= 2:
         return "ake_wall_rejection"
     return None
 
 
 def thought_push_direction(analysis):
+    symbol = analysis.get("symbol")
     t_direction = t_micro_direction(analysis)
     if t_direction:
         return t_direction
@@ -2694,6 +2697,8 @@ def thought_push_direction(analysis):
     )
     if volume_spike and funding_negative and basis_opened:
         return "distribution"
+    if symbol == "AKE/USDT":
+        return None
     bullish_count = sum(item["price_change"] >= 0.8 and item["oi_change"] >= 1.0 and item["ratio_change"] <= -0.3 and item["cvd"] > 0 for item in valid)
     bearish_count = sum(item["price_change"] <= -0.8 and item["oi_change"] >= 1.0 and item["ratio_change"] >= 0.3 and item["cvd"] < 0 for item in valid)
     if bullish_count == 3:
@@ -2721,9 +2726,6 @@ def thought_db_fallback_direction(analysis):
     oi_value = analysis.get("oi_value") or 0
     volume_ratio = analysis.get("futures_spot_volume_ratio") or 0
     open_spread = analysis.get("open_spread")
-    if symbol == "AKE/USDT" and funding is not None and basis is not None:
-        if funding > 0 and basis > 0 and oi_value >= 10_000_000 and volume_ratio >= 20:
-            return "bullish_db_watch"
     if symbol == "T/USDT" and funding is not None and basis is not None:
         if funding < 0 and basis <= -1.0 and (open_spread is None or open_spread <= -1.0):
             return "bearish_db_watch"
@@ -2738,8 +2740,7 @@ def thought_signal_key(analysis, direction):
         price_bucket = int(last * 100000) if last else 0
         return f"{direction}-{price_bucket}"
     if direction in {"ake_wall_breakout", "ake_wall_rejection"}:
-        price_bucket = int(last * 1000000) if last else 0
-        return f"{direction}-{price_bucket}"
+        return f"{direction}-confirmed"
     if direction == "bullish" and resistance and last >= resistance * 0.995:
         return "bullish-near-breakout"
     if direction in {"bearish", "reversal", "distribution"} and support and last <= support * 1.005:
@@ -3090,8 +3091,12 @@ def send_thought_analysis_push():
         if not direction:
             continue
         signal_key = thought_signal_key(analysis, direction)
+        latest_symbol_push = LarkPushState.query.filter_by(channel="thought_analysis", symbol=analysis["symbol"]).order_by(LarkPushState.pushed_at.desc()).first()
+        symbol_cooldown = 12 * 3600 if analysis["symbol"] == "AKE/USDT" else 6 * 3600
+        if latest_symbol_push and (datetime.now() - latest_symbol_push.pushed_at).total_seconds() < symbol_cooldown:
+            continue
         existing = LarkPushState.query.filter_by(channel="thought_analysis", symbol=analysis["symbol"], signal_key=signal_key).first()
-        if existing and (datetime.now() - existing.pushed_at).total_seconds() < 6 * 3600:
+        if existing and (datetime.now() - existing.pushed_at).total_seconds() < symbol_cooldown:
             continue
         sections.append(thought_lark_message(analysis, direction))
         push_records.append((existing, analysis, signal_key))

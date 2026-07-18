@@ -2015,7 +2015,14 @@ def fetch_horn_metrics(symbol, timeframe):
         cvd_change = sum((2 * float(row[10]) - float(row[7])) for row in closed)
         if None in (oi_change, ratio_change, price_change):
             return None
-        score = (min(price_change / 30, 1) * 15 + directional_consistency([row[4] for row in closed], "up") * 15 + min(oi_change / 30, 1) * 15 + directional_consistency(oi_amounts, "up") * 15 + min(abs(ratio_change) / 25, 1) * 15 + directional_consistency([row.get("longShortRatio", 0) for row in ratios], "down") * 15 + (10 if cvd_change > 0 else 0))
+        price_score = max(0, min(price_change / 30, 1)) * 8
+        price_structure_score = directional_consistency([row[4] for row in closed], "up") * 6
+        oi_score = max(0, min(oi_change / 25, 1)) * 28
+        oi_structure_score = directional_consistency(oi_amounts, "up") * 18
+        ratio_score = max(0, min(abs(ratio_change) / 22, 1)) * 24 if ratio_change < 0 else 0
+        ratio_structure_score = directional_consistency([row.get("longShortRatio", 0) for row in ratios], "down") * 10
+        cvd_score = 6 if cvd_change > 0 else 0
+        score = price_score + price_structure_score + oi_score + oi_structure_score + ratio_score + ratio_structure_score + cvd_score
         return {"symbol": symbol, "timeframe": timeframe, "price_change": price_change, "oi_change": oi_change, "oi_value": oi_value, "ratio_change": ratio_change, "ratio_value": ratio_value, "cvd_change": cvd_change, "cvd_confirmed": cvd_change > 0, "score": round(score, 1)}
     except Exception:
         return None
@@ -2069,13 +2076,13 @@ def fetch_horn_continuation_metrics(symbol):
         cvd_change = sum((2 * float(row[10]) - float(row[7])) for row in closed)
         if None in (oi_change, ratio_change, price_change):
             return None
-        price_score = max(0, min(price_change / 80, 1)) * 18
-        oi_multiple_score = max(0, min((oi_multiple - 1) / 1.2, 1)) * 22
-        retention_score = max(0, min((retention - 0.45) / 0.35, 1)) * 20
-        ratio_level_score = max(0, min((1.05 - ratio_value) / 0.65, 1)) * 14
-        ratio_change_score = max(0, min(abs(ratio_change) / 45, 1)) * 10 if ratio_change < 0 else 0
-        price_structure_score = directional_consistency([row[4] for row in closed[-50:]], "up") * 8
-        cvd_score = 8 if cvd_change > 0 else 0
+        price_score = max(0, min(price_change / 80, 1)) * 8
+        oi_multiple_score = max(0, min((oi_multiple - 1) / 0.7, 1)) * 26
+        retention_score = max(0, min((retention - 0.45) / 0.35, 1)) * 22
+        ratio_level_score = max(0, min((1.15 - ratio_value) / 0.75, 1)) * 12
+        ratio_change_score = max(0, min(abs(ratio_change) / 45, 1)) * 18 if ratio_change < 0 else 0
+        price_structure_score = directional_consistency([row[4] for row in closed[-50:]], "up") * 5
+        cvd_score = 9 if cvd_change > 0 else 0
         score = price_score + oi_multiple_score + retention_score + ratio_level_score + ratio_change_score + price_structure_score + cvd_score
         if current_oi < structure_bottom:
             score = min(score, 72)
@@ -2083,9 +2090,10 @@ def fetch_horn_continuation_metrics(symbol):
             score = min(score, 68)
         if ratio_value > ratio_mid:
             score = min(score, 68)
-        oi_structure_alive = oi_multiple >= 1.08 or oi_change >= 8 or retention >= 0.68
+        oi_structure_alive = oi_multiple >= 1.08 or oi_change >= 8 or retention >= 0.62
         ratio_structure_alive = ratio_change < -10 and (ratio_value <= ratio_top or ratio_change < -25)
-        if not (price_change > 8 and oi_structure_alive and retention >= 0.55 and ratio_structure_alive and cvd_change > 0 and score >= 45):
+        price_not_broken = price_change > -18 or directional_consistency([row[4] for row in closed[-50:]], "up") >= 0.42
+        if not (price_not_broken and oi_structure_alive and retention >= 0.5 and ratio_structure_alive and score >= 42):
             return None
         return {
             "symbol": symbol,
@@ -2114,17 +2122,16 @@ def scan_daily_horn_signals():
         if is_rwa_stock_pair(group["symbol"]):
             continue
         row = group["rows"][0]
-        for timeframe, field in (("30m", "change_24h"), ("4h", "change_7d")):
-            momentum = row.get(field)
-            if momentum and momentum > 0:
-                candidates.append((momentum, group["symbol"], timeframe))
-    candidates = sorted(candidates, reverse=True)[:100]
+        priority = max(abs(row.get("change_24h") or 0), abs(row.get("change_7d") or 0), row.get("futures_volume") or 0)
+        for timeframe in ("30m", "4h"):
+            candidates.append((priority, group["symbol"], timeframe))
+    candidates = sorted(candidates, reverse=True)[:360]
     signals = []
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(fetch_horn_metrics, symbol, timeframe) for _, symbol, timeframe in candidates]
         for future in as_completed(futures):
             item = future.result()
-            if item and item["price_change"] > 0 and item["oi_change"] > 0 and item["ratio_change"] < 0:
+            if item and item["oi_change"] > 0 and item["ratio_change"] < 0 and item["score"] >= 42:
                 signals.append(item)
     continuation_symbols = []
     seen_symbols = set()

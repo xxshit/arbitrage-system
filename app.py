@@ -1317,6 +1317,43 @@ def rapid_move_alerts(key, metric, value):
     return triggered
 
 
+def dual_spread_quote_supported(row):
+    open_spread = float(row.get("open_spread") or 0)
+    if abs(open_spread) < 0.5:
+        return True
+    long_basis = row.get("long_basis")
+    short_basis = row.get("short_basis")
+    if long_basis is None or short_basis is None:
+        return abs(open_spread) >= 1.5
+    long_basis = float(long_basis or 0)
+    short_basis = float(short_basis or 0)
+    basis_gap = short_basis - long_basis
+    basis_support = abs(long_basis) >= 0.35 or abs(short_basis) >= 0.35 or abs(basis_gap) >= 0.25
+    long_funding = float(row.get("long_funding_rate") or 0)
+    short_funding = float(row.get("short_funding_rate") or 0)
+    funding_support = abs(long_funding - short_funding) >= 0.02 or any(abs(abs(value) - 0.005) > 0.003 for value in (long_funding, short_funding))
+    if abs(open_spread - basis_gap) <= 0.35:
+        return True
+    if basis_support and abs(open_spread - basis_gap) <= 0.8:
+        return True
+    # If both contract bases are flat and funding is just low-insurance level,
+    # a sudden large top-of-book spread is more likely a bad quote than a tradable
+    # futures/futures arbitrage signal.
+    return basis_support or funding_support
+
+
+def validate_dual_alert_quote(row, alert_type):
+    if "spread" in alert_type and not dual_spread_quote_supported(row):
+        return False
+    if "basis" in alert_type:
+        bn_basis = row.get("basis")
+        if bn_basis is None:
+            return False
+        if abs(float(bn_basis or 0)) < 0.5:
+            return False
+    return True
+
+
 def track_basis(symbol, row, active_by_symbol, active_by_key, strategy="spot_futures"):
     basis = row["basis"]
     absolute = abs(basis)
@@ -1460,11 +1497,13 @@ def evaluate_dual_alerts(groups):
             path = (symbol, row["long_exchange"], row["short_exchange"])
             bn_basis = row.get("long_basis") if row["long_exchange"] == "Binance" else row.get("short_basis") if row["short_exchange"] == "Binance" else None
             alert_row = {**row, "basis": bn_basis if bn_basis is not None else 0.0, "funding_rate": row.get("short_funding_rate")}
-            for metric, value in (("开差", float(row.get("open_spread") or 0)), ("BN 基差", float(bn_basis or 0))):
-                if metric == "BN 基差" and bn_basis is None:
+            for metric_key, metric_label, value in (("spread", "开差", float(row.get("open_spread") or 0)), ("basis", "BN 基差", float(bn_basis or 0))):
+                if metric_key == "basis" and bn_basis is None:
                     continue
-                for seconds, threshold, expanded in rapid_move_alerts(("futures_futures", *path), metric, value):
-                    create_alert(symbol, f"rapid_{'spread' if metric == '开差' else 'basis'}", f"{row['long_exchange']} 合约与 {row['short_exchange']} 合约：{seconds} 秒内{metric}绝对值扩大 {expanded:.3f}%（阈值 {threshold:.1f}%）", alert_row, "futures_futures", row["long_exchange"], row["short_exchange"])
+                alert_type = f"rapid_{metric_key}"
+                for seconds, threshold, expanded in rapid_move_alerts(("futures_futures", *path), metric_key, value):
+                    if validate_dual_alert_quote(alert_row, alert_type):
+                        create_alert(symbol, alert_type, f"{row['long_exchange']} 合约与 {row['short_exchange']} 合约：{seconds} 秒内{metric_label}绝对值扩大 {expanded:.3f}%（阈值 {threshold:.1f}%）", alert_row, "futures_futures", row["long_exchange"], row["short_exchange"])
             checks = []
             if abs(float(row.get("open_spread") or 0)) >= 1:
                 checks.append(("dual_spread_threshold", "开差"))
@@ -1478,12 +1517,13 @@ def evaluate_dual_alerts(groups):
                 DUAL_ALERT_VALUES[key] = observed
                 DUAL_ALERT_CANDIDATES[key] = DUAL_ALERT_CANDIDATES.get(key, 0) + 1
                 # A single bad quote must never create a futures/futures alert.
-                # The same path and threshold need to survive two consecutive snapshots.
+                # The same path and threshold need to survive three consecutive snapshots.
                 stable = previous is not None and previous * observed > 0 and abs(previous - observed) <= 0.6
-                if DUAL_ALERT_CANDIDATES[key] < 2 or not stable:
+                if DUAL_ALERT_CANDIDATES[key] < 3 or not stable:
                     continue
                 message = f"{row['long_exchange']} 合约与 {row['short_exchange']} 合约出现确认后的{label}异动"
-                create_alert(symbol, alert_type, message, alert_row, "futures_futures", row["long_exchange"], row["short_exchange"])
+                if validate_dual_alert_quote(alert_row, alert_type):
+                    create_alert(symbol, alert_type, message, alert_row, "futures_futures", row["long_exchange"], row["short_exchange"])
         for key in [item for item in DUAL_ALERT_CANDIDATES if item[0] == symbol and item not in active_keys]:
             DUAL_ALERT_CANDIDATES.pop(key, None)
             DUAL_ALERT_VALUES.pop(key, None)

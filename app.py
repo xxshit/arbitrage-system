@@ -205,6 +205,35 @@ class LarkPushState(db.Model):
     __table_args__ = (db.UniqueConstraint("channel", "symbol", "signal_key", name="uq_lark_push_state"),)
 
 
+class ThoughtPushSnapshot(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    symbol = db.Column(db.String(30), nullable=False, unique=True, index=True)
+    direction = db.Column(db.String(60), nullable=False)
+    signal_key = db.Column(db.String(120), nullable=False)
+    last_price = db.Column(db.Float)
+    basis = db.Column(db.Float)
+    funding_rate = db.Column(db.Float)
+    oi_value = db.Column(db.Float)
+    futures_volume = db.Column(db.Float)
+    spot_volume = db.Column(db.Float)
+    cvd_30m = db.Column(db.Float)
+    cvd_1h = db.Column(db.Float)
+    cvd_2h = db.Column(db.Float)
+    price_change_30m = db.Column(db.Float)
+    price_change_1h = db.Column(db.Float)
+    price_change_2h = db.Column(db.Float)
+    oi_change_30m = db.Column(db.Float)
+    oi_change_1h = db.Column(db.Float)
+    oi_change_2h = db.Column(db.Float)
+    ratio_change_30m = db.Column(db.Float)
+    ratio_change_1h = db.Column(db.Float)
+    ratio_change_2h = db.Column(db.Float)
+    wall_qty = db.Column(db.Float)
+    wall_notional = db.Column(db.Float)
+    pushed_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+    updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+
+
 class AutomationStatus(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     task_key = db.Column(db.String(80), nullable=False, unique=True, index=True)
@@ -2787,13 +2816,113 @@ def thought_signal_key(analysis, direction):
         price_bucket = int(last * 100000) if last else 0
         return f"{direction}-{price_bucket}"
     if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
-        price_bucket = int(last * 1000000) if last else 0
-        return f"{direction}-{price_bucket}"
+        if last >= 0.0028:
+            price_zone = "above-2800"
+        elif last >= 0.0024:
+            price_zone = "above-2400"
+        elif last >= 0.0022:
+            price_zone = "break-2200"
+        elif last >= 0.0021:
+            price_zone = "wall-2100-2200"
+        elif last >= 0.0020:
+            price_zone = "wall-2000-2100"
+        elif last >= 0.00195:
+            price_zone = "test-1950-2000"
+        elif last >= 0.00190:
+            price_zone = "retest-1900-1950"
+        else:
+            price_zone = "below-1900"
+        return f"{direction}-{price_zone}"
     if direction == "bullish" and resistance and last >= resistance * 0.995:
         return "bullish-near-breakout"
     if direction in {"bearish", "reversal", "distribution"} and support and last <= support * 1.005:
         return "bearish-near-breakdown"
     return f"{direction}-resonance"
+
+
+def metric_changed(current, previous, abs_threshold=None, pct_threshold=None):
+    if current is None or previous is None:
+        return current is not None and previous is None
+    diff = abs(current - previous)
+    if abs_threshold is not None and diff >= abs_threshold:
+        return True
+    if pct_threshold is not None and abs(previous) > 1e-12 and diff / abs(previous) >= pct_threshold:
+        return True
+    return False
+
+
+def cvd_direction(value):
+    if value is None:
+        return "none"
+    return "up" if value > 0 else ("down" if value < 0 else "flat")
+
+
+def thought_push_metrics(analysis, direction, signal_key):
+    validation = analysis.get("validation") or {}
+    wall = analysis.get("orderbook_wall") or {}
+    data = {
+        "direction": direction,
+        "signal_key": signal_key,
+        "last_price": analysis.get("last"),
+        "basis": analysis.get("basis"),
+        "funding_rate": analysis.get("funding_rate"),
+        "oi_value": analysis.get("oi_value"),
+        "futures_volume": analysis.get("futures_volume"),
+        "spot_volume": analysis.get("spot_volume"),
+        "wall_qty": wall.get("wall_qty"),
+        "wall_notional": wall.get("wall_notional"),
+    }
+    for key, suffix in (("30m", "30m"), ("1h", "1h"), ("2h", "2h")):
+        item = validation.get(key) or {}
+        data[f"cvd_{suffix}"] = item.get("cvd")
+        data[f"price_change_{suffix}"] = item.get("price_change")
+        data[f"oi_change_{suffix}"] = item.get("oi_change")
+        data[f"ratio_change_{suffix}"] = item.get("ratio_change")
+    return data
+
+
+def thought_push_has_new_information(previous, metrics):
+    if previous is None:
+        return True
+    if previous.direction != metrics["direction"]:
+        return True
+    if previous.signal_key != metrics["signal_key"]:
+        return True
+    if metric_changed(metrics.get("last_price"), previous.last_price, pct_threshold=0.018):
+        return True
+    if metric_changed(metrics.get("basis"), previous.basis, abs_threshold=0.20):
+        return True
+    if metric_changed(metrics.get("funding_rate"), previous.funding_rate, abs_threshold=0.05):
+        return True
+    if metric_changed(metrics.get("oi_value"), previous.oi_value, pct_threshold=0.12):
+        return True
+    if metric_changed(metrics.get("futures_volume"), previous.futures_volume, pct_threshold=0.35):
+        return True
+    if metric_changed(metrics.get("spot_volume"), previous.spot_volume, pct_threshold=0.35):
+        return True
+    if metric_changed(metrics.get("wall_qty"), previous.wall_qty, pct_threshold=0.30):
+        return True
+    for suffix in ("30m", "1h", "2h"):
+        if cvd_direction(metrics.get(f"cvd_{suffix}")) != cvd_direction(getattr(previous, f"cvd_{suffix}", None)):
+            return True
+        if metric_changed(metrics.get(f"price_change_{suffix}"), getattr(previous, f"price_change_{suffix}", None), abs_threshold=2.0):
+            return True
+        if metric_changed(metrics.get(f"oi_change_{suffix}"), getattr(previous, f"oi_change_{suffix}", None), abs_threshold=5.0):
+            return True
+        if metric_changed(metrics.get(f"ratio_change_{suffix}"), getattr(previous, f"ratio_change_{suffix}", None), abs_threshold=3.0):
+            return True
+    return False
+
+
+def upsert_thought_push_snapshot(symbol, metrics):
+    item = ThoughtPushSnapshot.query.filter_by(symbol=symbol).first()
+    if item is None:
+        item = ThoughtPushSnapshot(symbol=symbol, direction=metrics["direction"], signal_key=metrics["signal_key"])
+        db.session.add(item)
+    for key, value in metrics.items():
+        setattr(item, key, value)
+    item.pushed_at = datetime.now()
+    item.updated_at = datetime.now()
 
 
 def t_micro_line(micro, label, key):
@@ -3148,10 +3277,12 @@ def send_thought_analysis_push():
         existing = LarkPushState.query.filter_by(channel="thought_analysis", symbol=analysis["symbol"], signal_key=signal_key).first()
         if existing and signal_repeat_window and (datetime.now() - existing.pushed_at).total_seconds() < signal_repeat_window:
             continue
-        if existing and analysis["symbol"] == "AKE/USDT":
+        metrics = thought_push_metrics(analysis, direction, signal_key)
+        previous_snapshot = ThoughtPushSnapshot.query.filter_by(symbol=analysis["symbol"]).first()
+        if not thought_push_has_new_information(previous_snapshot, metrics):
             continue
         sections.append(thought_lark_message(analysis, direction))
-        push_records.append((existing, analysis, signal_key))
+        push_records.append((existing, analysis, signal_key, metrics))
     if not sections:
         return False
     payload = lark_trend_card(sections)
@@ -3161,11 +3292,12 @@ def send_thought_analysis_push():
             result = json.loads(response.read().decode("utf-8"))
         if not (result.get("code", 0) == 0 or result.get("StatusCode", 0) == 0):
             return False
-        for existing, analysis, signal_key in push_records:
+        for existing, analysis, signal_key, metrics in push_records:
             if existing:
                 existing.pushed_at = datetime.now()
             else:
                 db.session.add(LarkPushState(channel="thought_analysis", symbol=analysis["symbol"], signal_key=signal_key))
+            upsert_thought_push_snapshot(analysis["symbol"], metrics)
         db.session.commit()
         return True
     except Exception:

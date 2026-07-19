@@ -1301,7 +1301,11 @@ def rapid_move_alerts(key, metric, value):
         candidate_key = (key, metric, seconds, threshold)
         active = baseline is not None and expanded >= threshold
         RAPID_MOVE_CANDIDATES[candidate_key] = RAPID_MOVE_CANDIDATES.get(candidate_key, 0) + 1 if active else 0
-        if active and RAPID_MOVE_CANDIDATES[candidate_key] == 2:
+        # Rapid moves are useful only when the abnormal value survives multiple
+        # refreshes. Two samples can still be a bad quote that disappears before
+        # the user can trade it, so rapid alerts require three consecutive active
+        # observations after the 30s baseline check.
+        if active and RAPID_MOVE_CANDIDATES[candidate_key] >= 3:
             window_key = (key, metric)
             window = RAPID_MOVE_ALERT_WINDOWS.get(window_key)
             current_abs = abs(value)

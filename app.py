@@ -234,6 +234,22 @@ class ThoughtPushSnapshot(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
+class SymbolAlias(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    canonical_symbol = db.Column(db.String(30), nullable=False, index=True)
+    alias_symbol = db.Column(db.String(30), nullable=False, index=True)
+    canonical_base = db.Column(db.String(30), nullable=False, index=True)
+    alias_base = db.Column(db.String(30), nullable=False, index=True)
+    exchange = db.Column(db.String(30), nullable=False, default="ANY")
+    market_type = db.Column(db.String(30), nullable=False, default="contract")
+    multiplier = db.Column(db.Float, nullable=False, default=1.0)
+    verified = db.Column(db.Boolean, nullable=False, default=True)
+    note = db.Column(db.String(255))
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    __table_args__ = (db.UniqueConstraint("alias_symbol", "exchange", "market_type", name="uq_symbol_alias_scope"),)
+
+
 class AutomationStatus(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     task_key = db.Column(db.String(80), nullable=False, unique=True, index=True)
@@ -327,6 +343,18 @@ COIN_ALIASES = {}
 CONTRACT_SPOT_ALIASES = {
     "1000XECUSDT": {"spot_symbol": "XECUSDT", "multiplier": 1000, "canonical": "XEC/USDT"},
 }
+SEEDED_SYMBOL_ALIASES = [
+    {
+        "canonical_symbol": "XEC/USDT",
+        "alias_symbol": "1000XEC/USDT",
+        "canonical_base": "XEC",
+        "alias_base": "1000XEC",
+        "exchange": "ANY",
+        "market_type": "contract",
+        "multiplier": 1000,
+        "note": "倍率合约：1 张 1000XEC 合约对应 1000 枚 XEC 标的。",
+    },
+]
 
 
 def contract_spot_alias(symbol):
@@ -338,6 +366,78 @@ def canonical_market_symbol(symbol):
     if compact in CONTRACT_SPOT_ALIASES:
         return CONTRACT_SPOT_ALIASES[compact]["canonical"]
     return f"{compact[:-4]}/USDT" if compact.endswith("USDT") else symbol.upper()
+
+
+def compact_pair(symbol):
+    return str(symbol or "").upper().replace("/", "").replace("-", "").replace("_", "")
+
+
+def pair_base(symbol):
+    compact = compact_pair(symbol)
+    return compact[:-4] if compact.endswith("USDT") else compact.split("/", 1)[0]
+
+
+def pair_slash(symbol):
+    compact = compact_pair(symbol)
+    return f"{compact[:-4]}/USDT" if compact.endswith("USDT") else str(symbol or "").upper()
+
+
+def symbol_alias_rows():
+    rows = []
+    try:
+        rows = SymbolAlias.query.filter_by(verified=True).all()
+    except Exception:
+        rows = []
+    if rows:
+        return rows
+
+    class SeedAlias:
+        def __init__(self, data):
+            self.__dict__.update(data)
+            self.verified = True
+    return [SeedAlias(item) for item in SEEDED_SYMBOL_ALIASES]
+
+
+def symbol_alias_candidates(symbol):
+    canonical = canonical_market_symbol(symbol)
+    symbol_pair = pair_slash(symbol)
+    candidates = {compact_pair(symbol_pair), pair_base(symbol_pair), compact_pair(canonical), pair_base(canonical)}
+    for row in symbol_alias_rows():
+        if row.canonical_symbol == canonical or row.alias_symbol == symbol_pair or row.alias_symbol == canonical:
+            candidates.update({
+                compact_pair(row.canonical_symbol),
+                compact_pair(row.alias_symbol),
+                row.canonical_base.upper(),
+                row.alias_base.upper(),
+            })
+    return {item for item in candidates if item}
+
+
+def symbol_matches_query(symbol, raw_query):
+    query = compact_pair(raw_query)
+    if not query:
+        return True
+    full_pair_search = "/" in raw_query or query.endswith("USDT")
+    candidates = symbol_alias_candidates(symbol)
+    if full_pair_search:
+        return query in candidates
+    return any(candidate == query or candidate.startswith(query) for candidate in candidates)
+
+
+def seed_symbol_aliases():
+    for data in SEEDED_SYMBOL_ALIASES:
+        existing = SymbolAlias.query.filter_by(
+            alias_symbol=data["alias_symbol"],
+            exchange=data["exchange"],
+            market_type=data["market_type"],
+        ).first()
+        if existing:
+            for key, value in data.items():
+                setattr(existing, key, value)
+            existing.verified = True
+            existing.updated_at = datetime.now()
+        else:
+            db.session.add(SymbolAlias(verified=True, **data))
 
 
 def get_json(url, timeout=4):
@@ -1753,10 +1853,9 @@ def spot_futures():
     if binance_spot_only:
         symbols = [group for group in symbols if any(row["long_exchange"] == "Binance" for row in group["rows"])]
     if symbol_query:
-        full_pair_search = "/" in raw_symbol_query or symbol_query.endswith("USDT")
         symbols = [
             group for group in symbols
-            if (group["symbol"].upper().replace("/", "") == symbol_query if full_pair_search else group["symbol"].upper().split("/", 1)[0] == symbol_query)
+            if symbol_matches_query(group["symbol"], raw_symbol_query)
         ]
     def sort_value(group):
         if sort_by in {"open_spread", "close_spread"}:
@@ -1804,10 +1903,9 @@ def dual_futures():
     mark_announced_delistings(DUAL_VIEW_CACHE["symbols"])
     symbols = [group for group in DUAL_VIEW_CACHE["symbols"] if not is_rwa_stock_pair(group["symbol"])]
     if symbol_query:
-        full_pair_search = "/" in raw_symbol_query or symbol_query.endswith("USDT")
         symbols = [
             group for group in symbols
-            if (group["symbol"].upper().replace("/", "") == symbol_query if full_pair_search else group["symbol"].upper().split("/", 1)[0].startswith(symbol_query))
+            if symbol_matches_query(group["symbol"], raw_symbol_query)
         ]
     def sort_value(group):
         if sort_by in {"binance_basis", *trend_sort_keys}:
@@ -1831,21 +1929,34 @@ def symbol_suggestions():
     if not query:
         return jsonify({"items": []})
     compact_query = query.replace("/", "").replace("-", "")
-    live_pairs = sorted({item.symbol.upper() for item in LatestMarketSnapshot.query.with_entities(LatestMarketSnapshot.symbol).all() if not is_rwa_stock_pair(item.symbol)})
+    live_pairs = sorted({
+        item.symbol.upper()
+        for item in LatestMarketSnapshot.query.with_entities(LatestMarketSnapshot.symbol).all()
+        if not is_rwa_stock_pair(item.symbol)
+    } | {
+        item.symbol.upper()
+        for item in LatestDualFuturesSnapshot.query.with_entities(LatestDualFuturesSnapshot.symbol).all()
+        if not is_rwa_stock_pair(item.symbol)
+    })
+    live_compacts = {compact_pair(item) for item in live_pairs}
     pairs = set(live_pairs)
     for base in COIN_ALIASES:
         pairs.add(f"{base}/USDT")
+    for row in symbol_alias_rows():
+        pairs.add(row.canonical_symbol)
+        pairs.add(row.alias_symbol)
 
     matches = []
     for pair in pairs:
         base = pair.split("/", 1)[0]
         chinese_name = COIN_ALIASES.get(base, "")
-        searchable = f"{base}{pair.replace('/', '')}{chinese_name}".upper()
+        alias_candidates = symbol_alias_candidates(pair)
+        searchable = f"{base}{pair.replace('/', '')}{chinese_name}{''.join(sorted(alias_candidates))}".upper()
         if compact_query not in searchable:
             continue
-        live = pair in live_pairs
+        live = pair in live_pairs or bool(alias_candidates & live_compacts)
         label = f"{chinese_name} · {pair}" if chinese_name else pair
-        starts_with = base.startswith(compact_query) or chinese_name.startswith(query)
+        starts_with = any(candidate.startswith(compact_query) for candidate in alias_candidates) or chinese_name.startswith(query)
         matches.append({"symbol": pair, "label": label, "name": chinese_name, "live": live, "starts_with": starts_with})
 
     prefix_matches = [item for item in matches if item["starts_with"]]
@@ -3969,6 +4080,7 @@ def toggle_strategy(strategy_id):
 
 with app.app_context():
     db.create_all()
+    seed_symbol_aliases()
     alert_columns = {column["name"] for column in inspect(db.engine).get_columns("alert_event")}
     for column_name, column_type in (("strategy", "VARCHAR(30)"), ("long_exchange", "VARCHAR(30)"), ("short_exchange", "VARCHAR(30)")):
         if column_name not in alert_columns:

@@ -70,6 +70,25 @@ class BasisExpansionLog(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
+class TradeValidation(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    symbol = db.Column(db.String(30), nullable=False, index=True)
+    direction = db.Column(db.String(10), nullable=False)
+    entry_price = db.Column(db.Float, nullable=False)
+    stop_price = db.Column(db.Float, nullable=False)
+    take_profit_1 = db.Column(db.Float, nullable=False)
+    take_profit_2 = db.Column(db.Float, nullable=False)
+    stake_usdt = db.Column(db.Float, nullable=False, default=100.0)
+    leverage = db.Column(db.Float, nullable=False, default=1.0)
+    status = db.Column(db.String(20), nullable=False, default="planned", index=True)
+    thesis = db.Column(db.String(1000))
+    opened_at = db.Column(db.DateTime)
+    closed_at = db.Column(db.DateTime)
+    exit_price = db.Column(db.Float)
+    exit_reason = db.Column(db.String(30))
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+
+
 class LatestMarketSnapshot(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     symbol = db.Column(db.String(30), nullable=False)
@@ -4202,9 +4221,136 @@ def toggle_strategy(strategy_id):
     return jsonify({"id": item.id, "enabled": item.enabled})
 
 
+def latest_validation_price(symbol):
+    history = FuturesPriceHistory.query.filter_by(symbol=symbol).order_by(FuturesPriceHistory.bucket_at.desc()).first()
+    if history:
+        return history.price
+    spot = LatestMarketSnapshot.query.filter_by(symbol=symbol).first()
+    if spot:
+        return (spot.short_bid + spot.short_ask) / 2
+    dual = LatestDualFuturesSnapshot.query.filter_by(symbol=symbol, short_exchange="Binance").first()
+    if dual:
+        return (dual.short_bid + dual.short_ask) / 2
+    return None
+
+
+def validation_pnl(plan, price):
+    if price is None or plan.status == "planned":
+        return 0.0
+    ref_price = plan.exit_price if plan.status == "closed" and plan.exit_price else price
+    if plan.direction == "long":
+        return (ref_price - plan.entry_price) / plan.entry_price * plan.stake_usdt * plan.leverage
+    return (plan.entry_price - ref_price) / plan.entry_price * plan.stake_usdt * plan.leverage
+
+
+def refresh_validation_plan(plan, price):
+    if price is None or plan.status == "closed":
+        return
+    now = datetime.now()
+    if plan.status == "planned":
+        triggered = price >= plan.entry_price if plan.direction == "long" else price <= plan.entry_price
+        if triggered:
+            plan.status = "open"
+            plan.opened_at = now
+    if plan.status != "open":
+        return
+    if plan.direction == "long":
+        if price <= plan.stop_price:
+            plan.status, plan.exit_price, plan.exit_reason, plan.closed_at = "closed", price, "stop", now
+        elif price >= plan.take_profit_2:
+            plan.status, plan.exit_price, plan.exit_reason, plan.closed_at = "closed", price, "take_profit", now
+    else:
+        if price >= plan.stop_price:
+            plan.status, plan.exit_price, plan.exit_reason, plan.closed_at = "closed", price, "stop", now
+        elif price <= plan.take_profit_2:
+            plan.status, plan.exit_price, plan.exit_reason, plan.closed_at = "closed", price, "take_profit", now
+
+
+def validation_candles(symbol, limit=80):
+    rows = FuturesPriceHistory.query.filter_by(symbol=symbol).order_by(FuturesPriceHistory.bucket_at.desc()).limit(limit).all()
+    rows = list(reversed(rows))
+    candles = []
+    for index, row in enumerate(rows):
+        open_price = rows[index - 1].price if index else row.price * 0.998
+        close_price = row.price
+        spread = max(abs(close_price - open_price), close_price * 0.0025)
+        candles.append({
+            "time": datetime.fromtimestamp(row.bucket_at).strftime("%H:%M"),
+            "open": open_price,
+            "high": max(open_price, close_price) + spread * 0.42,
+            "low": min(open_price, close_price) - spread * 0.42,
+            "close": close_price,
+        })
+    return candles
+
+
+def seed_trade_validation():
+    if TradeValidation.query.first():
+        return
+    db.session.add(TradeValidation(
+        symbol="ACE/USDT",
+        direction="long",
+        entry_price=0.1226,
+        stop_price=0.1168,
+        take_profit_1=0.1278,
+        take_profit_2=0.1340,
+        stake_usdt=100,
+        leverage=1,
+        status="planned",
+        thesis="30M、4H、犄角延续三榜共振第一；不追跌中反抽，等待重新站回 0.1226 后验证多头转强。",
+    ))
+
+
+@app.get("/api/trade-validation")
+def trade_validation():
+    plans = TradeValidation.query.order_by(TradeValidation.created_at.desc()).all()
+    for plan in plans:
+        refresh_validation_plan(plan, latest_validation_price(plan.symbol))
+    db.session.commit()
+    plans = TradeValidation.query.order_by(TradeValidation.created_at.desc()).all()
+    closed = [plan for plan in plans if plan.status == "closed"]
+    wins = [plan for plan in closed if validation_pnl(plan, latest_validation_price(plan.symbol)) > 0]
+    total_pnl = sum(validation_pnl(plan, latest_validation_price(plan.symbol)) for plan in plans)
+
+    def payload(plan):
+        price = latest_validation_price(plan.symbol)
+        return {
+            "id": plan.id,
+            "symbol": plan.symbol,
+            "direction": plan.direction,
+            "entry_price": plan.entry_price,
+            "stop_price": plan.stop_price,
+            "take_profit_1": plan.take_profit_1,
+            "take_profit_2": plan.take_profit_2,
+            "stake_usdt": plan.stake_usdt,
+            "leverage": plan.leverage,
+            "status": plan.status,
+            "thesis": plan.thesis,
+            "current_price": price,
+            "pnl": validation_pnl(plan, price),
+            "opened_at": plan.opened_at.strftime("%m-%d %H:%M:%S") if plan.opened_at else None,
+            "closed_at": plan.closed_at.strftime("%m-%d %H:%M:%S") if plan.closed_at else None,
+            "exit_price": plan.exit_price,
+            "exit_reason": plan.exit_reason,
+            "candles": validation_candles(plan.symbol),
+        }
+
+    return jsonify({
+        "summary": {
+            "total": len(plans),
+            "closed": len(closed),
+            "wins": len(wins),
+            "win_rate": (len(wins) / len(closed) * 100) if closed else None,
+            "total_pnl": total_pnl,
+        },
+        "plans": [payload(plan) for plan in plans],
+    })
+
+
 with app.app_context():
     db.create_all()
     seed_symbol_aliases()
+    seed_trade_validation()
     alert_columns = {column["name"] for column in inspect(db.engine).get_columns("alert_event")}
     for column_name, column_type in (("strategy", "VARCHAR(30)"), ("long_exchange", "VARCHAR(30)"), ("short_exchange", "VARCHAR(30)")):
         if column_name not in alert_columns:

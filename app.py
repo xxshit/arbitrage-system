@@ -2934,6 +2934,8 @@ def thought_push_direction(analysis):
     t_direction = t_micro_direction(analysis)
     if t_direction:
         return t_direction
+    if symbol == "T/USDT":
+        return None
     ake_direction = ake_orderbook_wall_direction(analysis)
     if ake_direction:
         return ake_direction
@@ -2991,8 +2993,17 @@ def thought_signal_key(analysis, direction):
     resistance = analysis.get("resistance") or 0
     support = analysis.get("support") or 0
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
-        price_bucket = int(last * 100000) if last else 0
-        return f"{direction}-{price_bucket}"
+        if last >= 0.0047:
+            price_zone = "above-470"
+        elif last >= 0.00445:
+            price_zone = "stall-445-470"
+        elif last >= 0.00428:
+            price_zone = "bounce-428-445"
+        elif last >= 0.00412:
+            price_zone = "floor-break-412-428"
+        else:
+            price_zone = "floor-watch"
+        return f"{direction}-{price_zone}"
     if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
         if last >= 0.0028:
             price_zone = "above-2800"

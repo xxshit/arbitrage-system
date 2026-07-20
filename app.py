@@ -2284,7 +2284,8 @@ def fetch_horn_continuation_metrics(symbol):
             and current_oi < structure_hard_floor
             and current_oi < start_oi
         )
-        ratio_compressed = ratio_value <= ratio_mid or ratio_value <= 0.75
+        ratio_low_zone = ratio_value <= ratio_mid or ratio_value <= 0.75
+        ratio_compressed = ratio_low_zone and (ratio_change < 0 or cvd_change > 0)
         oi_floor_supported = (
             oi_floor_broken
             and retention >= 0.68
@@ -2292,7 +2293,14 @@ def fetch_horn_continuation_metrics(symbol):
             and cvd_change > 0
             and ratio_compressed
         )
-        if oi_floor_broken and not oi_floor_supported:
+        mature_oi_compression_supported = (
+            oi_floor_broken
+            and retention >= 0.85
+            and cvd_change > 0
+            and ratio_compressed
+            and (price_change > -8 or directional_consistency([row[4] for row in closed[-50:]], "up") >= 0.38)
+        )
+        if oi_floor_broken and not (oi_floor_supported or mature_oi_compression_supported):
             return None
         price_score = max(0, min(price_change / 80, 1)) * 8
         oi_multiple_score = max(0, min((oi_multiple - 1) / 0.7, 1)) * 26
@@ -2310,6 +2318,8 @@ def fetch_horn_continuation_metrics(symbol):
             score = min(score, 68)
         if oi_floor_broken:
             score = min(score, 58)
+        if mature_oi_compression_supported:
+            score = min(score, 52)
         oi_structure_alive = oi_multiple >= 1.08 or oi_change >= 8 or retention >= 0.62
         ratio_structure_alive = (
             (ratio_change < -10 and (ratio_value <= ratio_top or ratio_change < -25))

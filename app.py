@@ -355,6 +355,16 @@ SEEDED_SYMBOL_ALIASES = [
         "note": "倍率合约：1 张 1000XEC 合约对应 1000 枚 XEC 标的。",
     },
 ]
+SPOT_CONTRACT_SYMBOL_MISMATCHES = {
+    ("EDGEUSDT", "Gate"): {
+        "spot_project": "Definitive",
+        "spot_chain": "BASEEVM",
+        "spot_contract": "0xed6e000def95780fb89734c07ee2ce9f6dcaf110",
+        "spot_website": "https://www.definitive.fi",
+        "contract_project": "edgeX",
+        "note": "Gate EDGE 现货是 Definitive；Binance EDGEUSDT 合约是 edgeX，同名不同币，禁止现多期空匹配。",
+    },
+}
 
 
 def contract_spot_alias(symbol):
@@ -380,6 +390,10 @@ def pair_base(symbol):
 def pair_slash(symbol):
     compact = compact_pair(symbol)
     return f"{compact[:-4]}/USDT" if compact.endswith("USDT") else str(symbol or "").upper()
+
+
+def is_spot_contract_symbol_mismatch(symbol, exchange):
+    return (compact_pair(symbol), exchange) in SPOT_CONTRACT_SYMBOL_MISMATCHES
 
 
 def symbol_alias_rows():
@@ -1581,6 +1595,8 @@ def save_latest_market_snapshot(groups):
         db.session.bulk_update_mappings(LatestMarketSnapshot, updates)
     if inserts:
         db.session.bulk_insert_mappings(LatestMarketSnapshot, inserts)
+    for compact_symbol, exchange in SPOT_CONTRACT_SYMBOL_MISMATCHES:
+        LatestMarketSnapshot.query.filter_by(symbol=pair_slash(compact_symbol), long_exchange=exchange).delete(synchronize_session=False)
     db.session.commit()
 
 
@@ -1591,6 +1607,8 @@ def load_latest_market_snapshot():
     groups = {}
     captured_at = max(item.captured_at for item in rows)
     for item in rows:
+        if is_spot_contract_symbol_mismatch(item.symbol, item.long_exchange):
+            continue
         groups.setdefault(item.symbol, []).append({"long_exchange": item.long_exchange, "long_ask": item.long_ask, "long_bid": item.long_bid, "short_exchange": item.short_exchange, "short_bid": item.short_bid, "short_ask": item.short_ask, "basis": item.basis, "funding_rate": item.funding_rate, "funding_interval_hours": item.funding_interval_hours, "next_funding_time": item.next_funding_time, "spot_volume": item.spot_volume, "futures_volume": item.futures_volume, "futures_open_interest": item.futures_open_interest, "open_spread": item.open_spread, "close_spread": item.close_spread})
     elapsed = max(0.0, (datetime.now() - captured_at).total_seconds())
     next_refresh_in_seconds = max(0, int(MARKET_REFRESH_SECONDS - elapsed + 0.999))
@@ -1662,6 +1680,8 @@ def spot_futures_snapshot():
         multiplier = alias["multiplier"]
         rows = []
         for exchange in ("Binance", "Gate", "Bitget"):
+            if is_spot_contract_symbol_mismatch(symbol, exchange):
+                continue
             raw_book = spot_books[exchange].get(spot_symbol)
             book = {"ask": raw_book["ask"] * multiplier, "bid": raw_book["bid"] * multiplier} if raw_book and multiplier != 1 else raw_book
             if not book:

@@ -2284,7 +2284,15 @@ def fetch_horn_continuation_metrics(symbol):
             and current_oi < structure_hard_floor
             and current_oi < start_oi
         )
-        if oi_floor_broken and cvd_change <= 0:
+        ratio_compressed = ratio_value <= ratio_mid or ratio_value <= 0.75
+        oi_floor_supported = (
+            oi_floor_broken
+            and retention >= 0.68
+            and price_change > 20
+            and cvd_change > 0
+            and ratio_compressed
+        )
+        if oi_floor_broken and not oi_floor_supported:
             return None
         price_score = max(0, min(price_change / 80, 1)) * 8
         oi_multiple_score = max(0, min((oi_multiple - 1) / 0.7, 1)) * 26
@@ -2300,8 +2308,13 @@ def fetch_horn_continuation_metrics(symbol):
             score = min(score, 68)
         if ratio_value > ratio_mid:
             score = min(score, 68)
+        if oi_floor_broken:
+            score = min(score, 58)
         oi_structure_alive = oi_multiple >= 1.08 or oi_change >= 8 or retention >= 0.62
-        ratio_structure_alive = ratio_change < -10 and (ratio_value <= ratio_top or ratio_change < -25)
+        ratio_structure_alive = (
+            (ratio_change < -10 and (ratio_value <= ratio_top or ratio_change < -25))
+            or ratio_compressed
+        )
         price_not_broken = price_change > -18 or directional_consistency([row[4] for row in closed[-50:]], "up") >= 0.42
         if not (price_not_broken and oi_structure_alive and retention >= 0.5 and ratio_structure_alive and score >= 42):
             return None
@@ -3041,15 +3054,15 @@ def thought_cvd_profile(metrics):
     return tuple(cvd_direction(metrics.get(f"cvd_{suffix}")) for suffix in ("30m", "1h", "2h"))
 
 
-def thought_ake_has_new_information(previous, metrics):
+def thought_structural_has_new_information(previous, metrics):
     if previous is None:
         return True
     if previous.direction != metrics["direction"]:
         return True
     if previous.signal_key != metrics["signal_key"]:
         return True
-    # AKE is watched as a narrative/structure trade. If it stays in the same
-    # wall zone with the same judgement, normal 5-minute indicator jitter is not
+    # Watched symbols are narrative/structure trades. If a coin stays in the
+    # same zone with the same judgement, normal 5-minute indicator jitter is not
     # a new idea and should not wake the user.
     if metric_changed(metrics.get("last_price"), previous.last_price, pct_threshold=0.06):
         return True
@@ -3074,39 +3087,12 @@ def thought_ake_has_new_information(previous, metrics):
     return False
 
 
+def thought_ake_has_new_information(previous, metrics):
+    return thought_structural_has_new_information(previous, metrics)
+
+
 def thought_push_has_new_information(previous, metrics):
-    if metrics.get("symbol") == "AKE/USDT":
-        return thought_ake_has_new_information(previous, metrics)
-    if previous is None:
-        return True
-    if previous.direction != metrics["direction"]:
-        return True
-    if previous.signal_key != metrics["signal_key"]:
-        return True
-    if metric_changed(metrics.get("last_price"), previous.last_price, pct_threshold=0.018):
-        return True
-    if metric_changed(metrics.get("basis"), previous.basis, abs_threshold=0.20):
-        return True
-    if metric_changed(metrics.get("funding_rate"), previous.funding_rate, abs_threshold=0.05):
-        return True
-    if metric_changed(metrics.get("oi_value"), previous.oi_value, pct_threshold=0.12):
-        return True
-    if metric_changed(metrics.get("futures_volume"), previous.futures_volume, pct_threshold=0.35):
-        return True
-    if metric_changed(metrics.get("spot_volume"), previous.spot_volume, pct_threshold=0.35):
-        return True
-    if metric_changed(metrics.get("wall_qty"), previous.wall_qty, pct_threshold=0.30):
-        return True
-    for suffix in ("30m", "1h", "2h"):
-        if cvd_direction(metrics.get(f"cvd_{suffix}")) != cvd_direction(getattr(previous, f"cvd_{suffix}", None)):
-            return True
-        if metric_changed(metrics.get(f"price_change_{suffix}"), getattr(previous, f"price_change_{suffix}", None), abs_threshold=2.0):
-            return True
-        if metric_changed(metrics.get(f"oi_change_{suffix}"), getattr(previous, f"oi_change_{suffix}", None), abs_threshold=5.0):
-            return True
-        if metric_changed(metrics.get(f"ratio_change_{suffix}"), getattr(previous, f"ratio_change_{suffix}", None), abs_threshold=3.0):
-            return True
-    return False
+    return thought_structural_has_new_information(previous, metrics)
 
 
 def upsert_thought_push_snapshot(symbol, metrics):

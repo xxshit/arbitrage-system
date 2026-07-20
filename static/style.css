@@ -130,3 +130,18 @@ html,body{max-width:100%;overflow-x:hidden}
   #spot-futures table,#dual-futures table{min-width:980px}
   .pagination{flex-wrap:wrap;gap:8px}
 }
+
+/* 报警中心：左侧币种列表改为信息卡，不再把关键数据藏进内部滚动条 */
+.alert-master-detail{grid-template-columns:minmax(360px,430px) minmax(0,1fr)!important;align-items:start;overflow:visible!important}
+.alert-symbol-list{max-height:none!important;overflow:visible!important;gap:8px!important;padding:10px!important;background:#eef4eb!important;border-right:1px solid #d9e3dc}
+.alert-symbol-option{border:1px solid #d7e2dc!important;border-left-width:5px!important;border-radius:8px!important;padding:10px 11px!important;background:#fffdf7!important;box-shadow:0 3px 10px #203d5110;text-align:left}
+.alert-symbol-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.alert-symbol-top b{font:900 15px "Segoe UI","Microsoft Yahei",sans-serif!important;color:#163b5a}
+.alert-symbol-top em{font-style:normal;border-radius:999px;padding:3px 7px;background:#e9f3ff;color:#245b91;font-size:10px;font-weight:900}
+.alert-symbol-meta{display:grid;grid-template-columns:max-content 1fr;gap:6px;align-items:center;color:#61778a;font-size:10px;font-weight:800}
+.alert-symbol-meta strong{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#35536d;font-size:11px}
+.alert-latest-metrics{display:grid;grid-template-columns:1fr 1fr;gap:5px}
+.alert-latest-metrics span{display:flex;justify-content:space-between;gap:5px;padding:5px 6px;border-radius:6px;background:#f4f8f2;border:1px solid #dce6dd;color:#60778a;font-size:10px;font-weight:800}
+.alert-latest-metrics b{font:900 12px "Segoe UI",Arial,sans-serif}
+@media(max-width:1180px){.alert-master-detail{grid-template-columns:1fr!important}.alert-symbol-list{grid-template-columns:repeat(2,minmax(0,1fr));border-right:0;border-bottom:1px solid #d9e3dc}.alert-detail-pane{padding:12px}}
+@media(max-width:720px){.alert-symbol-list{grid-template-columns:1fr}.alert-symbol-meta{grid-template-columns:1fr}.alert-latest-metrics{grid-template-columns:1fr}}

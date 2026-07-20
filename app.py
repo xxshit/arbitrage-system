@@ -3016,6 +3016,7 @@ def thought_push_metrics(analysis, direction, signal_key):
     validation = analysis.get("validation") or {}
     wall = analysis.get("orderbook_wall") or {}
     data = {
+        "symbol": analysis.get("symbol"),
         "direction": direction,
         "signal_key": signal_key,
         "last_price": analysis.get("last"),
@@ -3036,7 +3037,46 @@ def thought_push_metrics(analysis, direction, signal_key):
     return data
 
 
+def thought_cvd_profile(metrics):
+    return tuple(cvd_direction(metrics.get(f"cvd_{suffix}")) for suffix in ("30m", "1h", "2h"))
+
+
+def thought_ake_has_new_information(previous, metrics):
+    if previous is None:
+        return True
+    if previous.direction != metrics["direction"]:
+        return True
+    if previous.signal_key != metrics["signal_key"]:
+        return True
+    # AKE is watched as a narrative/structure trade. If it stays in the same
+    # wall zone with the same judgement, normal 5-minute indicator jitter is not
+    # a new idea and should not wake the user.
+    if metric_changed(metrics.get("last_price"), previous.last_price, pct_threshold=0.06):
+        return True
+    if metric_changed(metrics.get("basis"), previous.basis, abs_threshold=0.50):
+        return True
+    previous_funding = previous.funding_rate
+    current_funding = metrics.get("funding_rate")
+    if current_funding is not None and previous_funding is not None:
+        if current_funding * previous_funding < 0:
+            return True
+    if metric_changed(current_funding, previous_funding, abs_threshold=0.15):
+        return True
+    if metric_changed(metrics.get("oi_value"), previous.oi_value, pct_threshold=0.25):
+        return True
+    if metric_changed(metrics.get("wall_qty"), previous.wall_qty, pct_threshold=0.80):
+        return True
+    if thought_cvd_profile(metrics) != tuple(cvd_direction(getattr(previous, f"cvd_{suffix}", None)) for suffix in ("30m", "1h", "2h")):
+        old_up = sum(direction == "up" for direction in tuple(cvd_direction(getattr(previous, f"cvd_{suffix}", None)) for suffix in ("30m", "1h", "2h")))
+        new_up = sum(direction == "up" for direction in thought_cvd_profile(metrics))
+        if abs(new_up - old_up) >= 2:
+            return True
+    return False
+
+
 def thought_push_has_new_information(previous, metrics):
+    if metrics.get("symbol") == "AKE/USDT":
+        return thought_ake_has_new_information(previous, metrics)
     if previous is None:
         return True
     if previous.direction != metrics["direction"]:

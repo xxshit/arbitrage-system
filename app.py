@@ -1266,6 +1266,7 @@ def backfill_price_history(groups, batch_size=2):
 
 
 def create_alert(symbol, alert_type, message, row, strategy="spot_futures", long_exchange=None, short_exchange="Binance"):
+    recent_window = datetime.now() - timedelta(minutes=30)
     recent = AlertEvent.query.filter_by(
         symbol=symbol,
         strategy=strategy,
@@ -1281,9 +1282,8 @@ def create_alert(symbol, alert_type, message, row, strategy="spot_futures", long
     else:
         current_abs = abs(current_open)
         recent_abs = abs(recent.open_spread or 0) if recent else None
-    if recent and current_abs < recent_abs + 0.2:
+    if recent and recent.created_at >= recent_window and current_abs < recent_abs + 0.2:
         return
-    recent_window = datetime.now() - timedelta(minutes=30)
     recent_same_type = AlertEvent.query.filter(
         AlertEvent.symbol == symbol,
         AlertEvent.strategy == strategy,
@@ -1368,6 +1368,13 @@ def validate_dual_alert_quote(row, alert_type):
     return True
 
 
+def create_basis_open_alert(symbol, row, strategy, message):
+    if strategy == "spot_futures":
+        create_alert(symbol, "basis_threshold", message, row, strategy, row.get("long_exchange"), "Binance")
+    else:
+        create_alert(symbol, "dual_basis_threshold", message, row, strategy, row.get("long_exchange"), row.get("short_exchange"))
+
+
 def track_basis(symbol, row, active_by_symbol, active_by_key, strategy="spot_futures"):
     basis = row["basis"]
     absolute = abs(basis)
@@ -1396,13 +1403,18 @@ def track_basis(symbol, row, active_by_symbol, active_by_key, strategy="spot_fut
         active_by_symbol[(strategy, symbol)] = active
         active_by_key[(strategy, symbol, direction)] = active
         db.session.add(BasisExpansionLog(tracking_id=active.id, level=1.0, observed_basis=basis))
-        if strategy == "spot_futures":
+        create_basis_open_alert(symbol, row, strategy, "basis reopened above 1 percent")
+        if False and strategy == "spot_futures":
             create_alert(symbol, "basis_threshold", "基差连续两次越过 ±1% 阈值", row)
     if absolute > active.max_abs_basis:
         active.max_abs_basis, active.max_basis, active.max_at = absolute, basis, now
+    expanded = False
     while absolute >= round(active.last_recorded_level + 0.2, 1):
         active.last_recorded_level = round(active.last_recorded_level + 0.2, 1)
         db.session.add(BasisExpansionLog(tracking_id=active.id, level=active.last_recorded_level, observed_basis=basis))
+        expanded = True
+    if expanded:
+        create_basis_open_alert(symbol, row, strategy, f"basis expanded to {active.last_recorded_level:.1f} percent level")
 
 
 def confirmed_spot_book(exchange, symbol):
@@ -4091,13 +4103,13 @@ def funding_trend_arbitrage():
 
 @app.get("/api/alerts")
 def alerts():
-    all_events = AlertEvent.query.order_by(AlertEvent.created_at.desc()).limit(200).all()
+    all_events = AlertEvent.query.order_by(AlertEvent.created_at.desc()).limit(800).all()
     # 旧版拉升报警没有连续采样确认凭证，不能再作为可靠信号展示。
     all_events = [item for item in all_events if (item.alert_type == "basis_threshold" or item.alert_type.startswith("rapid_") or "确认后的" in item.message) and not is_rwa_stock_pair(item.symbol)]
     grouped_events = {}
     for item in all_events:
         grouped_events.setdefault(item.symbol, []).append(item)
-    grouped_events = dict(list(grouped_events.items())[:30])
+    grouped_events = dict(list(grouped_events.items())[:80])
     latest_events = [items[0] for items in grouped_events.values()]
     active_events = [item for item in latest_events if (datetime.now() - item.created_at).total_seconds() <= 120]
     tracking = [item for item in BasisTracking.query.filter_by(resolved_at=None).order_by(BasisTracking.max_abs_basis.desc()).limit(50).all() if not is_rwa_stock_pair(item.symbol)]

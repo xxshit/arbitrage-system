@@ -152,3 +152,5 @@ html,body{max-width:100%;overflow-x:hidden}
 aside nav>a[data-view="trade-validation"]{margin-left:0!important;padding:13px 14px!important;background:#0b315d!important;color:#bbcad9!important;font-size:14px!important;border-color:transparent!important}
 aside nav>a[data-view="trade-validation"]::before{top:9px!important;bottom:9px!important;background:#22d1bd!important}
 aside nav>a[data-view="trade-validation"].active,aside nav>a[data-view="trade-validation"]:hover{background:#184b78!important;border-color:#2e6f9f!important;color:#fff!important}
+.trade-chart-scroll{display:block!important;overflow-x:auto!important;overflow-y:hidden!important}
+.trade-chart{max-width:none!important;min-width:1100px!important;flex:0 0 auto!important}

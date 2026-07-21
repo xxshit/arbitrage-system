@@ -89,6 +89,21 @@ class TradeValidation(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
+class TradeValidationCandle(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    symbol = db.Column(db.String(30), nullable=False, index=True)
+    interval = db.Column(db.String(10), nullable=False, default="5m", index=True)
+    bucket_at = db.Column(db.BigInteger, nullable=False, index=True)
+    open = db.Column(db.Float, nullable=False)
+    high = db.Column(db.Float, nullable=False)
+    low = db.Column(db.Float, nullable=False)
+    close = db.Column(db.Float, nullable=False)
+    volume = db.Column(db.Float)
+    quote_volume = db.Column(db.Float)
+    captured_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    __table_args__ = (db.UniqueConstraint("symbol", "interval", "bucket_at", name="uq_trade_validation_candle_symbol_interval_bucket"),)
+
+
 class LatestMarketSnapshot(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     symbol = db.Column(db.String(30), nullable=False)
@@ -338,6 +353,9 @@ FUNDING_HISTORY_SYNC_SECONDS = 60
 PRICE_BACKFILL_SYNC_SECONDS = 2 * 60
 PRICE_HISTORY_BUCKET_SECONDS = 5 * 60
 PRICE_HISTORY_RETENTION_SECONDS = 8 * 24 * 60 * 60
+TRADE_VALIDATION_CANDLE_RETENTION_SECONDS = 7 * 24 * 60 * 60
+TRADE_VALIDATION_CHART_SECONDS = 3 * 24 * 60 * 60
+TRADE_VALIDATION_INTERVAL = "5m"
 TREND_WINDOWS = {
     "change_5m": 5 * 60,
     "change_15m": 15 * 60,
@@ -4222,6 +4240,9 @@ def toggle_strategy(strategy_id):
 
 
 def latest_validation_price(symbol):
+    candle = TradeValidationCandle.query.filter_by(symbol=symbol, interval=TRADE_VALIDATION_INTERVAL).order_by(TradeValidationCandle.bucket_at.desc()).first()
+    if candle:
+        return candle.close
     history = FuturesPriceHistory.query.filter_by(symbol=symbol).order_by(FuturesPriceHistory.bucket_at.desc()).first()
     if history:
         return history.price
@@ -4266,22 +4287,88 @@ def refresh_validation_plan(plan, price):
             plan.status, plan.exit_price, plan.exit_reason, plan.closed_at = "closed", price, "take_profit", now
 
 
-def validation_candles(symbol, limit=80):
-    rows = FuturesPriceHistory.query.filter_by(symbol=symbol).order_by(FuturesPriceHistory.bucket_at.desc()).limit(limit).all()
-    rows = list(reversed(rows))
-    candles = []
-    for index, row in enumerate(rows):
-        open_price = rows[index - 1].price if index else row.price * 0.998
-        close_price = row.price
-        spread = max(abs(close_price - open_price), close_price * 0.0025)
-        candles.append({
-            "time": datetime.fromtimestamp(row.bucket_at).strftime("%H:%M"),
-            "open": open_price,
-            "high": max(open_price, close_price) + spread * 0.42,
-            "low": min(open_price, close_price) - spread * 0.42,
-            "close": close_price,
-        })
-    return candles
+def sync_trade_validation_candles(symbol):
+    """趋势验证专用K线缓存：只补缺口和最新K线，绘图从 MySQL 读取。"""
+    raw_symbol = symbol.replace("/", "")
+    now_bucket = int(time.time()) // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
+    latest = TradeValidationCandle.query.filter_by(symbol=symbol, interval=TRADE_VALIDATION_INTERVAL).order_by(TradeValidationCandle.bucket_at.desc()).first()
+    start_bucket = (latest.bucket_at + PRICE_HISTORY_BUCKET_SECONDS) if latest else now_bucket - TRADE_VALIDATION_CHART_SECONDS
+    if start_bucket >= now_bucket:
+        return
+    start_ms, end_ms = start_bucket * 1000, now_bucket * 1000
+    rows = []
+    while start_ms < end_ms:
+        payload = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({
+            "symbol": raw_symbol,
+            "interval": TRADE_VALIDATION_INTERVAL,
+            "startTime": start_ms,
+            "endTime": end_ms - 1,
+            "limit": 1000,
+        }), timeout=8)
+        if not payload:
+            break
+        for item in payload:
+            bucket_at = int(item[0] // 1000)
+            if bucket_at < now_bucket:
+                rows.append({
+                    "symbol": symbol,
+                    "interval": TRADE_VALIDATION_INTERVAL,
+                    "bucket_at": bucket_at,
+                    "open": float(item[1]),
+                    "high": float(item[2]),
+                    "low": float(item[3]),
+                    "close": float(item[4]),
+                    "volume": float(item[5]),
+                    "quote_volume": float(item[7]),
+                })
+        next_start = int(payload[-1][0]) + PRICE_HISTORY_BUCKET_SECONDS * 1000
+        if next_start <= start_ms:
+            break
+        start_ms = next_start
+    if rows:
+        existing = {
+            item.bucket_at for item in TradeValidationCandle.query.filter_by(
+                symbol=symbol, interval=TRADE_VALIDATION_INTERVAL
+            ).filter(TradeValidationCandle.bucket_at.in_([row["bucket_at"] for row in rows])).all()
+        }
+        for row in rows:
+            if row["bucket_at"] not in existing:
+                db.session.add(TradeValidationCandle(**row))
+    cutoff = now_bucket - TRADE_VALIDATION_CANDLE_RETENTION_SECONDS
+    TradeValidationCandle.query.filter(
+        TradeValidationCandle.symbol == symbol,
+        TradeValidationCandle.interval == TRADE_VALIDATION_INTERVAL,
+        TradeValidationCandle.bucket_at < cutoff,
+    ).delete(synchronize_session=False)
+
+
+def validation_candles(symbol, limit=None):
+    sync_trade_validation_candles(symbol)
+    cutoff = int(time.time()) - TRADE_VALIDATION_CHART_SECONDS
+    query = TradeValidationCandle.query.filter_by(symbol=symbol, interval=TRADE_VALIDATION_INTERVAL).filter(
+        TradeValidationCandle.bucket_at >= cutoff
+    ).order_by(TradeValidationCandle.bucket_at)
+    if limit:
+        query = query.limit(limit)
+    rows = query.all()
+    if not rows:
+        rows = list(reversed(FuturesPriceHistory.query.filter_by(symbol=symbol).order_by(FuturesPriceHistory.bucket_at.desc()).limit(288).all()))
+        return [{
+            "time": datetime.fromtimestamp(row.bucket_at).strftime("%m-%d %H:%M"),
+            "open": row.price,
+            "high": row.price,
+            "low": row.price,
+            "close": row.price,
+            "volume": None,
+        } for row in rows]
+    return [{
+        "time": datetime.fromtimestamp(row.bucket_at).strftime("%m-%d %H:%M"),
+        "open": row.open,
+        "high": row.high,
+        "low": row.low,
+        "close": row.close,
+        "volume": row.quote_volume,
+    } for row in rows]
 
 
 def seed_trade_validation():
@@ -4305,6 +4392,7 @@ def seed_trade_validation():
 def trade_validation():
     plans = TradeValidation.query.order_by(TradeValidation.created_at.desc()).all()
     for plan in plans:
+        sync_trade_validation_candles(plan.symbol)
         refresh_validation_plan(plan, latest_validation_price(plan.symbol))
     db.session.commit()
     plans = TradeValidation.query.order_by(TradeValidation.created_at.desc()).all()

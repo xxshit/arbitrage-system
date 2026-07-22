@@ -187,6 +187,13 @@ aside nav>a[data-view="trade-validation"].active,aside nav>a[data-view="trade-va
 .trade-chart-scroll-controls{display:grid;grid-template-columns:max-content minmax(0,1fr) max-content;align-items:center;gap:8px;margin:8px 12px 6px}
 .trade-chart-shift{height:28px;padding:5px 10px;border-color:#2d4056;background:#172333;color:#dcecff;font-size:11px}
 .trade-chart-shift:hover{border-color:#4398ff;background:#1d3047;color:#fff}
+.trade-chart-timeline{position:relative;min-width:0;padding-top:45px}
+.trade-scroll-markers{position:absolute;left:0;right:0;top:0;height:43px;pointer-events:none}
+.trade-scroll-marker{position:absolute;top:0;transform:translateX(-50%);display:grid;justify-items:center;gap:2px;width:54px;margin:0;padding:0;border:0;background:transparent;color:#dcecff;font-size:9px;font-weight:900;pointer-events:auto}
+.trade-scroll-marker i{display:block;width:10px;height:10px;border:2px solid #dcecff;border-radius:50%;box-shadow:0 0 0 2px #101722,0 0 9px currentColor}
+.trade-scroll-marker span{display:block;padding:1px 4px;border-radius:999px;background:#172333;border:1px solid #2d4056;white-space:nowrap}
+.trade-scroll-marker.buy{color:#35e7af}.trade-scroll-marker.sell{color:#73b7ff}.trade-scroll-marker.stop{color:#ff6b7d}
+.trade-scroll-marker:hover span{background:#203754;color:#fff}.trade-scroll-marker:hover i{transform:scale(1.18)}
 .trade-chart-native-scroll{display:block;width:100%;height:26px;overflow-x:auto;overflow-y:hidden;scrollbar-gutter:stable;cursor:pointer}
 .trade-chart-native-scroll::-webkit-scrollbar{height:14px}
 .trade-chart-native-scroll::-webkit-scrollbar-track{background:#1a2635;border:1px solid #2d4056;border-radius:999px}

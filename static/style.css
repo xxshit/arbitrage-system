@@ -183,11 +183,12 @@ aside nav>a[data-view="trade-validation"].active,aside nav>a[data-view="trade-va
 .tv-chart .trade-point.buy path{fill:#00d695}.tv-chart .trade-point.sell path{fill:#4398ff}.tv-chart .trade-point.stop path{fill:#ff4d64}
 .tv-chart .trade-point text{font-size:12px;font-weight:900;paint-order:stroke;stroke:#101722;stroke-width:4px;stroke-linejoin:round}
 .tv-chart .trade-point.buy text{fill:#42f0bd}.tv-chart .trade-point.sell text{fill:#8fc3ff}.tv-chart .trade-point.stop text{fill:#ff9ba8}
-.trade-chart-range{display:block;width:calc(100% - 24px);height:24px;margin:8px 12px 10px;accent-color:#4398ff;cursor:pointer}
-.trade-chart-range::-webkit-slider-runnable-track{height:8px;border-radius:999px;background:#26384d}
-.trade-chart-range::-webkit-slider-thumb{margin-top:-5px;width:18px;height:18px;border-radius:50%;background:#8fc3ff;border:2px solid #dcecff;box-shadow:0 2px 8px rgba(0,0,0,.35);appearance:none}
-.trade-chart-range::-moz-range-track{height:8px;border-radius:999px;background:#26384d}
-.trade-chart-range::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#8fc3ff;border:2px solid #dcecff;box-shadow:0 2px 8px rgba(0,0,0,.35)}
+.trade-chart-range{display:none!important}
+.trade-chart-native-scroll{display:block;width:calc(100% - 24px);height:22px;margin:8px 12px 10px;overflow-x:auto;overflow-y:hidden;scrollbar-gutter:stable;cursor:pointer}
+.trade-chart-native-scroll::-webkit-scrollbar{height:14px}
+.trade-chart-native-scroll::-webkit-scrollbar-track{background:#1a2635;border:1px solid #2d4056;border-radius:999px}
+.trade-chart-native-scroll::-webkit-scrollbar-thumb{background:linear-gradient(90deg,#3d86e8,#27d3c3);border:3px solid #1a2635;border-radius:999px}
+.trade-chart-native-scroll{scrollbar-color:#4398ff #1a2635;scrollbar-width:thin}
 .trade-line-notes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:0 12px 12px;color:#91a4b8;font-size:11px;line-height:1.45}
 .trade-line-notes span{border:1px solid #26384d;border-radius:7px;background:#121c28;padding:7px 8px}.trade-line-notes b{display:block;color:#dcecff;margin-bottom:2px}
 @media(max-width:900px){.trade-line-notes{grid-template-columns:repeat(2,minmax(0,1fr))}}

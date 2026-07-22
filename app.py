@@ -4485,9 +4485,12 @@ def replay_validation_plan(plan, candles):
     opened_at = closed_at = None
     exit_price = None
     exit_reason = None
+    replay_from = plan.opened_at or plan.created_at
     for idx, candle in enumerate(candles):
         high, low = float(candle.high), float(candle.low)
         bucket_time = datetime.fromtimestamp(candle.bucket_at)
+        if replay_from and bucket_time < replay_from - timedelta(seconds=PRICE_HISTORY_BUCKET_SECONDS):
+            continue
         if entry_idx is None:
             entered = low <= plan.entry_price if is_short else high >= plan.entry_price
             if not entered:
@@ -4582,8 +4585,9 @@ def sync_trade_validation_candles(symbol):
     ).delete(synchronize_session=False)
 
 
-def validation_candles(symbol, limit=None):
-    sync_trade_validation_candles(symbol)
+def validation_candles(symbol, limit=None, sync=True):
+    if sync:
+        sync_trade_validation_candles(symbol)
     cutoff = int(time.time()) - TRADE_VALIDATION_CHART_SECONDS
     query = TradeValidationCandle.query.filter_by(symbol=symbol, interval=TRADE_VALIDATION_INTERVAL).filter(
         TradeValidationCandle.bucket_at >= cutoff
@@ -4633,6 +4637,8 @@ def trade_validation():
     plans = TradeValidation.query.order_by(TradeValidation.created_at.desc()).all()
     replay_events = {}
     for plan in plans:
+        if plan.status == "closed":
+            continue
         sync_trade_validation_candles(plan.symbol)
         cutoff = int(time.time()) - TRADE_VALIDATION_CHART_SECONDS
         candles = TradeValidationCandle.query.filter_by(
@@ -4666,7 +4672,6 @@ def trade_validation():
             "exit_price": plan.exit_price,
             "exit_reason": plan.exit_reason,
             "events": replay_events.get(plan.id, []),
-            "candles": validation_candles(plan.symbol),
         }
 
     return jsonify({
@@ -4678,6 +4683,41 @@ def trade_validation():
             "total_pnl": total_pnl,
         },
         "plans": [payload(plan) for plan in plans],
+    })
+
+
+@app.get("/api/trade-validation/<int:plan_id>/detail")
+def trade_validation_detail(plan_id):
+    plan = db.get_or_404(TradeValidation, plan_id)
+    if plan.status != "closed":
+        sync_trade_validation_candles(plan.symbol)
+    cutoff = int(time.time()) - TRADE_VALIDATION_CHART_SECONDS
+    candles = TradeValidationCandle.query.filter_by(
+        symbol=plan.symbol, interval=TRADE_VALIDATION_INTERVAL
+    ).filter(TradeValidationCandle.bucket_at >= cutoff).order_by(TradeValidationCandle.bucket_at).all()
+    events = replay_validation_plan(plan, candles)
+    db.session.commit()
+    price = latest_validation_price(plan.symbol)
+    return jsonify({
+        "id": plan.id,
+        "symbol": plan.symbol,
+        "direction": plan.direction,
+        "entry_price": plan.entry_price,
+        "stop_price": plan.stop_price,
+        "take_profit_1": plan.take_profit_1,
+        "take_profit_2": plan.take_profit_2,
+        "stake_usdt": plan.stake_usdt,
+        "leverage": plan.leverage,
+        "status": plan.status,
+        "thesis": plan.thesis,
+        "current_price": price,
+        "pnl": validation_pnl(plan, price),
+        "opened_at": plan.opened_at.strftime("%m-%d %H:%M:%S") if plan.opened_at else None,
+        "closed_at": plan.closed_at.strftime("%m-%d %H:%M:%S") if plan.closed_at else None,
+        "exit_price": plan.exit_price,
+        "exit_reason": plan.exit_reason,
+        "events": events,
+        "candles": validation_candles(plan.symbol, limit=None, sync=plan.status != "closed"),
     })
 
 

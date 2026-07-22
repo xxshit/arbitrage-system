@@ -203,3 +203,8 @@ aside nav>a[data-view="trade-validation"].active,aside nav>a[data-view="trade-va
 .trade-line-notes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;padding:0 12px 12px;color:#91a4b8;font-size:11px;line-height:1.45}
 .trade-line-notes span{border:1px solid #26384d;border-radius:7px;background:#121c28;padding:7px 8px}.trade-line-notes b{display:block;color:#dcecff;margin-bottom:2px}
 @media(max-width:900px){.trade-line-notes{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.trade-thesis.compact{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:10px}
+.trade-detail-toggle{width:100%;justify-content:center;border:1px solid #c9d9ef;background:#f5fbff;color:#1767a8;font-weight:900;margin:2px 0 10px}
+.trade-detail-toggle:hover{background:#e8f4ff;border-color:#7eb8eb}
+.trade-plan-detail.hidden{display:none}
+.trade-plan-detail{margin-top:6px}

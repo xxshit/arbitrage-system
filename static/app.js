@@ -229,7 +229,14 @@ function tradeChart(plan){
   const marker=(idx,price,cls,label)=>idx>=0?`<g class="trade-point ${cls}" transform="translate(${x(idx)},${y(price)})"><path d="M0,-10 L9,0 L0,10 L-9,0 Z"/><text x="12" y="-9">${label}</text></g>`:'';
   const currentLine=Number.isFinite(current)?`<line x1="${m.l}" x2="${w-m.r}" y1="${y(current)}" y2="${y(current)}" class="tv-current-line"/><rect x="${w-m.r+4}" y="${y(current)-13}" width="78" height="24" rx="3" class="${current>=Number(candles[candles.length-1].open)?'tv-price-tag up':'tv-price-tag down'}"/><text x="${w-m.r+9}" y="${y(current)+4}" class="tv-price-text">${tradePrice(current)}</text>`:'';
   const replayEvents=(plan.events||[]).map(event=>({idx:Number(event.idx),price:Number(event.price),label:event.label||({entry:isShort?'开空':'买入',tp1:'止盈1',tp2:'止盈2',stop:'止损'}[event.type]||event.type),cls:event.type==='entry'?'buy':event.type==='stop'?'stop':'sell',type:event.type})).filter(item=>Number.isFinite(item.idx)&&item.idx>=0);
-  const timelineEvents=replayEvents.length?replayEvents:[{idx:entryIdx,price:entry,label:isShort?'开空':'买入',cls:'buy',type:'entry'},{idx:tp1Idx,price:tp1,label:'止盈1',cls:'sell',type:'tp1'},{idx:tp2Idx,price:tp2,label:'止盈2',cls:'sell',type:'tp2'},{idx:stopIdx,price:stop,label:'止损',cls:'stop',type:'stop'}].filter(item=>item.idx>=0);
+  const plannedIdx=Math.max(0,candles.length-1);
+  const plannedEvents=plan.status==='planned'
+    ? [{idx:plannedIdx,price:entry,label:isShort?'计划开空':'计划买入',cls:'buy',type:'entry'},{idx:plannedIdx,price:tp1,label:'计划止盈1',cls:'sell',type:'tp1'},{idx:plannedIdx,price:tp2,label:'计划止盈2',cls:'sell',type:'tp2'},{idx:plannedIdx,price:stop,label:'计划止损',cls:'stop',type:'stop'}]
+    : [];
+  const openPlanEvents=(plan.status==='open'&&replayEvents.length)
+    ? [{idx:plannedIdx,price:tp1,label:'计划止盈1',cls:'sell',type:'tp1-plan'},{idx:plannedIdx,price:tp2,label:'计划止盈2',cls:'sell',type:'tp2-plan'},{idx:plannedIdx,price:stop,label:'计划止损',cls:'stop',type:'stop-plan'}]
+    : [];
+  const timelineEvents=replayEvents.length?[...replayEvents,...openPlanEvents]:(plannedEvents.length?plannedEvents:[{idx:entryIdx,price:entry,label:isShort?'开空':'买入',cls:'buy',type:'entry'},{idx:tp1Idx,price:tp1,label:'止盈1',cls:'sell',type:'tp1'},{idx:tp2Idx,price:tp2,label:'止盈2',cls:'sell',type:'tp2'},{idx:stopIdx,price:stop,label:'止损',cls:'stop',type:'stop'}].filter(item=>item.idx>=0));
   const closedWithReplay=replayEvents.length&&plan.status==='closed',eventTypes=new Set(timelineEvents.map(item=>item.type));
   const levelLines=closedWithReplay
     ? `${eventTypes.has('entry')?priceLine(entry,'entry-line',isShort?'开空':'入场'):''}${eventTypes.has('tp1')?priceLine(tp1,'tp-line','止盈1'):''}${eventTypes.has('tp2')?priceLine(tp2,'tp-line','止盈2'):''}${eventTypes.has('stop')?priceLine(stop,'stop-line','止损'):''}`

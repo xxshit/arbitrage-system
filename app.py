@@ -4485,7 +4485,12 @@ def replay_validation_plan(plan, candles):
     opened_at = closed_at = None
     exit_price = None
     exit_reason = None
-    replay_from = plan.opened_at or plan.created_at
+    # A newly-created plan must never be replayed against older cached candles.
+    # If an older buggy replay wrote opened_at before created_at, ignore it and
+    # start from created_at so the chart cannot "time travel" into a fake trade.
+    replay_from = plan.created_at
+    if plan.opened_at and (not plan.created_at or plan.opened_at >= plan.created_at - timedelta(seconds=PRICE_HISTORY_BUCKET_SECONDS)):
+        replay_from = plan.opened_at
     for idx, candle in enumerate(candles):
         high, low = float(candle.high), float(candle.low)
         bucket_time = datetime.fromtimestamp(candle.bucket_at)

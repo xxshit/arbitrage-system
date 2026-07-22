@@ -154,3 +154,26 @@ aside nav>a[data-view="trade-validation"]::before{top:9px!important;bottom:9px!i
 aside nav>a[data-view="trade-validation"].active,aside nav>a[data-view="trade-validation"]:hover{background:#184b78!important;border-color:#2e6f9f!important;color:#fff!important}
 .trade-chart-scroll{display:block!important;overflow-x:auto!important;overflow-y:hidden!important}
 .trade-chart{max-width:none!important;min-width:1100px!important;flex:0 0 auto!important}
+.trade-chart-shell{border-radius:12px;background:#101722;border:1px solid #1e2b3b;box-shadow:inset 0 1px rgba(255,255,255,.04),0 10px 24px rgba(8,24,42,.12);overflow:hidden;margin:8px 0 12px}
+.trade-chart-topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 12px;background:#131b26;border-bottom:1px solid #223145;color:#d7e5f2;font:800 12px "Segoe UI","Microsoft Yahei",sans-serif}
+.trade-chart-topbar em{font-style:normal;color:#7e91a7;font-size:11px;font-weight:700}
+.trade-chart-scroll.tv-scroll{margin:0!important;border:0!important;border-radius:0!important;background:#101722!important;cursor:grab;user-select:none}
+.trade-chart-scroll.tv-scroll.dragging{cursor:grabbing}
+.trade-chart-scroll.tv-scroll::-webkit-scrollbar{height:10px}
+.trade-chart-scroll.tv-scroll::-webkit-scrollbar-track{background:#0c121b}
+.trade-chart-scroll.tv-scroll::-webkit-scrollbar-thumb{background:#31445b;border:2px solid #0c121b;border-radius:999px}
+.tv-chart{background:#101722!important;min-width:1280px!important}
+.tv-bg{fill:#101722}.tv-panel{fill:#111a25}.tv-volume-panel{fill:#0e1620}
+.tv-grid{stroke:#263343;stroke-width:1;opacity:.72}.tv-grid.vertical{opacity:.42}
+.tv-axis,.tv-time,.tv-volume-title{fill:#8292a5;font-size:11px;font-weight:700}
+.tv-up{stroke:#00b894;fill:#00b894}.tv-down{stroke:#ff4d64;fill:#ff4d64}
+.tv-vol-up{fill:#00b894;opacity:.28}.tv-vol-down{fill:#ff4d64;opacity:.28}
+.tv-current-line{stroke:#27d3c3;stroke-width:1;stroke-dasharray:3 4;opacity:.9}
+.tv-price-tag.up{fill:#00a884}.tv-price-tag.down{fill:#e64058}.tv-price-text{fill:#fff;font-size:11px;font-weight:900}
+.tv-level-label{font-size:11px;font-weight:900;fill:#d9e6f2;paint-order:stroke;stroke:#101722;stroke-width:3px;stroke-linejoin:round}
+.tv-chart .entry-line{stroke:#11d19b!important;stroke-width:1.5!important}.tv-chart .tp-line{stroke:#4398ff!important;stroke-width:1.5!important;stroke-dasharray:6 5}.tv-chart .stop-line{stroke:#ff5c72!important;stroke-width:1.5!important;stroke-dasharray:6 5}
+.tv-chart .profit-zone,.tv-chart .risk-zone{display:none}
+.tv-chart .trade-point path{stroke:#fff;stroke-width:1.5;filter:drop-shadow(0 2px 4px rgba(0,0,0,.45))}
+.tv-chart .trade-point.buy path{fill:#00d695}.tv-chart .trade-point.sell path{fill:#4398ff}.tv-chart .trade-point.stop path{fill:#ff4d64}
+.tv-chart .trade-point text{font-size:12px;font-weight:900;paint-order:stroke;stroke:#101722;stroke-width:4px;stroke-linejoin:round}
+.tv-chart .trade-point.buy text{fill:#42f0bd}.tv-chart .trade-point.sell text{fill:#8fc3ff}.tv-chart .trade-point.stop text{fill:#ff9ba8}

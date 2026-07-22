@@ -208,3 +208,6 @@ aside nav>a[data-view="trade-validation"].active,aside nav>a[data-view="trade-va
 .trade-detail-toggle:hover{background:#e8f4ff;border-color:#7eb8eb}
 .trade-plan-detail.hidden{display:none}
 .trade-plan-detail{margin-top:6px}
+.trade-crosshair-line{position:absolute;top:28px;bottom:38px;width:0;border-left:1px dashed rgba(125,190,255,.82);pointer-events:none;z-index:5;filter:drop-shadow(0 0 4px rgba(67,152,255,.45))}
+.trade-crosshair-time{position:absolute;bottom:10px;transform:translateX(-50%);padding:3px 8px;border:1px solid #36536f;border-radius:999px;background:#172333;color:#dcecff;font-size:11px;font-weight:900;line-height:1;white-space:nowrap;pointer-events:none;z-index:6;box-shadow:0 4px 10px rgba(0,0,0,.26)}
+.trade-crosshair-line.hidden,.trade-crosshair-time.hidden{display:none}

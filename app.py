@@ -21,7 +21,17 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "local-development-key")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///arbitrage_hub.db")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 db = SQLAlchemy(app)
+
+
+@app.after_request
+def disable_local_static_cache(response):
+    if request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
 
 
 class Strategy(db.Model):

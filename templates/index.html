@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ArbiScope | 套利监控中心</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260722-native-chart-scroll">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260722-chart-scroll-buttons">
 </head>
 <body>
   <aside>
@@ -49,5 +49,5 @@
   </main>
   <section id="tipsPanel" class="tips-panel collapsed"><button class="tips-toggle" onclick="toggleTips()"><span class="tips-dot"></span><b>TIPS</b><span id="tipsCount">0</span><span id="tipsChevron">⌃</span></button><div class="tips-body"><div class="tips-title"><span>实时报警</span><button onclick="loadAlerts()">↻</button></div><div id="tipsItems" class="tips-items"><p>正在检查报警…</p></div><button class="tips-collapse" onclick="toggleTips()">收起</button></div></section>
   <div id="modal" class="modal hidden"><form class="dialog" onsubmit="saveStrategy(event)"><button type="button" class="close" onclick="closeModal()">×</button><p class="eyebrow">NEW STRATEGY</p><h2>创建监控策略</h2><label>策略名称<input id="name" required placeholder="例如：BTC 跨所价差"></label><label>套利类型<select id="strategyMode"><option>跨所合约套利</option><option>现货多/合约空</option><option>资金费率套利</option></select></label><label>交易对<select id="symbol"><option>BTC/USDT</option><option>ETH/USDT</option><option>SOL/USDT</option></select></label><button class="primary submit">创建策略</button></form></div>
-  <script src="{{ url_for('static', filename='app.js') }}?v=20260722-native-chart-scroll"></script>
+  <script src="{{ url_for('static', filename='app.js') }}?v=20260722-chart-scroll-buttons"></script>
 </body></html>

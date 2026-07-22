@@ -4297,6 +4297,61 @@ def refresh_validation_plan(plan, price):
             plan.status, plan.exit_price, plan.exit_reason, plan.closed_at = "closed", price, "take_profit", now
 
 
+def replay_validation_plan(plan, candles):
+    """按K线时间顺序回放趋势验证，避免先止损后又显示止盈的假剧情。"""
+    if not candles:
+        refresh_validation_plan(plan, latest_validation_price(plan.symbol))
+        return []
+    is_short = plan.direction == "short"
+    entry_idx = None
+    events = []
+    tp1_recorded = False
+    final_status = "planned"
+    opened_at = closed_at = None
+    exit_price = None
+    exit_reason = None
+    for idx, candle in enumerate(candles):
+        high, low = float(candle.high), float(candle.low)
+        bucket_time = datetime.fromtimestamp(candle.bucket_at)
+        if entry_idx is None:
+            entered = low <= plan.entry_price if is_short else high >= plan.entry_price
+            if not entered:
+                continue
+            entry_idx = idx
+            opened_at = bucket_time
+            final_status = "open"
+            events.append({"type": "entry", "idx": idx, "price": plan.entry_price, "label": "买入" if not is_short else "开空"})
+
+        # 同一根K线内无法知道先后，趋势验证采用保守规则：止损优先于止盈。
+        stop_hit = high >= plan.stop_price if is_short else low <= plan.stop_price
+        tp2_hit = low <= plan.take_profit_2 if is_short else high >= plan.take_profit_2
+        tp1_hit = low <= plan.take_profit_1 if is_short else high >= plan.take_profit_1
+        if stop_hit:
+            final_status = "closed"
+            closed_at = bucket_time
+            exit_price = plan.stop_price
+            exit_reason = "stop"
+            events.append({"type": "stop", "idx": idx, "price": plan.stop_price, "label": "止损"})
+            break
+        if tp1_hit and not tp1_recorded:
+            tp1_recorded = True
+            events.append({"type": "tp1", "idx": idx, "price": plan.take_profit_1, "label": "止盈1"})
+        if tp2_hit:
+            final_status = "closed"
+            closed_at = bucket_time
+            exit_price = plan.take_profit_2
+            exit_reason = "take_profit"
+            events.append({"type": "tp2", "idx": idx, "price": plan.take_profit_2, "label": "止盈2"})
+            break
+
+    plan.status = final_status
+    plan.opened_at = opened_at
+    plan.closed_at = closed_at
+    plan.exit_price = exit_price
+    plan.exit_reason = exit_reason
+    return events
+
+
 def sync_trade_validation_candles(symbol):
     """趋势验证专用K线缓存：只补缺口和最新K线，绘图从 MySQL 读取。"""
     raw_symbol = symbol.replace("/", "")
@@ -4401,9 +4456,14 @@ def seed_trade_validation():
 @app.get("/api/trade-validation")
 def trade_validation():
     plans = TradeValidation.query.order_by(TradeValidation.created_at.desc()).all()
+    replay_events = {}
     for plan in plans:
         sync_trade_validation_candles(plan.symbol)
-        refresh_validation_plan(plan, latest_validation_price(plan.symbol))
+        cutoff = int(time.time()) - TRADE_VALIDATION_CHART_SECONDS
+        candles = TradeValidationCandle.query.filter_by(
+            symbol=plan.symbol, interval=TRADE_VALIDATION_INTERVAL
+        ).filter(TradeValidationCandle.bucket_at >= cutoff).order_by(TradeValidationCandle.bucket_at).all()
+        replay_events[plan.id] = replay_validation_plan(plan, candles)
     db.session.commit()
     plans = TradeValidation.query.order_by(TradeValidation.created_at.desc()).all()
     closed = [plan for plan in plans if plan.status == "closed"]
@@ -4430,6 +4490,7 @@ def trade_validation():
             "closed_at": plan.closed_at.strftime("%m-%d %H:%M:%S") if plan.closed_at else None,
             "exit_price": plan.exit_price,
             "exit_reason": plan.exit_reason,
+            "events": replay_events.get(plan.id, []),
             "candles": validation_candles(plan.symbol),
         }
 

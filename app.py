@@ -366,6 +366,7 @@ PRICE_HISTORY_RETENTION_SECONDS = 8 * 24 * 60 * 60
 TRADE_VALIDATION_CANDLE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 TRADE_VALIDATION_CHART_SECONDS = 3 * 24 * 60 * 60
 TRADE_VALIDATION_INTERVAL = "5m"
+TRADE_VALIDATION_AUTO_SYMBOLS = {"MIRA/USDT"}
 TREND_WINDOWS = {
     "change_5m": 5 * 60,
     "change_15m": 15 * 60,
@@ -4620,6 +4621,132 @@ def validation_candles(symbol, limit=None, sync=True):
     } for row in rows]
 
 
+def validation_auto_metrics(symbol):
+    rows = TradeValidationCandle.query.filter_by(
+        symbol=symbol, interval=TRADE_VALIDATION_INTERVAL
+    ).order_by(TradeValidationCandle.bucket_at.desc()).limit(60).all()
+    rows = list(reversed(rows))
+    if len(rows) < 30:
+        return None
+    closes = [row.close for row in rows]
+    highs = [row.high for row in rows]
+    lows = [row.low for row in rows]
+    volumes = [row.quote_volume or 0 for row in rows]
+    cvd_1h = sum(((row.close - row.open) / max(row.high - row.low, row.close * 0.001)) * (row.quote_volume or 0) for row in rows[-12:])
+    cvd_30m = sum(((row.close - row.open) / max(row.high - row.low, row.close * 0.001)) * (row.quote_volume or 0) for row in rows[-6:])
+    price = closes[-1]
+    atr = sum(high - low for high, low in zip(highs[-14:], lows[-14:])) / 14
+    raw_symbol = symbol.replace("/", "")
+    oi_1h = ratio_1h = oi_4h = ratio_4h = None
+    try:
+        oi = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 49}), timeout=5)
+        ratios = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 49}), timeout=5)
+        if isinstance(oi, list) and len(oi) >= 13:
+            oi_values = [float(item.get("sumOpenInterest", 0) or 0) for item in oi]
+            oi_1h = percent_delta(oi_values[-1], oi_values[-13])
+            oi_4h = percent_delta(oi_values[-1], oi_values[0]) if len(oi_values) >= 49 else None
+        if isinstance(ratios, list) and len(ratios) >= 13:
+            ratio_values = [float(item.get("longShortRatio", 0) or 0) for item in ratios]
+            ratio_1h = percent_delta(ratio_values[-1], ratio_values[-13])
+            ratio_4h = percent_delta(ratio_values[-1], ratio_values[0]) if len(ratio_values) >= 49 else None
+    except Exception:
+        pass
+    return {
+        "price": price,
+        "high_30m": max(highs[-6:]),
+        "low_30m": min(lows[-6:]),
+        "high_1h": max(highs[-12:]),
+        "low_1h": min(lows[-12:]),
+        "price_30m": percent_delta(closes[-1], closes[-7]) or 0,
+        "price_1h": percent_delta(closes[-1], closes[-13]) or 0,
+        "price_4h": percent_delta(closes[-1], closes[-49]) if len(closes) >= 49 else 0,
+        "cvd_30m": cvd_30m,
+        "cvd_1h": cvd_1h,
+        "volume_1h": sum(volumes[-12:]),
+        "atr": atr,
+        "oi_1h": oi_1h,
+        "oi_4h": oi_4h,
+        "ratio_1h": ratio_1h,
+        "ratio_4h": ratio_4h,
+    }
+
+
+def validation_signal_plan(symbol):
+    metrics = validation_auto_metrics(symbol)
+    if not metrics:
+        return None
+    price = metrics["price"]
+    atr = max(metrics["atr"], price * 0.012)
+    oi_1h = metrics["oi_1h"] if metrics["oi_1h"] is not None else 0
+    ratio_1h = metrics["ratio_1h"] if metrics["ratio_1h"] is not None else 0
+    long_score = 0
+    long_score += 18 if metrics["price_30m"] > 0.35 and metrics["price_1h"] > 0.2 else 0
+    long_score += 18 if metrics["cvd_30m"] > 0 and metrics["cvd_1h"] > 0 else 0
+    long_score += 16 if oi_1h > 0.4 else 0
+    long_score += 16 if ratio_1h < -0.8 else 0
+    long_score += 10 if price >= metrics["high_30m"] * 0.995 else 0
+    short_score = 0
+    short_score += 18 if metrics["price_30m"] < -0.35 and metrics["price_1h"] < -0.2 else 0
+    short_score += 18 if metrics["cvd_30m"] < 0 and metrics["cvd_1h"] < 0 else 0
+    short_score += 16 if oi_1h > -0.5 else 0
+    short_score += 16 if ratio_1h > 0.8 else 0
+    short_score += 10 if price <= metrics["low_30m"] * 1.005 else 0
+    if max(long_score, short_score) < 52:
+        return None
+    if long_score >= short_score:
+        entry = max(price * 1.001, metrics["high_30m"] * 1.0005)
+        risk = max(atr * 1.8, entry * 0.025)
+        direction = "long"
+        stop = entry - risk
+        tp1 = entry + risk * 0.9
+        tp2 = entry + risk * 1.7
+        thesis = f"{symbol} 自动续盯做多：30M/1H 价格转强，CVD 同步为正，持仓与多空人数比条件给到趋势验证。等待突破 {entry:.6g} 后才触发，跌回 {stop:.6g} 说明多头验证失败。"
+    else:
+        entry = min(price * 0.999, metrics["low_30m"] * 0.9995)
+        risk = max(atr * 1.8, entry * 0.03)
+        direction = "short"
+        stop = entry + risk
+        tp1 = entry - risk * 0.9
+        tp2 = entry - risk * 1.7
+        thesis = f"{symbol} 自动续盯做空：30M/1H 价格走弱，CVD 同步为负，多空人数比回升或持仓未明显塌陷，按反弹转弱/诱多失败验证。等待跌破 {entry:.6g} 后才触发，站回 {stop:.6g} 说明空头验证失败。"
+    return {
+        "symbol": symbol,
+        "direction": direction,
+        "entry_price": round(entry, 8),
+        "stop_price": round(stop, 8),
+        "take_profit_1": round(tp1, 8),
+        "take_profit_2": round(tp2, 8),
+        "thesis": thesis,
+    }
+
+
+def ensure_trade_validation_auto_plans():
+    for symbol in TRADE_VALIDATION_AUTO_SYMBOLS:
+        active = TradeValidation.query.filter(
+            TradeValidation.symbol == symbol,
+            TradeValidation.status.in_(["planned", "open"]),
+        ).first()
+        if active:
+            continue
+        sync_trade_validation_candles(symbol)
+        signal = validation_signal_plan(symbol)
+        if not signal:
+            continue
+        db.session.add(TradeValidation(
+            symbol=signal["symbol"],
+            direction=signal["direction"],
+            entry_price=signal["entry_price"],
+            stop_price=signal["stop_price"],
+            take_profit_1=signal["take_profit_1"],
+            take_profit_2=signal["take_profit_2"],
+            stake_usdt=100,
+            leverage=1,
+            status="planned",
+            thesis=signal["thesis"],
+            created_at=datetime.now(),
+        ))
+
+
 def seed_trade_validation():
     if TradeValidation.query.first():
         return
@@ -4650,6 +4777,8 @@ def trade_validation():
             symbol=plan.symbol, interval=TRADE_VALIDATION_INTERVAL
         ).filter(TradeValidationCandle.bucket_at >= cutoff).order_by(TradeValidationCandle.bucket_at).all()
         replay_events[plan.id] = replay_validation_plan(plan, candles)
+    db.session.commit()
+    ensure_trade_validation_auto_plans()
     db.session.commit()
     plans = TradeValidation.query.order_by(TradeValidation.created_at.desc()).all()
     closed = [plan for plan in plans if plan.status == "closed"]

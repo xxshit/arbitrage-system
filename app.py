@@ -2128,9 +2128,10 @@ def percentile(values, q):
 def fetch_t_micro_metrics(raw_symbol):
     """T/USDT 专用 5 分钟级盯盘：捕捉横盘后的短线向上异动与反抽停滞。"""
     try:
-        k5 = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "5m", "limit": 48}), timeout=8)
-        oi5 = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 48}), timeout=8)
-        ratios5 = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 48}), timeout=8)
+        live_timeout = 2
+        k5 = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "5m", "limit": 48}), timeout=live_timeout)
+        oi5 = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 48}), timeout=live_timeout)
+        ratios5 = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 48}), timeout=live_timeout)
     except Exception:
         return {}
 
@@ -2202,8 +2203,9 @@ def fetch_ake_orderbook_wall(raw_symbol):
         {"level": 0.0022, "upper": 0.0023, "qty": 1_000_000, "notional": 0.0022 * 1_000_000},
     ]
     try:
-        depth = get_json("https://fapi.binance.com/fapi/v1/depth?" + urlencode({"symbol": raw_symbol, "limit": BINANCE_FUTURES_DEPTH_MAX_LIMIT}), timeout=8)
-        ticker = get_json("https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({"symbol": raw_symbol}), timeout=8)
+        live_timeout = 2
+        depth = get_json("https://fapi.binance.com/fapi/v1/depth?" + urlencode({"symbol": raw_symbol, "limit": BINANCE_FUTURES_DEPTH_MAX_LIMIT}), timeout=live_timeout)
+        ticker = get_json("https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({"symbol": raw_symbol}), timeout=live_timeout)
     except Exception:
         return {}
     asks = [(float(price), float(qty)) for price, qty in depth.get("asks", [])]
@@ -2224,7 +2226,7 @@ def fetch_ake_orderbook_wall(raw_symbol):
     visible_depth_covers_wall = visible_high >= 0.0023
     spot_depth = {}
     try:
-        spot_depth = get_json("https://api.binance.com/api/v3/depth?" + urlencode({"symbol": raw_symbol, "limit": BINANCE_SPOT_DEPTH_MAX_LIMIT}), timeout=8)
+        spot_depth = get_json("https://api.binance.com/api/v3/depth?" + urlencode({"symbol": raw_symbol, "limit": BINANCE_SPOT_DEPTH_MAX_LIMIT}), timeout=2)
     except Exception:
         spot_depth = {}
     spot_asks = [(float(price), float(qty)) for price, qty in spot_depth.get("asks", [])]
@@ -2775,6 +2777,12 @@ THOUGHT_WATCHLIST = {
         "side": "short",
         "fallback": {},
     },
+    "TLM/USDT": {
+        "entry": 0.0018855,
+        "entry_time": "2026-07-22 22:22 本地快照附近",
+        "side": "short",
+        "fallback": {},
+    },
 }
 
 
@@ -2810,12 +2818,13 @@ def thought_snapshot(symbol):
     }
     fallback.update(fallback_overrides)
     try:
-        ticker = get_json("https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({"symbol": raw_symbol}), timeout=8)
-        k30 = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "30m", "limit": 60}), timeout=8)
-        k4h = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "4h", "limit": 30}), timeout=8)
-        premium = get_json("https://fapi.binance.com/fapi/v1/premiumIndex?" + urlencode({"symbol": raw_symbol}), timeout=8)
-        oi = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 50}), timeout=8)
-        ratios = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 50}), timeout=8)
+        live_timeout = 2
+        ticker = get_json("https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({"symbol": raw_symbol}), timeout=live_timeout)
+        k30 = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "30m", "limit": 60}), timeout=live_timeout)
+        k4h = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "4h", "limit": 30}), timeout=live_timeout)
+        premium = get_json("https://fapi.binance.com/fapi/v1/premiumIndex?" + urlencode({"symbol": raw_symbol}), timeout=live_timeout)
+        oi = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 50}), timeout=live_timeout)
+        ratios = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 50}), timeout=live_timeout)
         last = float(ticker.get("lastPrice", 0) or 0)
         support = min(float(row[3]) for row in k30[-12:])
         resistance = max(float(row[2]) for row in k30[-20:])
@@ -2894,6 +2903,36 @@ def thought_snapshot_from_db(symbol, fallback):
     }
 
 
+def thought_fast_snapshot(symbol):
+    config = THOUGHT_WATCHLIST[symbol]
+    now = datetime.now(SHANGHAI_TZ)
+    fallback = {
+        "symbol": symbol,
+        "entry": config.get("entry"),
+        "entry_time": config.get("entry_time") or "重点观察",
+        "last": None,
+        "profit_pct": None,
+        "support": None,
+        "resistance": None,
+        "oi_value": None,
+        "oi_change_pct": None,
+        "ratio_value": None,
+        "ratio_change_pct": None,
+        "cvd": None,
+        "change_30m": None,
+        "change_4h": None,
+        "funding_rate": None,
+        "basis": None,
+        "validation": {},
+        "micro_validation": {},
+        "orderbook_wall": {},
+        "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "db_fallback",
+    }
+    fallback.update(config.get("fallback") or {})
+    return thought_snapshot_from_db(symbol, fallback)
+
+
 def thought_market_context(symbol):
     market_rows = LatestMarketSnapshot.query.filter_by(symbol=symbol).order_by(LatestMarketSnapshot.captured_at.desc()).all()
     if not market_rows:
@@ -2922,7 +2961,19 @@ def ake_thought_snapshot():
 
 
 def thought_watch_snapshots():
-    return [thought_snapshot(symbol) for symbol in THOUGHT_WATCHLIST]
+    symbols = list(THOUGHT_WATCHLIST)
+
+    def load_symbol(symbol):
+        with app.app_context():
+            return symbol, thought_snapshot(symbol)
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=min(4, len(symbols) or 1)) as executor:
+        futures = [executor.submit(load_symbol, symbol) for symbol in symbols]
+        for future in as_completed(futures):
+            symbol, snapshot = future.result()
+            results[symbol] = snapshot
+    return [results[symbol] for symbol in symbols if symbol in results]
 
 
 def t_micro_direction(analysis):
@@ -2958,6 +3009,35 @@ def t_micro_direction(analysis):
     ratio_chases = value(m15, "ratio_change") > 1.0 or value(m30, "ratio_change") > 1.5
     if bounce_extended and price_stalls and (cvd_weakens or ratio_chases) and (volume_hot or funding_bad or basis_bad):
         return "t_bounce_stall_short"
+    return None
+
+
+def tlm_trap_short_direction(analysis):
+    if analysis.get("symbol") != "TLM/USDT":
+        return None
+    funding = analysis.get("funding_rate")
+    basis = analysis.get("basis")
+    validation = analysis.get("validation") or {}
+    checks = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
+    valid = [item for item in checks if item.get("price_change") is not None]
+
+    def value(row, key, default=0):
+        item = row.get(key)
+        return default if item is None else item
+
+    funding_deep_negative = funding is not None and funding <= -0.08
+    basis_negative = basis is not None and basis <= -0.35
+    if not valid:
+        open_spread = analysis.get("open_spread")
+        return "tlm_trap_short" if funding_deep_negative and basis_negative and (open_spread is None or open_spread <= 0) else None
+    recent_bounce = any(value(item, "price_change") >= 0.25 for item in valid)
+    cvd_selling = sum(value(item, "cvd") < 0 for item in valid) >= 1
+    ratio_chasing_long = sum(value(item, "ratio_change") > 0.25 for item in valid) >= 1
+    oi_not_collapsed = sum(value(item, "oi_change") > -2.5 for item in valid) >= 2
+    if funding_deep_negative and basis_negative and (cvd_selling or ratio_chasing_long) and oi_not_collapsed:
+        return "tlm_trap_short"
+    if recent_bounce and cvd_selling and ratio_chasing_long and (funding_deep_negative or basis_negative):
+        return "tlm_trap_short"
     return None
 
 
@@ -3013,6 +3093,9 @@ def thought_push_direction(analysis):
     t_direction = t_micro_direction(analysis)
     if t_direction:
         return t_direction
+    tlm_direction = tlm_trap_short_direction(analysis)
+    if tlm_direction:
+        return tlm_direction
     if symbol == "T/USDT":
         return None
     ake_direction = ake_orderbook_wall_direction(analysis)
@@ -3082,6 +3165,18 @@ def thought_signal_key(analysis, direction):
             price_zone = "floor-break-412-428"
         else:
             price_zone = "floor-watch"
+        return f"{direction}-{price_zone}"
+    if direction == "tlm_trap_short":
+        if last >= 0.0024:
+            price_zone = "above-2400"
+        elif last >= 0.0022:
+            price_zone = "trap-2200-2400"
+        elif last >= 0.0020:
+            price_zone = "trap-2000-2200"
+        elif last >= 0.00185:
+            price_zone = "entry-1850-2000"
+        else:
+            price_zone = "below-1850"
         return f"{direction}-{price_zone}"
     if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
         if last >= 0.0028:
@@ -3434,6 +3529,17 @@ def thought_window_line(validation, label, key):
 
 
 def thought_structure_summary(analysis, direction):
+    if direction == "tlm_trap_short":
+        validation = analysis.get("validation") or {}
+        windows = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
+        cvd_down = sum((item.get("cvd") or 0) < 0 for item in windows)
+        ratio_up = sum((item.get("ratio_change") or 0) > 0 for item in windows)
+        price_up = sum((item.get("price_change") or 0) > 0 for item in windows)
+        return (
+            "TLM 当前按诱多转弱剧本盯盘：前面 7月19日-7月20日放量拉升后持续下跌，说明高位多单可能没完全出完，同时主力也可能在高点埋伏空单。"
+            f"现在短线有反抽迹象（{price_up} 个窗口价格为正），但多空人数比有 {ratio_up} 个窗口上升、CVD 有 {cvd_down} 个窗口偏卖出，"
+            "再叠加 BN 资费被打到负值、基差偏负，这更像给多头制造入场动力后的诱多，而不是健康主升。若反抽放量不涨或跌回入场下方，空头逻辑增强；若重新放量站稳压力带并修复负资费/负基差，做空逻辑降级。"
+        )
     validation = analysis.get("validation") or {}
     windows = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
     valid = [item for item in windows if item]
@@ -3502,6 +3608,7 @@ def thought_lark_message(analysis, direction):
         "bearish": "转弱观察",
         "reversal": "涨势反转预警",
         "distribution": "高位派发预警",
+        "tlm_trap_short": "诱多转弱做空盯盘",
     }
     return "\n".join([
         thought_direction_badge(direction),
@@ -3717,11 +3824,79 @@ def thought_t_item(t):
     }
 
 
+def thought_tlm_item(tlm):
+    short_profit = percent_delta(tlm["entry"], tlm["last"]) if tlm.get("last") and tlm.get("entry") else None
+    entry = tlm.get("entry") or 0.0018855
+    last = tlm.get("last") or entry
+    support = tlm.get("support") or min(entry, last) * 0.94
+    resistance = tlm.get("resistance") or max(entry, last) * 1.08
+    return {
+        "symbol": tlm["symbol"],
+        "trade_side": "做空",
+        "trade_status": "诱多转弱盯盘",
+        "entry": entry,
+        "entry_time": tlm["entry_time"],
+        "exit": None,
+        "exit_time": None,
+        "last": tlm["last"],
+        "profit_pct": short_profit,
+        "realized_profit_pct": None,
+        "support": support,
+        "resistance": resistance,
+        "oi_value": tlm["oi_value"],
+        "oi_change_pct": tlm["oi_change_pct"],
+        "ratio_value": tlm["ratio_value"],
+        "ratio_change_pct": tlm["ratio_change_pct"],
+        "cvd": tlm["cvd"],
+        "change_30m": tlm["change_30m"],
+        "change_4h": tlm["change_4h"],
+        "funding_rate": tlm["funding_rate"],
+        "basis": tlm["basis"],
+        "validation": tlm.get("validation") or {},
+        "source": tlm["source"],
+        "screenshot_url": None,
+        "thought_summary": "TLM 新增做空思路：7月19日-7月20日放量上涨后持续下跌，当前短时间反抽不一定是重新主升，更可能是诱多/换手。若多空人数比继续上升、CVD 继续走跌、负资费与负基差不修复，就按空头逻辑继续盯；若放量站稳压力带并修复负资费/负基差，则做空逻辑降级。",
+        "user_mistakes": [
+            "需要注意：负资费对空单不友好，若价格长时间横盘不跌，持仓成本会侵蚀利润。",
+            "不能只因为前面放量上涨后下跌就认定后面必跌，必须让 CVD、人数比、量能和关键位继续验证。",
+        ],
+        "assistant_mistakes": [
+            "我需要避免把短线反抽直接看成继续下跌，必须区分诱多反抽和二次吸筹反转。",
+            "若 CVD 转正、负资费快速修复、价格放量站稳压力带，我要及时提醒你降低空头假设权重。"
+        ],
+        "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "TLM 为新增实盘做空思路，等待后续盯盘验证。"},
+        "my_thesis": "你的主线思路：TLM 在 7月19日-7月20日左右放量上涨很多，随后一直走下跌。一方面可能是主力手上的多单没有完全平完，另一方面主力可能已经在高点埋伏空单。现在这里又短时间拉升一些币价，你不认为这是继续向上的动能；加上多空人数比上涨，说明更多账户可能被吸引去做多。主力又把资费拉到很负，给做多的人制造“收资费”的动力，但 CVD 实际在走跌，主动卖出力量更大，所以你判断后期偏空，并在当前点位做空。",
+        "assistant_thesis": "我的验证思路：这笔空单不是单纯追跌，而是押注反抽诱多失败。关键验证链是：反抽时多空人数比继续上升，说明追多账户增加；CVD 走跌，说明主动卖出没有消失；负资费/负基差如果持续，说明合约端仍然承压。若价格不能重新放量站稳压力带，且反抽后的高点逐步降低，空头胜率会提高。反证也很清楚：如果 CVD 重新转正、价格放量突破压力带、负资费快速收敛甚至转正、基差修复，则这不是诱多，而可能是重新吸筹或逼空。",
+        "challenge_points": [
+            "空头优势：负资费 + 负基差 + CVD 走跌 + 多空人数比上升，符合反抽诱多后的做空观察。",
+            "风险点：负资费会让空单付费，若主力选择横盘磨人，空单成本和心理压力都会变高。",
+            "反证条件：放量站稳压力带、CVD 转正、负资费/负基差修复，必须降低做空权重，不能死扛。"
+        ],
+        "validation_view": "TLM 当前按诱多转弱盯盘：若价格反抽后不能站稳压力带，且 30MIN/1H/2H 中 CVD 继续为负、多空人数比继续上升、资金费/基差仍偏负，就继续按做空逻辑观察；若出现快速拉升但 CVD 仍背离，优先看冲高回落；若价格放量站稳压力带并修复负资费/负基差，则提醒做空逻辑失效。",
+        "take_profit": [
+            f"第一观察目标：{support:.8f} 附近。理由是近端支撑/回落低位，若放量跌破，说明诱多反抽失败概率增加。",
+            f"第二目标：{entry * 0.90:.8f}-{entry * 0.94:.8f}。只有跌破第一支撑后反抽无力，才看这里，不提前幻想一口气砸穿。",
+            "若下跌过程中资费继续极负但价格跌不动，要小心主力横盘磨空，不要只看方向不看成本。",
+        ],
+        "stop_loss": [
+            f"结构止损：{resistance * 0.995:.8f}-{resistance * 1.015:.8f} 放量站稳，并且 CVD 转正、负资费/负基差修复，则做空逻辑降级。",
+            f"硬风控参考：若价格回到入场上方约 4%-6% 且没有快速跌回，即 {entry * 1.04:.8f}-{entry * 1.06:.8f}，需要主动复核，不要被负资费诱导硬扛。",
+        ],
+        "review_notes": [
+            "2026-07-22 新增：用户在 TLM 当前点位建立空单，入场先按本地快照 0.0018855 记录；若实际成交不同，需要校准。",
+            "用户判断：7月19日-7月20日放量拉升后持续下跌，说明主力可能高位换手并埋伏空单；当前短拉更像诱多而非新主升。",
+            "关键观察：多空人数比上涨、CVD 下跌、资费极负、基差偏负。如果这几项继续共振，空头逻辑增强。",
+            "反证记录：若价格放量站稳压力带、CVD 转正、负资费/负基差修复，必须记录为做空假设缺陷，而不是继续按诱多解释。"
+        ],
+    }
+
+
 @app.get("/api/daily-report/thoughts")
 def daily_report_thoughts():
-    ake = ake_thought_snapshot()
-    us = thought_snapshot("US/USDT")
-    t = thought_snapshot("T/USDT")
+    ake = thought_fast_snapshot("AKE/USDT")
+    us = thought_fast_snapshot("US/USDT")
+    t = thought_fast_snapshot("T/USDT")
+    tlm = thought_fast_snapshot("TLM/USDT")
     ake_support = ake.get("support") or ake["entry"] * 0.99
     return jsonify({
         "updated_at": ake["updated_at"],
@@ -3793,7 +3968,7 @@ def daily_report_thoughts():
                 "需要修正：不能只盯多空人数比下跌；当前窗口首尾已经小幅回升，说明散户空头进一步拥挤的条件变弱。",
                 "后续验证：如果价格创新高但 CVD 不再创新高，或者 OI 上升但价格滞涨，要把判断从吸筹延续切换为高位换手/派发风险。",
             ],
-        }, thought_us_item(us), thought_t_item(t)]
+        }, thought_us_item(us), thought_t_item(t), thought_tlm_item(tlm)]
     })
 
 

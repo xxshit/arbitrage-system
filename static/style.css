@@ -157,6 +157,10 @@ aside nav>a[data-view="trade-validation"].active,aside nav>a[data-view="trade-va
 .trade-chart-shell{border-radius:12px;background:#101722;border:1px solid #1e2b3b;box-shadow:inset 0 1px rgba(255,255,255,.04),0 10px 24px rgba(8,24,42,.12);overflow:hidden;margin:8px 0 12px}
 .trade-chart-topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 12px;background:#131b26;border-bottom:1px solid #223145;color:#d7e5f2;font:800 12px "Segoe UI","Microsoft Yahei",sans-serif}
 .trade-chart-topbar em{font-style:normal;color:#7e91a7;font-size:11px;font-weight:700}
+.trade-chart-legend{display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:#8ea2b8}
+.trade-chart-legend b{position:relative;padding-left:18px;font-size:11px;font-weight:800}
+.trade-chart-legend b::before{content:"";position:absolute;left:0;top:50%;width:13px;height:3px;border-radius:999px;transform:translateY(-50%)}
+.trade-chart-legend .entry::before{background:#11d19b}.trade-chart-legend .tp::before{background:#4398ff}.trade-chart-legend .stop::before{background:#ff5c72}.trade-chart-legend .current::before{background:#27d3c3}
 .trade-chart-scroll.tv-scroll{margin:0!important;border:0!important;border-radius:0!important;background:#101722!important;cursor:grab;user-select:none}
 .trade-chart-scroll.tv-scroll.dragging{cursor:grabbing}
 .trade-chart-scroll.tv-scroll::-webkit-scrollbar{height:10px}
@@ -177,3 +181,8 @@ aside nav>a[data-view="trade-validation"].active,aside nav>a[data-view="trade-va
 .tv-chart .trade-point.buy path{fill:#00d695}.tv-chart .trade-point.sell path{fill:#4398ff}.tv-chart .trade-point.stop path{fill:#ff4d64}
 .tv-chart .trade-point text{font-size:12px;font-weight:900;paint-order:stroke;stroke:#101722;stroke-width:4px;stroke-linejoin:round}
 .tv-chart .trade-point.buy text{fill:#42f0bd}.tv-chart .trade-point.sell text{fill:#8fc3ff}.tv-chart .trade-point.stop text{fill:#ff9ba8}
+.trade-chart-range{display:block;width:calc(100% - 24px);height:24px;margin:8px 12px 10px;accent-color:#4398ff;cursor:pointer}
+.trade-chart-range::-webkit-slider-runnable-track{height:8px;border-radius:999px;background:#26384d}
+.trade-chart-range::-webkit-slider-thumb{margin-top:-5px;width:18px;height:18px;border-radius:50%;background:#8fc3ff;border:2px solid #dcecff;box-shadow:0 2px 8px rgba(0,0,0,.35);appearance:none}
+.trade-chart-range::-moz-range-track{height:8px;border-radius:999px;background:#26384d}
+.trade-chart-range::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#8fc3ff;border:2px solid #dcecff;box-shadow:0 2px 8px rgba(0,0,0,.35)}

@@ -340,6 +340,22 @@ OKX_FUNDING_CURSOR = 0
 BINANCE_OPEN_INTEREST_CACHE = {}
 BINANCE_OPEN_INTEREST_CURSOR = 0
 RWA_STOCK_SYMBOLS = set()
+STATIC_RWA_STOCK_SYMBOLS = {
+    # Binance/partner TradFi perpetuals are sometimes unavailable in exchangeInfo during partial refreshes.
+    # Keep a local guard so stock, ETF and metal RWA contracts do not leak into crypto arbitrage scanners.
+    "AAOIUSDT", "AAPLUSDT", "ADBEUSDT", "ALABUSDT", "AMATUSDT", "AMDUSDT", "AMZNUSDT", "APPUSDT",
+    "ARMUSDT", "ASMLUSDT", "ASTSUSDT", "AVGOUST", "AVGOUSDT", "BABAUSDT", "BMNRUSDT", "CIENUSDT",
+    "COHRUSDT", "COINUSDT", "COSTUSDT", "CRCLUSDT", "CRDOUSDT", "CRMUSDT", "CRWDUSDT", "CRWVUSDT",
+    "CSCOUSDT", "DELLUSDT", "DKNGUSDT", "FLNCUSDT", "GEVUSDT", "GLWUSDT", "GMEUSDT", "GOOGLUSDT",
+    "HIMSUSDT", "HOODUSDT", "HPEUSDT", "HYUNDAIUSDT", "IBMUSDT", "INTCUSDT", "IRENUSDT", "IWMUSDT",
+    "KLACUSDT", "KORUUSDT", "LLYUSDT", "LRCXUSDT", "METAUSDT", "MRVLUSDT", "MSFTUSDT", "MSTRUSDT",
+    "MUUSDT", "NBISUSDT", "NFLXUSDT", "NOKUSDT", "NOWUSDT", "NVDAUSDT", "ONDSUSDT", "ORCLUSDT",
+    "PANWUSDT", "PLTRUSDT", "QCOMUSDT", "QQQUSDT", "RIVNUSDT", "RKLBUSDT", "SAMSUNGUSDT",
+    "SKHYNIXUSDT", "SMCIUSDT", "SNDKUSDT", "SNOWUSDT", "SOFIUSDT", "SONYUSDT", "SOXLUSDT",
+    "SOXSUSDT", "SPYUSDT", "SQQQUSDT", "TERUSDT", "TQQQUSDT", "TSLAUSDT", "TSMUSDT", "TTWOUSDT",
+    "TXNUSDT", "TZAUSDT", "URNMUSDT", "UVXYUSDT", "VRTUSDT", "WDCUSDT", "XAGUSDT", "XAUUSDT",
+    "XBIUSDT", "XLEUSDT", "XPDUSDT", "XPTUSDT", "ZMUSDT",
+}
 LAST_LISTING_SYNC_AT = 0.0
 LISTING_SYNC_SECONDS = 30 * 60
 ANNOUNCEMENT_SCAN_HOUR = 8
@@ -766,7 +782,8 @@ def enrich_transfer_networks(groups):
 
 
 def is_rwa_stock_pair(symbol):
-    return symbol.replace("/", "").replace("-", "") in RWA_STOCK_SYMBOLS
+    compact = symbol.replace("/", "").replace("-", "")
+    return compact in RWA_STOCK_SYMBOLS or compact in STATIC_RWA_STOCK_SYMBOLS
 
 
 def refresh_binance_open_interest(contracts):
@@ -899,6 +916,29 @@ def capture_price_history(groups):
     db.session.commit()
 
 
+def trend_candidate_buckets(target_buckets, lag_buckets=2):
+    buckets = set()
+    for bucket_at in target_buckets:
+        for offset in range(lag_buckets + 1):
+            buckets.add(bucket_at - offset * PRICE_HISTORY_BUCKET_SECONDS)
+    return buckets
+
+
+def nearest_trend_points(history, key_builder, target_buckets, lag_buckets=2):
+    max_lag = lag_buckets * PRICE_HISTORY_BUCKET_SECONDS
+    points = {}
+    for item in history:
+        base_key = key_builder(item)
+        for target_bucket in target_buckets:
+            lag = target_bucket - item.bucket_at
+            if 0 <= lag <= max_lag:
+                key = (*base_key, target_bucket)
+                previous = points.get(key)
+                if previous is None or item.bucket_at > previous[0]:
+                    points[key] = (item.bucket_at, item.price)
+    return {key: value for key, (_bucket_at, value) in points.items()}
+
+
 def enrich_price_changes(groups):
     if not groups:
         return
@@ -906,9 +946,9 @@ def enrich_price_changes(groups):
     target_buckets = [now_bucket - seconds for seconds in TREND_WINDOWS.values()]
     symbols = [group["symbol"] for group in groups]
     history = FuturesPriceHistory.query.filter(
-        FuturesPriceHistory.symbol.in_(symbols), FuturesPriceHistory.bucket_at.in_(target_buckets)
+        FuturesPriceHistory.symbol.in_(symbols), FuturesPriceHistory.bucket_at.in_(trend_candidate_buckets(target_buckets))
     ).all()
-    points = {(item.symbol, item.bucket_at): item.price for item in history}
+    points = nearest_trend_points(history, lambda item: (item.symbol,), target_buckets)
     for group in groups:
         current = contract_mid_price(group)
         for key, seconds in TREND_WINDOWS.items():
@@ -1209,9 +1249,9 @@ def enrich_dual_futures_price_changes(groups):
     target_buckets = [now_bucket - seconds for seconds in TREND_WINDOWS.values()]
     symbols = [group["symbol"] for group in groups]
     history = DualFuturesPriceHistory.query.filter(
-        DualFuturesPriceHistory.symbol.in_(symbols), DualFuturesPriceHistory.bucket_at.in_(target_buckets)
+        DualFuturesPriceHistory.symbol.in_(symbols), DualFuturesPriceHistory.bucket_at.in_(trend_candidate_buckets(target_buckets))
     ).all()
-    points = {(item.symbol, item.exchange, item.bucket_at): item.price for item in history}
+    points = nearest_trend_points(history, lambda item: (item.symbol, item.exchange), target_buckets)
     for group in groups:
         for row in group["rows"]:
             for side, exchange, current in (
@@ -1234,9 +1274,9 @@ def enrich_dual_binance_reference(groups):
     now_bucket = int(time.time()) // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
     target_buckets = [now_bucket - seconds for seconds in TREND_WINDOWS.values()]
     history = FuturesPriceHistory.query.filter(
-        FuturesPriceHistory.symbol.in_(symbols), FuturesPriceHistory.bucket_at.in_(target_buckets)
+        FuturesPriceHistory.symbol.in_(symbols), FuturesPriceHistory.bucket_at.in_(trend_candidate_buckets(target_buckets))
     ).all()
-    points = {(item.symbol, item.bucket_at): item.price for item in history}
+    points = nearest_trend_points(history, lambda item: (item.symbol,), target_buckets)
     for group in groups:
         reference = references.get(group["symbol"], {})
         binance_row = next((row for row in group["rows"] if row["short_exchange"] == "Binance"), None)
@@ -4133,11 +4173,15 @@ def gainers_losers():
     dual_rows = LatestDualFuturesSnapshot.query.all()
     dual_symbols = sorted({item.symbol for item in dual_rows if not is_rwa_stock_pair(item.symbol)})
     dual_history = {
-        item.symbol: item.price
-        for item in FuturesPriceHistory.query.filter(
-            FuturesPriceHistory.symbol.in_(dual_symbols),
-            FuturesPriceHistory.bucket_at == target_bucket,
-        ).all()
+        key[0]: price
+        for key, price in nearest_trend_points(
+            FuturesPriceHistory.query.filter(
+                FuturesPriceHistory.symbol.in_(dual_symbols),
+                FuturesPriceHistory.bucket_at.in_(trend_candidate_buckets([target_bucket])),
+            ).all(),
+            lambda item: (item.symbol,),
+            [target_bucket],
+        ).items()
     }
     seen_dual_symbols = set()
     for item in dual_rows:
@@ -4202,7 +4246,15 @@ def symbol_detail():
     if bn_futures:
         current = bn_futures["mid"]
         now_bucket = int(time.time()) // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
-        points = {item.bucket_at: item.price for item in FuturesPriceHistory.query.filter_by(symbol=symbol).filter(FuturesPriceHistory.bucket_at.in_([now_bucket - seconds for seconds in TREND_WINDOWS.values()])).all()}
+        target_buckets = [now_bucket - seconds for seconds in TREND_WINDOWS.values()]
+        points = {
+            key[1]: price
+            for key, price in nearest_trend_points(
+                FuturesPriceHistory.query.filter_by(symbol=symbol).filter(FuturesPriceHistory.bucket_at.in_(trend_candidate_buckets(target_buckets))).all(),
+                lambda item: (item.symbol,),
+                target_buckets,
+            ).items()
+        }
         for key, seconds in TREND_WINDOWS.items():
             previous = points.get(now_bucket - seconds)
             trends[key] = (current - previous) / previous * 100 if previous else None
@@ -5009,9 +5061,21 @@ def background_price_history_backfill():
     while True:
         try:
             with app.app_context():
-                snapshot = load_latest_market_snapshot()
-                if snapshot:
-                    backfill_price_history(snapshot["symbols"])
+                groups = []
+                spot_snapshot = load_latest_market_snapshot()
+                if spot_snapshot:
+                    groups.extend(spot_snapshot["symbols"])
+                dual_snapshot = load_latest_dual_futures_snapshot()
+                if dual_snapshot:
+                    seen = {group["symbol"] for group in groups}
+                    for group in dual_snapshot["symbols"]:
+                        if group["symbol"] in seen or is_rwa_stock_pair(group["symbol"]):
+                            continue
+                        if any(row.get("long_exchange") == "Binance" or row.get("short_exchange") == "Binance" for row in group["rows"]):
+                            groups.append(group)
+                            seen.add(group["symbol"])
+                if groups:
+                    backfill_price_history(groups)
         except Exception:
             db.session.rollback()
         time.sleep(PRICE_BACKFILL_SYNC_SECONDS)

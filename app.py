@@ -503,7 +503,10 @@ def seed_symbol_aliases():
 
 
 def get_json(url, timeout=4):
-    request = Request(url, headers={"User-Agent": "ArbiScope/1.0", "Accept": "application/json"})
+    request = Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ArbiScope/1.0",
+        "Accept": "application/json",
+    })
     with urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
@@ -1103,6 +1106,23 @@ def dual_contract_basis(contract):
     return (mark - index) / index * 100 if mark and index else None
 
 
+def okx_turnover_usd(item, mark_price=None):
+    """OKX swap ticker 的 volCcy24h 多数是标的币数量；页面统一展示 USDT 成交额。"""
+    for key in ("volUsd24h", "volUsd"):
+        try:
+            value = float(item.get(key, 0) or 0)
+            if value:
+                return value
+        except (TypeError, ValueError):
+            continue
+    try:
+        base_volume = float(item.get("volCcy24h", 0) or item.get("vol24h", 0) or 0)
+        price = float(mark_price or item.get("last", 0) or item.get("bidPx", 0) or item.get("askPx", 0) or 0)
+        return base_volume * price if base_volume and price else None
+    except (TypeError, ValueError):
+        return None
+
+
 def refresh_okx_funding(inst_ids):
     global OKX_FUNDING_CURSOR
     now = time.time()
@@ -1126,10 +1146,13 @@ def refresh_okx_funding(inst_ids):
             try:
                 inst_id, item = future.result()
                 if item:
+                    current_funding_time = item.get("fundingTime")
+                    next_funding_time = item.get("nextFundingTime")
                     OKX_FUNDING_CACHE[inst_id] = {
                         "funding_rate": float(item.get("fundingRate", 0)) * 100,
-                        "funding_interval_hours": max(1, round((int(item.get("nextFundingTime", 0)) - int(item.get("fundingTime", 0))) / 3_600_000)) if item.get("nextFundingTime") and item.get("fundingTime") else 8,
-                        "next_funding_time": format_funding_time(item.get("nextFundingTime")),
+                        "funding_interval_hours": max(1, round((int(next_funding_time or 0) - int(current_funding_time or 0)) / 3_600_000)) if next_funding_time and current_funding_time else 8,
+                        # OKX fundingTime 是下一次实际结算，nextFundingTime 是再下一期；页面倒计时必须看 fundingTime。
+                        "next_funding_time": format_funding_time(current_funding_time or next_funding_time),
                         "updated_at": now,
                     }
             except Exception:
@@ -1844,7 +1867,8 @@ def dual_futures_snapshot():
             continue
         symbol = inst_id.replace("-", "").replace("SWAP", "")
         cached_funding = OKX_FUNDING_CACHE.get(inst_id, {})
-        okx[symbol] = {**book, "mark": okx_marks.get(inst_id), "index": okx_indexes.get(inst_id.replace("-SWAP", "").replace("-", "")), "volume": float(item.get("volCcy24h", 0) or 0), "open_interest": okx_open_interest.get(inst_id), "funding_rate": cached_funding.get("funding_rate"), "funding_interval_hours": cached_funding.get("funding_interval_hours"), "next_funding_time": cached_funding.get("next_funding_time"), "okx_inst_id": inst_id}
+        mark_price = okx_marks.get(inst_id)
+        okx[symbol] = {**book, "mark": mark_price, "index": okx_indexes.get(inst_id.replace("-SWAP", "").replace("-", "")), "volume": okx_turnover_usd(item, mark_price), "open_interest": okx_open_interest.get(inst_id), "funding_rate": cached_funding.get("funding_rate"), "funding_interval_hours": cached_funding.get("funding_interval_hours"), "next_funding_time": cached_funding.get("next_funding_time"), "okx_inst_id": inst_id}
     refresh_okx_funding([item["okx_inst_id"] for item in okx.values()])
     for contract in okx.values():
         cached_funding = OKX_FUNDING_CACHE.get(contract["okx_inst_id"], {})

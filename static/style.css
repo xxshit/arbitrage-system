@@ -228,13 +228,16 @@ aside nav>a[data-view="trade-validation"].active,aside nav>a[data-view="trade-va
 .dual-side.long{border-color:#bcebd9;background:#e3f8f0;color:#087158}
 .dual-side.short{border-color:#ffc5c5;background:#ffe8e8;color:#c73838}
 .dual-exchange-card dl{display:grid;gap:0;margin:0}
-.dual-exchange-card dl>div,.dual-card-funding{display:grid;grid-template-columns:128px minmax(0,1fr) auto auto;align-items:center;gap:8px;min-height:31px;padding:7px 6px;border-top:1px solid #edf0e9}
+.dual-exchange-card dl>div{display:grid;grid-template-columns:128px minmax(0,1fr);align-items:center;gap:8px;min-height:31px;padding:7px 6px;border-top:1px solid #edf0e9}
+.dual-card-funding{display:grid;grid-template-columns:128px minmax(0,1fr) auto auto auto auto;align-items:center;gap:6px;min-height:31px;padding:7px 6px;border-top:1px solid #edf0e9}
 .dual-exchange-card dt,.dual-card-funding b{color:#64798c;font-size:11px;font-weight:800}
 .dual-exchange-card dd{margin:0;text-align:right;color:#203b54;font-weight:900;font-variant-numeric:tabular-nums}
 .dual-card-funding em{font-style:normal;text-align:right;font-weight:900;font-variant-numeric:tabular-nums}
 .dual-card-funding .dual-cap{min-width:32px;padding:3px 6px;border:1px solid #d9e4ee;border-radius:6px;background:#f4f8fb;color:#667b90;font-size:10px;font-style:normal;font-weight:900;text-align:center}
+.dual-card-funding .dual-sep{color:#9aaabc;font-size:11px;font-style:normal;font-weight:900}
 .dual-card-funding small{color:#61778e;font-size:10px;font-weight:800;white-space:nowrap}
 .dual-exchange-card dl>div:last-child dd{white-space:nowrap}
+.dual-card-liquidity{display:inline-flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap}.dual-card-liquidity>i{color:#9aaabc;font-style:normal;font-weight:900}.dual-card-liquidity .liquidity-metric{display:inline-grid;grid-template-columns:34px 66px;padding:3px 5px;text-align:left}.dual-card-liquidity .liquidity-metric b{font-size:8px}
 .dual-result-panel{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:10px;border:1px solid #dfe8dc;border-radius:12px;background:linear-gradient(180deg,#fffef8,#f8fbf1);box-shadow:0 5px 16px rgba(36,59,76,.05)}
 .dual-result-panel>div{display:grid;gap:5px;justify-items:center;align-content:start;min-height:72px;padding:9px 6px;border-radius:9px;background:rgba(255,255,255,.74)}
 .dual-result-panel span{color:#60788e;font-size:11px;font-weight:800}
@@ -247,3 +250,4 @@ aside nav>a[data-view="trade-validation"].active,aside nav>a[data-view="trade-va
 .dual-result-sort-controls{display:flex;flex-wrap:wrap;gap:5px}
 .dual-redesign-table .basis-sort-controls{min-width:150px}
 .dual-redesign-table .basis-sort-controls>div{flex-wrap:wrap}
+.symbol-basis-opening{margin-top:7px}.symbol-basis-opening .basis-opening{padding:5px 7px;border:1px solid #ddcde9;border-radius:7px;background:#fbf6ff}.symbol-basis-opening .basis-opening-empty{display:inline-block;padding:4px 7px;border:1px solid #dce5ee;border-radius:7px;background:#f6fafc;color:#8b9aab;font:800 10px "Segoe UI",Arial,sans-serif}

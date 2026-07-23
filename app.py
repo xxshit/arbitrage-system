@@ -2004,6 +2004,7 @@ def dual_futures():
     page_size = 30
     raw_symbol_query = "".join(request.args.get("symbol", "").upper().split())
     symbol_query = raw_symbol_query.replace("/", "").replace("-", "")
+    include_bybit_okx = request.args.get("include_bybit_okx", "0") in {"1", "true", "TRUE", "yes", "on"}
     trend_sort_keys = {f"binance_{key}" for key in TREND_WINDOWS}
     allowed_sort_keys = {"open_spread", "close_spread", "funding_difference", "binance_basis", "bybit_basis", "okx_basis", *trend_sort_keys}
     sort_by = request.args.get("sort_by", "open_spread")
@@ -2026,6 +2027,16 @@ def dual_futures():
         DUAL_VIEW_CACHE = {"key": snapshot_key, "symbols": snapshot["symbols"]}
     mark_announced_delistings(DUAL_VIEW_CACHE["symbols"])
     symbols = [group for group in DUAL_VIEW_CACHE["symbols"] if not is_rwa_stock_pair(group["symbol"])]
+    if not include_bybit_okx:
+        filtered_symbols = []
+        for group in symbols:
+            rows = [
+                row for row in group["rows"]
+                if not (row.get("long_exchange") == "Bybit" and row.get("short_exchange") == "OKX")
+            ]
+            if rows:
+                filtered_symbols.append({**group, "rows": rows})
+        symbols = filtered_symbols
     if symbol_query:
         symbols = [
             group for group in symbols
@@ -2044,7 +2055,7 @@ def dual_futures():
     pages = max((total + page_size - 1) // page_size, 1)
     page = min(page, pages)
     start = (page - 1) * page_size
-    return jsonify({**snapshot, "page": page, "pages": pages, "page_size": page_size, "total_symbols": total, "symbol_query": symbol_query, "sort_by": sort_by, "sort_direction": sort_direction, "symbols": symbols[start:start + page_size]})
+    return jsonify({**snapshot, "page": page, "pages": pages, "page_size": page_size, "total_symbols": total, "symbol_query": symbol_query, "sort_by": sort_by, "sort_direction": sort_direction, "include_bybit_okx": include_bybit_okx, "symbols": symbols[start:start + page_size]})
 
 
 @app.get("/api/symbol-suggestions")

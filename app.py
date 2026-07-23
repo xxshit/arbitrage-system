@@ -2129,7 +2129,7 @@ def percentile(values, q):
 def fetch_t_micro_metrics(raw_symbol):
     """T/USDT 专用 5 分钟级盯盘：捕捉横盘后的短线向上异动与反抽停滞。"""
     try:
-        live_timeout = 2
+        live_timeout = 5 if symbol == "TLM/USDT" else 2
         k5 = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "5m", "limit": 48}), timeout=live_timeout)
         oi5 = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 48}), timeout=live_timeout)
         ratios5 = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 48}), timeout=live_timeout)
@@ -3026,6 +3026,14 @@ def tlm_trap_short_direction(analysis):
         item = row.get(key)
         return default if item is None else item
 
+    price_reclaim = sum(value(item, "price_change") > 0.6 for item in valid) >= 2
+    cvd_reversal = sum(value(item, "cvd") > 0 for item in valid) >= 2
+    ratio_not_chasing = sum(value(item, "ratio_change") <= 0.2 for item in valid) >= 2
+    funding_repaired = funding is not None and funding > -0.03
+    basis_repaired = basis is not None and basis > -0.20
+    if valid and price_reclaim and cvd_reversal and (ratio_not_chasing or funding_repaired or basis_repaired):
+        return "tlm_reversal"
+
     funding_deep_negative = funding is not None and funding <= -0.08
     basis_negative = basis is not None and basis <= -0.35
     if not valid:
@@ -3167,7 +3175,7 @@ def thought_signal_key(analysis, direction):
         else:
             price_zone = "floor-watch"
         return f"{direction}-{price_zone}"
-    if direction == "tlm_trap_short":
+    if direction in {"tlm_trap_short", "tlm_reversal"}:
         if last >= 0.0024:
             price_zone = "above-2400"
         elif last >= 0.0022:
@@ -3533,6 +3541,13 @@ def thought_structure_summary(analysis, direction):
     if direction == "tlm_trap_short":
         validation = analysis.get("validation") or {}
         windows = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
+        valid_windows = [item for item in windows if item.get("price_change") is not None]
+        if not valid_windows:
+            return (
+                "TLM 当前按诱多转弱剧本盯盘：价格在 0.0018 附近震荡，BN 资费仍深度为负、BN 基差仍负向打开，"
+                "与用户观察到的“持仓增加、人数比小幅上升、CVD 小幅走低”组合方向一致，偏空假设暂时保留。"
+                "本轮 30MIN/1H/2H 细分窗口未完整同步，所以不做过度确认；后续若价格跌回震荡下沿且 CVD/人数比继续配合，按偏空确认推送；若放量站稳上沿并修复资费/基差，按反转信号推送。"
+            )
         cvd_down = sum((item.get("cvd") or 0) < 0 for item in windows)
         ratio_up = sum((item.get("ratio_change") or 0) > 0 for item in windows)
         price_up = sum((item.get("price_change") or 0) > 0 for item in windows)
@@ -3540,6 +3555,17 @@ def thought_structure_summary(analysis, direction):
             "TLM 当前按诱多转弱剧本盯盘：前面 7月19日-7月20日放量拉升后持续下跌，说明高位多单可能没完全出完，同时主力也可能在高点埋伏空单。"
             f"现在短线有反抽迹象（{price_up} 个窗口价格为正），但多空人数比有 {ratio_up} 个窗口上升、CVD 有 {cvd_down} 个窗口偏卖出，"
             "再叠加 BN 资费被打到负值、基差偏负，这更像给多头制造入场动力后的诱多，而不是健康主升。若反抽放量不涨或跌回入场下方，空头逻辑增强；若重新放量站稳压力带并修复负资费/负基差，做空逻辑降级。"
+        )
+    if direction == "tlm_reversal":
+        validation = analysis.get("validation") or {}
+        windows = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
+        cvd_up = sum((item.get("cvd") or 0) > 0 for item in windows)
+        ratio_ok = sum((item.get("ratio_change") or 0) <= 0.2 for item in windows)
+        price_up = sum((item.get("price_change") or 0) > 0.6 for item in windows)
+        return (
+            "TLM 出现做空假设的反证信号："
+            f"{price_up} 个窗口价格重新转强，{cvd_up} 个窗口 CVD 转为主动买入，{ratio_ok} 个窗口多空人数比没有继续明显追多。"
+            "这说明 0.0018 附近的震荡可能不再只是诱多派发，若负资费和负基差继续修复，做空逻辑需要降级；如果转强后放量不涨、CVD 再次转负，则反转信号作废，重新回到诱多转弱观察。"
         )
     validation = analysis.get("validation") or {}
     windows = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
@@ -3610,6 +3636,7 @@ def thought_lark_message(analysis, direction):
         "reversal": "涨势反转预警",
         "distribution": "高位派发预警",
         "tlm_trap_short": "诱多转弱做空盯盘",
+        "tlm_reversal": "做空假设反证",
     }
     return "\n".join([
         thought_direction_badge(direction),
@@ -3856,7 +3883,7 @@ def thought_tlm_item(tlm):
         "validation": tlm.get("validation") or {},
         "source": tlm["source"],
         "screenshot_url": None,
-        "thought_summary": "TLM 新增做空思路：7月19日-7月20日放量上涨后持续下跌，当前短时间反抽不一定是重新主升，更可能是诱多/换手。若多空人数比继续上升、CVD 继续走跌、负资费与负基差不修复，就按空头逻辑继续盯；若放量站稳压力带并修复负资费/负基差，则做空逻辑降级。",
+        "thought_summary": "TLM 持续做空观察：当前在 0.0018 附近震荡，但持仓上涨不少，多空人数比也小幅上涨，CVD 仍小幅走低。这个组合更像反抽横盘里的诱多/空头换手，而不是健康反转。若后续价格跌回震荡下沿、CVD 继续走低、人数比继续上升，则确认偏空；若价格放量站稳上沿、CVD 转正且资费/基差修复，则提醒做空假设失效。",
         "user_mistakes": [
             "需要注意：负资费对空单不友好，若价格长时间横盘不跌，持仓成本会侵蚀利润。",
             "不能只因为前面放量上涨后下跌就认定后面必跌，必须让 CVD、人数比、量能和关键位继续验证。",
@@ -3866,14 +3893,14 @@ def thought_tlm_item(tlm):
             "若 CVD 转正、负资费快速修复、价格放量站稳压力带，我要及时提醒你降低空头假设权重。"
         ],
         "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "TLM 为新增实盘做空思路，等待后续盯盘验证。"},
-        "my_thesis": "你的主线思路：TLM 在 7月19日-7月20日左右放量上涨很多，随后一直走下跌。一方面可能是主力手上的多单没有完全平完，另一方面主力可能已经在高点埋伏空单。现在这里又短时间拉升一些币价，你不认为这是继续向上的动能；加上多空人数比上涨，说明更多账户可能被吸引去做多。主力又把资费拉到很负，给做多的人制造“收资费”的动力，但 CVD 实际在走跌，主动卖出力量更大，所以你判断后期偏空，并在当前点位做空。",
-        "assistant_thesis": "我的验证思路：这笔空单不是单纯追跌，而是押注反抽诱多失败。关键验证链是：反抽时多空人数比继续上升，说明追多账户增加；CVD 走跌，说明主动卖出没有消失；负资费/负基差如果持续，说明合约端仍然承压。若价格不能重新放量站稳压力带，且反抽后的高点逐步降低，空头胜率会提高。反证也很清楚：如果 CVD 重新转正、价格放量突破压力带、负资费快速收敛甚至转正、基差修复，则这不是诱多，而可能是重新吸筹或逼空。",
+        "my_thesis": "你的主线思路：TLM 在 7月19日-7月20日左右放量上涨很多，随后一直走下跌。一方面可能是主力手上的多单没有完全平完，另一方面主力可能已经在高点埋伏空单。当前价格在 0.0018 附近震荡，但持仓上涨了不少，多空人数比也小幅上涨，CVD 还在小幅走低；你认为这说明反抽过程中追多/接多账户增加，但主动卖出没有消失，从数据结构来看偏利空。你希望系统继续盯住：一旦确认偏空，或者出现反转信号，就立刻推送。",
+        "assistant_thesis": "我的验证思路：我认可你这次的偏空观察，但会把它拆成可验证条件。偏空确认不是“横盘就空”，而是 0.0018 附近震荡时持仓继续增加、人数比继续回升、CVD 继续为负或走低，同时价格无法站稳震荡上沿；这代表新增仓位没有推动价格有效上行，反而可能是在给空头换手或诱多。反转条件也必须同步盯：如果价格放量站上震荡上沿，CVD 转正，人数比不再追高，负资费/负基差修复，就说明你的空头假设需要降级。",
         "challenge_points": [
             "空头优势：负资费 + 负基差 + CVD 走跌 + 多空人数比上升，符合反抽诱多后的做空观察。",
             "风险点：负资费会让空单付费，若主力选择横盘磨人，空单成本和心理压力都会变高。",
             "反证条件：放量站稳压力带、CVD 转正、负资费/负基差修复，必须降低做空权重，不能死扛。"
         ],
-        "validation_view": "TLM 当前按诱多转弱盯盘：若价格反抽后不能站稳压力带，且 30MIN/1H/2H 中 CVD 继续为负、多空人数比继续上升、资金费/基差仍偏负，就继续按做空逻辑观察；若出现快速拉升但 CVD 仍背离，优先看冲高回落；若价格放量站稳压力带并修复负资费/负基差，则提醒做空逻辑失效。",
+        "validation_view": "TLM 当前按 0.0018 附近震荡偏空盯盘：若价格无法站稳震荡上沿，持仓继续增加、人数比继续小幅上升、CVD 继续走低，就按诱多转弱/空头换手确认推送；若价格放量站稳上沿，CVD 转正，且资费或基差明显修复，则按反转信号推送。",
         "take_profit": [
             f"第一观察目标：{support:.8f} 附近。理由是近端支撑/回落低位，若放量跌破，说明诱多反抽失败概率增加。",
             f"第二目标：{entry * 0.90:.8f}-{entry * 0.94:.8f}。只有跌破第一支撑后反抽无力，才看这里，不提前幻想一口气砸穿。",
@@ -3887,7 +3914,8 @@ def thought_tlm_item(tlm):
             "2026-07-22 新增：用户在 TLM 当前点位建立空单，入场先按本地快照 0.0018855 记录；若实际成交不同，需要校准。",
             "用户判断：7月19日-7月20日放量拉升后持续下跌，说明主力可能高位换手并埋伏空单；当前短拉更像诱多而非新主升。",
             "关键观察：多空人数比上涨、CVD 下跌、资费极负、基差偏负。如果这几项继续共振，空头逻辑增强。",
-            "反证记录：若价格放量站稳压力带、CVD 转正、负资费/负基差修复，必须记录为做空假设缺陷，而不是继续按诱多解释。"
+            "反证记录：若价格放量站稳压力带、CVD 转正、负资费/负基差修复，必须记录为做空假设缺陷，而不是继续按诱多解释。",
+            "2026-07-23 新增：价格在 0.0018 附近震荡，用户观察到持仓上涨不少、多空人数比小幅上涨、CVD 小幅走低；当前按偏空结构继续盯盘，确认或反转都要推送。"
         ],
     }
 

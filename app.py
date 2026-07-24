@@ -2930,8 +2930,10 @@ def thought_snapshot(symbol):
         mark_price = float(premium.get("markPrice", 0) or 0)
         micro_validation = fetch_t_micro_metrics(raw_symbol) if symbol == "T/USDT" else {}
         orderbook_wall = fetch_ake_orderbook_wall(raw_symbol) if symbol == "AKE/USDT" else {}
+        market_context = thought_market_context(symbol) or {}
         return {
             **fallback,
+            **{key: value for key, value in market_context.items() if value is not None},
             "last": last,
             "profit_pct": percent_delta(last, entry) if entry else None,
             "support": support,
@@ -3190,21 +3192,35 @@ def ake_structure_direction(analysis):
 
     oi_down_votes = sum(value(item, "oi_change") <= -1.0 for item in windows)
     oi_up_votes = sum(value(item, "oi_change") >= 1.0 for item in windows)
+    ratio_up_votes = sum(value(item, "ratio_change") >= 0.3 for item in windows)
+    ratio_down_votes = sum(value(item, "ratio_change") <= -0.3 for item in windows)
     cvd_up_votes = sum(value(item, "cvd") > 0 for item in windows)
     cvd_down_votes = sum(value(item, "cvd") < 0 for item in windows)
     price_up_votes = sum(value(item, "price_change") > 0.4 for item in windows)
     price_down_votes = sum(value(item, "price_change") < -0.4 for item in windows)
+    broad_oi_change = analysis.get("oi_change_pct")
+    broad_ratio_change = analysis.get("ratio_change_pct")
     funding_negative = funding is not None and funding < 0
     basis_negative = basis is not None and basis < 0
     funding_positive = funding is not None and funding > 0
     basis_positive = basis is not None and basis > 0
+    main_long_unwind = (
+        oi_down_votes >= 1 and ratio_up_votes >= 1
+    ) or (
+        broad_oi_change is not None and broad_ratio_change is not None
+        and broad_oi_change <= -5 and broad_ratio_change >= 3
+    )
 
     if last >= 0.0022:
+        # 高位币最容易误判的一种结构：CVD 仍可能上涨，但持仓下降 + 多空人数比上升，
+        # 对资金面解释是散户平空、主力平多，不能继续按单纯逼空看涨处理。
+        if main_long_unwind:
+            return "ake_main_long_unwind_watch"
         if funding_negative and basis_negative:
             return "ake_above_wall_distribution_watch"
         if oi_down_votes >= 1 and (cvd_down_votes >= 1 or basis_negative or funding_negative):
             return "ake_above_wall_bull_weakening"
-        if funding_positive and basis_positive and (oi_up_votes >= 1 or cvd_up_votes >= 1 or not windows):
+        if funding_positive and basis_positive and (oi_up_votes >= 1 or ratio_down_votes >= 1 or cvd_up_votes >= 1 or not windows):
             return "ake_above_wall_bull_continue"
         return "ake_above_wall_new_range"
     if 0.0020 <= last < 0.0022:
@@ -3226,6 +3242,16 @@ def thought_push_direction(analysis):
         return tlm_direction
     if symbol == "T/USDT":
         return None
+    if symbol == "AKE/USDT":
+        ake_structure = ake_structure_direction(analysis)
+        if ake_structure in {
+            "ake_main_long_unwind_watch",
+            "ake_above_wall_distribution_watch",
+            "ake_above_wall_bull_weakening",
+            "ake_wall_zone_weakening",
+            "ake_wall_failed_watch",
+        }:
+            return ake_structure
     ake_direction = ake_orderbook_wall_direction(analysis)
     if ake_direction:
         return ake_direction
@@ -3309,7 +3335,7 @@ def thought_signal_key(analysis, direction):
         else:
             price_zone = "below-1850"
         return f"{direction}-{price_zone}"
-    if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection", "ake_above_wall_distribution_watch", "ake_above_wall_bull_weakening", "ake_above_wall_bull_continue", "ake_above_wall_new_range", "ake_wall_zone_weakening", "ake_wall_failed_watch"}:
+    if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection", "ake_main_long_unwind_watch", "ake_above_wall_distribution_watch", "ake_above_wall_bull_weakening", "ake_above_wall_bull_continue", "ake_above_wall_new_range", "ake_wall_zone_weakening", "ake_wall_failed_watch"}:
         if last >= 0.0028:
             price_zone = "above-2800"
         elif last >= 0.0024:
@@ -3823,6 +3849,7 @@ def thought_lark_db_fallback_message(analysis, direction):
 
 
 AKE_STRUCTURE_DIRECTIONS = {
+    "ake_main_long_unwind_watch",
     "ake_above_wall_distribution_watch",
     "ake_above_wall_bull_weakening",
     "ake_above_wall_bull_continue",
@@ -3840,7 +3867,16 @@ def thought_lark_ake_structure_message(analysis, direction):
     previous_oi = previous.oi_value if previous else None
     previous_price = previous.last_price if previous else None
 
-    if direction == "ake_above_wall_distribution_watch":
+    if direction == "ake_main_long_unwind_watch":
+        header = "方向：<font color='cus-bear'>● 🔵↘️ 看涨明显减弱 / 主力平多观察</font>"
+        title = "AKE思路盯盘：CVD上涨不能单独看多，持仓和人数比已经给出反证"
+        judgement = (
+            "判断：这次不再只看价格区间。AKE 当前更关键的是资金面结构：持仓下降，同时多空人数比上升。"
+            "按照你的资金面框架，这更像“散户平空、主力平多”，即使 CVD 还在上涨，也可能只是高位主动买入承接或换手，不能把它简单解释成主力继续扫货。"
+            "如果负资费、负基差继续存在，说明多头剧本正在从“拉高逼空”转向“高位换手/出货风险”。"
+        )
+        key_zone = "新区间：旧墙区 0.0020-0.0022 已经变成回踩区；现在重点看 0.00225-0.00245。若持仓继续降、人数比继续升，即使价格横住，也按看涨减弱处理；只有持仓重新增加、人数比回落、资费/基差修复，才恢复看涨。"
+    elif direction == "ake_above_wall_distribution_watch":
         header = "方向：<font color='cus-bear'>● 🔵↘️ 看涨减弱 / 高位换手观察</font>"
         title = "AKE思路盯盘：已经脱离旧卖墙区，不能继续只看 0.002-0.0022"
         judgement = "判断：AKE 已经站到旧墙区上方，但现在 BN资费转负、BN基差也转负，说明之前“正资费+正基差拉合约”的多头支撑在减弱。这不等于立刻看空，但更像进入高位换手/派发观察阶段；如果持仓继续下降，就不能再按单纯逼空剧本处理。"

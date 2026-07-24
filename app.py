@@ -3406,6 +3406,54 @@ def thought_cvd_profile(metrics):
     return tuple(cvd_direction(metrics.get(f"cvd_{suffix}")) for suffix in ("30m", "1h", "2h"))
 
 
+THOUGHT_REPEAT_COOLDOWN_HOURS = 4
+
+
+def thought_hours_since_push(previous):
+    if previous is None or not previous.pushed_at:
+        return None
+    delta = datetime.now() - previous.pushed_at
+    return max(delta.total_seconds() / 3600, 0)
+
+
+def thought_major_narrative_shift(previous, metrics):
+    """Only return True for changes worth waking the user inside the 4H window."""
+    if previous is None:
+        return True
+    if previous.direction != metrics["direction"]:
+        return True
+    if previous.signal_key != metrics["signal_key"]:
+        return True
+
+    previous_funding = previous.funding_rate
+    current_funding = metrics.get("funding_rate")
+    if current_funding is not None and previous_funding is not None and current_funding * previous_funding < 0:
+        return True
+
+    previous_basis = previous.basis
+    current_basis = metrics.get("basis")
+    if current_basis is not None and previous_basis is not None and current_basis * previous_basis < 0:
+        return True
+
+    if metric_changed(current_funding, previous_funding, abs_threshold=0.20):
+        return True
+    if metric_changed(current_basis, previous_basis, abs_threshold=0.50):
+        return True
+    if metric_changed(metrics.get("oi_value"), previous.oi_value, pct_threshold=0.25):
+        return True
+    if metric_changed(metrics.get("wall_qty"), previous.wall_qty, pct_threshold=1.00):
+        return True
+
+    old_cvd = tuple(cvd_direction(getattr(previous, f"cvd_{suffix}", None)) for suffix in ("30m", "1h", "2h"))
+    new_cvd = thought_cvd_profile(metrics)
+    if old_cvd != new_cvd:
+        old_up = sum(direction == "up" for direction in old_cvd)
+        new_up = sum(direction == "up" for direction in new_cvd)
+        if abs(new_up - old_up) >= 2:
+            return True
+    return False
+
+
 def thought_structural_has_new_information(previous, metrics):
     if previous is None:
         return True
@@ -3466,6 +3514,17 @@ def thought_ake_has_new_information(previous, metrics):
 
 
 def thought_push_has_new_information(previous, metrics):
+    if previous is None:
+        return True
+    if previous.direction != metrics["direction"]:
+        return True
+    if previous.signal_key != metrics["signal_key"]:
+        return True
+
+    hours_since_push = thought_hours_since_push(previous)
+    if hours_since_push is not None and hours_since_push < THOUGHT_REPEAT_COOLDOWN_HOURS:
+        return thought_major_narrative_shift(previous, metrics)
+
     if metrics.get("symbol") == "AKE/USDT":
         return thought_ake_has_new_information(previous, metrics)
     return thought_structural_has_new_information(previous, metrics)

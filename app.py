@@ -2859,6 +2859,15 @@ THOUGHT_WATCHLIST = {
         "side": "short",
         "fallback": {},
     },
+    "ERA/USDT": {
+        "entry": None,
+        "entry_time": "2026-07-24 看空观察",
+        "side": "short_watch",
+        "fallback": {
+            "support": 0.0937,
+            "resistance": 0.10086,
+        },
+    },
 }
 
 
@@ -2966,8 +2975,8 @@ def thought_snapshot_from_db(symbol, fallback):
         **fallback,
         **context,
         "profit_pct": percent_delta(futures_mid, entry) if futures_mid and entry else None,
-        "support": None,
-        "resistance": None,
+        "support": fallback.get("support"),
+        "resistance": fallback.get("resistance"),
         "oi_change_pct": None,
         "ratio_value": None,
         "ratio_change_pct": None,
@@ -4268,12 +4277,73 @@ def thought_tlm_item(tlm):
     }
 
 
+def thought_era_item(era):
+    return {
+        "symbol": era["symbol"],
+        "trade_side": "做空观察",
+        "trade_status": "弱支撑 / 主动卖出观察",
+        "entry": era["entry"],
+        "entry_time": era["entry_time"],
+        "exit": None,
+        "exit_time": None,
+        "last": era["last"],
+        "profit_pct": None,
+        "realized_profit_pct": None,
+        "support": era["support"],
+        "resistance": era["resistance"],
+        "oi_value": era["oi_value"],
+        "oi_change_pct": era["oi_change_pct"],
+        "ratio_value": era["ratio_value"],
+        "ratio_change_pct": era["ratio_change_pct"],
+        "cvd": era["cvd"],
+        "change_30m": era["change_30m"],
+        "change_4h": era["change_4h"],
+        "funding_rate": era["funding_rate"],
+        "basis": era["basis"],
+        "validation": era.get("validation") or {},
+        "source": era["source"],
+        "screenshot_url": None,
+        "thought_summary": "ERA 当前按偏空观察处理：0.093 附近虽然是近端支撑，但这个区域前面没有明显放过大量，支撑质量偏弱；同时 CVD 持续走低、持仓缓慢下降，说明主动卖出占优，且多头仓位可能在慢慢撤退。若跌破 0.0937 后反抽无力，偏空确认度会提高。",
+        "user_mistakes": [
+            "需要注意：支撑位附近没放大量，确实代表支撑可能弱，但不能等同于一定会跌破；如果主力选择在弱支撑附近缩量吸筹，价格也可能先横住。",
+            "CVD 走跌说明主动卖出占优，但如果价格没有继续下破，可能存在被动买盘承接；需要同时看跌破后的反抽质量。"
+        ],
+        "assistant_mistakes": [
+            "我不能只因为 CVD 为负就机械看空；必须继续验证价格是否真的跌破支撑、持仓下降是否伴随价格失守，以及资金费/基差是否继续偏负。",
+            "如果后续价格放量收回 0.0965-0.098 区域，同时 CVD 转正、持仓不再下滑，我要及时把偏空假设降级，而不是固执延续空头判断。"
+        ],
+        "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "ERA 为新增偏空观察样本，等待后续跌破/反抽失败或反证信号验证。"},
+        "my_thesis": "你的主线思路：ERA 盘面偏空。你观察到价格下方近端支撑在 0.093 附近，但这个区域没有出现过明显大成交量，所以你认为支撑力比较弱；同时 CVD 一直走跌，代表主动卖出的人偏多；持仓也在缓步下跌，可能说明主力或多头资金正在缓慢平多。因此你倾向认为 ERA 后续继续下行的概率更高。",
+        "assistant_thesis": "我的验证思路：我认同 ERA 当前偏空，但会把它拆成两个阶段。第一阶段是支撑测试：如果 0.0937 附近被放量跌破，随后反抽无法重新站回 0.0965-0.098，那么你的弱支撑判断基本被验证。第二阶段是下跌延续：如果跌破后 CVD 继续为负、持仓继续下降或反抽时持仓增加但价格不涨，就更像诱多/换手后继续下行。反证条件是价格重新站回 0.098 上方，CVD 转正，持仓不再下降，且资金费和基差开始修复。",
+        "challenge_points": [
+            "偏空证据：近端 30M/1H/2H 价格回落，CVD 为负，持仓下降，BN 资费和基差也偏负，说明合约端情绪和主动成交都不强。",
+            "关键风险：0.093 附近如果跌不动，且成交量缩小，可能变成横盘吸筹或短线空头获利了结区，不能在支撑上方无脑追空。",
+            "确认方式：跌破 0.0937 后的第一次反抽最重要；反抽无量、CVD 不修复、价格站不回 0.0965，才是更好的偏空确认。"
+        ],
+        "validation_view": "ERA 后续按 0.0937 支撑位验证：跌破并反抽失败，则偏空确认；若放量收回 0.0965-0.098 且 CVD 转正、持仓不再下滑，则看空假设降级。",
+        "take_profit": [
+            "若后续有空单入场，第一目标看 0.0937 下方的破位延续；跌破后如果反抽失败，再看更低一档。",
+            "不建议在 0.093 附近已经贴近支撑时盲目追空，最好等跌破后的反抽确认，或者等反弹到 0.0965-0.098 附近走弱。"
+        ],
+        "stop_loss": [
+            "若价格放量站回 0.098 上方，同时 CVD 转正、持仓不再下降，偏空逻辑需要降级。",
+            "若 0.093 附近持续横住且卖盘衰竭，说明弱支撑判断可能被承接反证，不应继续机械看空。"
+        ],
+        "review_notes": [
+            "2026-07-24 新增：用户提出 ERA 偏空思路，核心依据是 0.093 支撑量能不足、CVD 持续走跌、持仓缓慢下降。",
+            "实时快照记录：ERA 最新价约 0.09405，近端支撑约 0.0937，近端压力约 0.10086；30M/1H/2H 价格均回落，CVD 为负，持仓从近端窗口看也在下降；BN 资费约 -0.07995%，BN 基差约 -0.7108%。",
+            "后续验证：重点看 0.0937 是否跌破，以及跌破后的反抽是否无法站回 0.0965-0.098。"
+        ],
+    }
+
+
 @app.get("/api/daily-report/thoughts")
 def daily_report_thoughts():
     ake = thought_fast_snapshot("AKE/USDT")
     us = thought_fast_snapshot("US/USDT")
     t = thought_fast_snapshot("T/USDT")
     tlm = thought_fast_snapshot("TLM/USDT")
+    era = thought_fast_snapshot("ERA/USDT")
     ake_support = ake.get("support") or ake["entry"] * 0.99
     return jsonify({
         "updated_at": ake["updated_at"],
@@ -4345,7 +4415,7 @@ def daily_report_thoughts():
                 "需要修正：不能只盯多空人数比下跌；当前窗口首尾已经小幅回升，说明散户空头进一步拥挤的条件变弱。",
                 "后续验证：如果价格创新高但 CVD 不再创新高，或者 OI 上升但价格滞涨，要把判断从吸筹延续切换为高位换手/派发风险。",
             ],
-        }, thought_us_item(us), thought_t_item(t), thought_tlm_item(tlm)]
+        }, thought_us_item(us), thought_t_item(t), thought_tlm_item(tlm), thought_era_item(era)]
     })
 
 

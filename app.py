@@ -1988,15 +1988,136 @@ def daily_trends_page():
     return redirect("/#daily-trends")
 
 
+MAJOR_MARKET_CACHE = {"ts": 0, "items": []}
+MAJOR_MARKET_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+
+
+def major_market_window_metrics(klines, oi_rows, ratio_rows, candle_count):
+    closed = klines[:-1] if len(klines) > candle_count else klines
+    rows = closed[-candle_count:]
+    oi = oi_rows[-candle_count:] if oi_rows else []
+    ratios = ratio_rows[-candle_count:] if ratio_rows else []
+    if len(rows) < candle_count:
+        return {"price_change": None, "oi_change": None, "ratio_change": None, "cvd": None}
+    price_change = percent_delta(float(rows[-1][4]), float(rows[0][1]))
+    cvd_value = sum((2 * float(row[10]) - float(row[7])) for row in rows)
+    oi_change = None
+    ratio_change = None
+    if len(oi) >= candle_count:
+        oi_change = percent_delta(float(oi[-1].get("sumOpenInterestValue", 0) or 0), float(oi[0].get("sumOpenInterestValue", 0) or 0))
+    if len(ratios) >= candle_count:
+        ratio_change = percent_delta(float(ratios[-1].get("longShortRatio", 0) or 0), float(ratios[0].get("longShortRatio", 0) or 0))
+    return {"price_change": price_change, "oi_change": oi_change, "ratio_change": ratio_change, "cvd": cvd_value}
+
+
+def major_market_forecast(metrics):
+    windows = metrics.get("windows", {})
+    w30 = windows.get("30m", {})
+    w4h = windows.get("4h", {})
+    funding = metrics.get("funding_rate")
+    basis = metrics.get("basis")
+    score = 0
+    reasons = []
+    if (w30.get("price_change") or 0) > 0 and (w30.get("cvd") or 0) > 0:
+        score += 1
+        reasons.append("短线价格与主动买入同步")
+    if (w4h.get("price_change") or 0) > 0 and (w4h.get("cvd") or 0) > 0:
+        score += 1
+        reasons.append("4H 结构仍偏多")
+    if (w30.get("oi_change") or 0) > 0 and (w30.get("price_change") or 0) > 0:
+        score += 1
+        reasons.append("上涨时持仓增加")
+    if funding is not None and funding >= 0 and basis is not None and basis >= 0:
+        score += 1
+        reasons.append("资费与基差未明显转弱")
+    if (w30.get("price_change") or 0) < 0 and (w30.get("cvd") or 0) < 0:
+        score -= 1
+        reasons.append("短线主动卖出压制价格")
+    if (w4h.get("price_change") or 0) < 0 and (w4h.get("cvd") or 0) < 0:
+        score -= 1
+        reasons.append("4H 结构偏弱")
+    if (w30.get("oi_change") or 0) < 0 and (w30.get("price_change") or 0) < 0:
+        score -= 1
+        reasons.append("下跌中持仓回落")
+    if funding is not None and funding < 0 and basis is not None and basis < 0:
+        score -= 1
+        reasons.append("资费与基差同时偏负")
+
+    if score >= 2:
+        stance = "偏强"
+        forecast = "短线仍偏多，回调只要不放量跌破近端支撑，大盘风险偏好还能维持。"
+    elif score <= -2:
+        stance = "偏弱"
+        forecast = "短线偏弱，若 BTC 继续压制，山寨追多风险会明显变高。"
+    else:
+        stance = "震荡"
+        forecast = "多空证据不够一致，先按震荡处理，等待 BTC 选择方向。"
+    return {"stance": stance, "score": score, "forecast": forecast, "reason": "；".join(reasons[:3]) or "等待更多共振"}
+
+
+def fetch_major_market_symbol(raw_symbol):
+    ticker = get_json("https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({"symbol": raw_symbol}), timeout=4)
+    premium = get_json("https://fapi.binance.com/fapi/v1/premiumIndex?" + urlencode({"symbol": raw_symbol}), timeout=4)
+    klines = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "30m", "limit": 60}), timeout=4)
+    oi_rows = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 50}), timeout=4)
+    ratio_rows = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 50}), timeout=4)
+    index_price = float(premium.get("indexPrice", 0) or 0)
+    mark_price = float(premium.get("markPrice", 0) or 0)
+    metrics = {
+        "symbol": raw_symbol[:-4] + "/USDT",
+        "price": float(ticker.get("lastPrice", 0) or 0),
+        "change_24h": float(ticker.get("priceChangePercent", 0) or 0),
+        "volume_24h": float(ticker.get("quoteVolume", 0) or 0),
+        "funding_rate": float(premium.get("lastFundingRate", 0) or 0) * 100,
+        "basis": percent_delta(mark_price, index_price) if index_price else None,
+        "open_interest": float(oi_rows[-1].get("sumOpenInterestValue", 0) or 0) if oi_rows else None,
+        "long_short_ratio": float(ratio_rows[-1].get("longShortRatio", 0) or 0) if ratio_rows else None,
+        "windows": {
+            "30m": major_market_window_metrics(klines, oi_rows, ratio_rows, 1),
+            "1h": major_market_window_metrics(klines, oi_rows, ratio_rows, 2),
+            "4h": major_market_window_metrics(klines, oi_rows, ratio_rows, 8),
+        },
+        "updated_at": datetime.now(SHANGHAI_TZ).strftime("%H:%M:%S"),
+    }
+    metrics["forecast"] = major_market_forecast(metrics)
+    return metrics
+
+
+def fetch_major_market_overview():
+    now_ts = time.time()
+    if MAJOR_MARKET_CACHE["items"] and now_ts - MAJOR_MARKET_CACHE["ts"] < 15:
+        return MAJOR_MARKET_CACHE["items"]
+    items = []
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(fetch_major_market_symbol, raw_symbol): raw_symbol for raw_symbol in MAJOR_MARKET_SYMBOLS}
+        for future in as_completed(futures):
+            try:
+                items.append(future.result())
+            except Exception:
+                continue
+    order = {symbol[:-4] + "/USDT": idx for idx, symbol in enumerate(MAJOR_MARKET_SYMBOLS)}
+    items.sort(key=lambda item: order.get(item["symbol"], 99))
+    if items:
+        btc = next((item for item in items if item["symbol"] == "BTC/USDT"), None)
+        for item in items:
+            if btc and item["symbol"] != "BTC/USDT":
+                item["market_note"] = "强于 BTC" if (item.get("change_24h") or 0) > (btc.get("change_24h") or 0) else "弱于 BTC"
+            else:
+                item["market_note"] = "大盘锚点"
+        MAJOR_MARKET_CACHE.update({"ts": now_ts, "items": items})
+    return MAJOR_MARKET_CACHE["items"]
+
+
 @app.get("/api/dashboard")
 def dashboard():
     items = opportunities()
     active = Strategy.query.filter_by(enabled=True).count()
     return jsonify({
+        "majors": fetch_major_market_overview(),
         "opportunities": items,
         "summary": {
             "active_strategies": active,
-            "best_spread": items[0]["spread"],
+            "best_spread": items[0]["spread"] if items else 0,
             "markets_scanned": len(items) * len(EXCHANGES),
             "mode": "现多期空 · 公开 API",
         },

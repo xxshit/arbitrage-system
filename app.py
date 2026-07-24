@@ -3172,6 +3172,50 @@ def ake_orderbook_wall_direction(analysis):
     return None
 
 
+def ake_structure_direction(analysis):
+    """AKE 离开旧卖墙区后，不再只盯 0.0020-0.0022，而是按结构强弱重新分层。"""
+    if analysis.get("symbol") != "AKE/USDT":
+        return None
+    last = analysis.get("last")
+    if not last:
+        return None
+    funding = analysis.get("funding_rate")
+    basis = analysis.get("basis")
+    validation = analysis.get("validation") or {}
+    windows = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
+
+    def value(row, key, default=0):
+        item = row.get(key)
+        return default if item is None else item
+
+    oi_down_votes = sum(value(item, "oi_change") <= -1.0 for item in windows)
+    oi_up_votes = sum(value(item, "oi_change") >= 1.0 for item in windows)
+    cvd_up_votes = sum(value(item, "cvd") > 0 for item in windows)
+    cvd_down_votes = sum(value(item, "cvd") < 0 for item in windows)
+    price_up_votes = sum(value(item, "price_change") > 0.4 for item in windows)
+    price_down_votes = sum(value(item, "price_change") < -0.4 for item in windows)
+    funding_negative = funding is not None and funding < 0
+    basis_negative = basis is not None and basis < 0
+    funding_positive = funding is not None and funding > 0
+    basis_positive = basis is not None and basis > 0
+
+    if last >= 0.0022:
+        if funding_negative and basis_negative:
+            return "ake_above_wall_distribution_watch"
+        if oi_down_votes >= 1 and (cvd_down_votes >= 1 or basis_negative or funding_negative):
+            return "ake_above_wall_bull_weakening"
+        if funding_positive and basis_positive and (oi_up_votes >= 1 or cvd_up_votes >= 1 or not windows):
+            return "ake_above_wall_bull_continue"
+        return "ake_above_wall_new_range"
+    if 0.0020 <= last < 0.0022:
+        if funding_negative or basis_negative or oi_down_votes >= 1:
+            return "ake_wall_zone_weakening"
+        return "ake_wall_zone_strength"
+    if last < 0.0020 and (funding_negative or basis_negative) and (price_down_votes >= 1 or cvd_down_votes >= 1 or oi_down_votes >= 1):
+        return "ake_wall_failed_watch"
+    return None
+
+
 def thought_push_direction(analysis):
     symbol = analysis.get("symbol")
     t_direction = t_micro_direction(analysis)
@@ -3185,6 +3229,9 @@ def thought_push_direction(analysis):
     ake_direction = ake_orderbook_wall_direction(analysis)
     if ake_direction:
         return ake_direction
+    ake_structure = ake_structure_direction(analysis)
+    if ake_structure:
+        return ake_structure
     validation = analysis.get("validation") or {}
     checks = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
     valid = [item for item in checks if item.get("price_change") is not None and item.get("oi_change") is not None and item.get("ratio_change") is not None and item.get("cvd") is not None]
@@ -3262,7 +3309,7 @@ def thought_signal_key(analysis, direction):
         else:
             price_zone = "below-1850"
         return f"{direction}-{price_zone}"
-    if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
+    if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection", "ake_above_wall_distribution_watch", "ake_above_wall_bull_weakening", "ake_above_wall_bull_continue", "ake_above_wall_new_range", "ake_wall_zone_weakening", "ake_wall_failed_watch"}:
         if last >= 0.0028:
             price_zone = "above-2800"
         elif last >= 0.0024:
@@ -3367,10 +3414,34 @@ def thought_structural_has_new_information(previous, metrics):
 
 
 def thought_ake_has_new_information(previous, metrics):
-    return thought_structural_has_new_information(previous, metrics)
+    if previous is None:
+        return True
+    if previous.direction != metrics["direction"]:
+        return True
+    if previous.signal_key != metrics["signal_key"]:
+        return True
+    previous_funding = previous.funding_rate
+    current_funding = metrics.get("funding_rate")
+    if current_funding is not None and previous_funding is not None and current_funding * previous_funding < 0:
+        return True
+    previous_basis = previous.basis
+    current_basis = metrics.get("basis")
+    if current_basis is not None and previous_basis is not None and current_basis * previous_basis < 0:
+        return True
+    if metric_changed(current_funding, previous_funding, abs_threshold=0.08):
+        return True
+    if metric_changed(current_basis, previous_basis, abs_threshold=0.25):
+        return True
+    if metric_changed(metrics.get("oi_value"), previous.oi_value, pct_threshold=0.12):
+        return True
+    if thought_cvd_profile(metrics) != tuple(cvd_direction(getattr(previous, f"cvd_{suffix}", None)) for suffix in ("30m", "1h", "2h")):
+        return True
+    return False
 
 
 def thought_push_has_new_information(previous, metrics):
+    if metrics.get("symbol") == "AKE/USDT":
+        return thought_ake_has_new_information(previous, metrics)
     return thought_structural_has_new_information(previous, metrics)
 
 
@@ -3746,6 +3817,113 @@ def thought_lark_db_fallback_message(analysis, direction):
         f"合约持仓：{lark_compact_number(analysis.get('oi_value'))}，合约成交额：{lark_compact_number(analysis.get('futures_volume'))}，现货成交额：{lark_compact_number(analysis.get('spot_volume'))}",
         f"合约/现货量比：{lark_plain_value(analysis.get('futures_spot_volume_ratio'), 2, 'x')}，开差：{lark_plain_value(analysis.get('open_spread'), 4, '%')}，平差：{lark_plain_value(analysis.get('close_spread'), 4, '%')}",
         f"判断：{judgement}",
+        thought_key_zone(analysis),
+        f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
+    ])
+
+
+AKE_STRUCTURE_DIRECTIONS = {
+    "ake_above_wall_distribution_watch",
+    "ake_above_wall_bull_weakening",
+    "ake_above_wall_bull_continue",
+    "ake_above_wall_new_range",
+    "ake_wall_zone_weakening",
+    "ake_wall_failed_watch",
+}
+
+
+def thought_lark_ake_structure_message(analysis, direction):
+    symbol = analysis["symbol"]
+    validation = analysis.get("validation") or {}
+    last = analysis.get("last")
+    previous = ThoughtPushSnapshot.query.filter_by(symbol=symbol).first()
+    previous_oi = previous.oi_value if previous else None
+    previous_price = previous.last_price if previous else None
+
+    if direction == "ake_above_wall_distribution_watch":
+        header = "方向：<font color='cus-bear'>● 🔵↘️ 看涨减弱 / 高位换手观察</font>"
+        title = "AKE思路盯盘：已经脱离旧卖墙区，不能继续只看 0.002-0.0022"
+        judgement = "判断：AKE 已经站到旧墙区上方，但现在 BN资费转负、BN基差也转负，说明之前“正资费+正基差拉合约”的多头支撑在减弱。这不等于立刻看空，但更像进入高位换手/派发观察阶段；如果持仓继续下降，就不能再按单纯逼空剧本处理。"
+        key_zone = "新区间：旧墙区 0.0020-0.0022 变成下方回踩区；当前重点看 0.00225-0.00245 能否守住。若跌回 0.0022 下方且资费/基差继续为负，看涨剧本降级。"
+    elif direction == "ake_above_wall_bull_weakening":
+        header = "方向：<font color='cus-bear'>● 🔵↘️ 看涨减弱 / 持仓结构走弱</font>"
+        title = "AKE思路盯盘：价格还在高位，但持仓或主动性开始减弱"
+        judgement = "判断：价格虽然还在 0.0022 上方，但持仓下降、CVD走弱、负资费或负基差中出现至少一项。这里不能继续用同一句“吸空后继续拉”解释所有波动，应该观察是否进入换手区。"
+        key_zone = "新区间：0.0022 是多头结构的第一道防线；0.0024 附近是新高位压力/换手区。若重新放量站稳 0.0024 且持仓不再下降，才恢复偏强。"
+    elif direction == "ake_above_wall_bull_continue":
+        header = "方向：<font color='cus-bull'>● 🔵⬆️ 看涨增强 / 墙上延续</font>"
+        title = "AKE思路盯盘：旧卖墙被消化后，多头结构仍在"
+        judgement = "判断：价格在 0.0022 上方，且资费/基差仍支持合约多头，持仓或CVD没有明显破坏。这种才属于真正的墙上延续，后续重点看是否放量继续抬高底部，而不是只看一根插针。"
+        key_zone = "新区间：0.0022-0.0024 是新的回踩确认区；站稳 0.0024 后，上方再看 0.0026/0.0028。跌回 0.0022 下方则降级观察。"
+    elif direction == "ake_wall_zone_weakening":
+        header = "方向：<font color='cus-bear'>● 🔵↘️ 墙区减弱 / 防止假突破</font>"
+        title = "AKE思路盯盘：还在旧墙区，但资金结构已经变差"
+        judgement = "判断：价格还在 0.0020-0.0022，但资费、基差或持仓开始走弱。这时墙区不再只代表逼空，也可能代表主力在墙区附近换手。要看能不能重新站上 0.0022。"
+        key_zone = "关键区间：0.0020 是墙区下沿，0.0022 是墙区上沿；上不去且资金结构继续变差，就按失败处理。"
+    elif direction == "ake_wall_failed_watch":
+        header = "方向：<font color='cus-bear'>● 🔵↘️ 墙下失败 / 多头剧本破坏</font>"
+        title = "AKE思路盯盘：跌回旧墙区下方，先降级看涨剧本"
+        judgement = "判断：如果价格跌回 0.0020 下方，同时资费/基差转弱或持仓下降，就说明旧卖墙没有被持续消化。这里不能继续把所有回调都解释成诱空，必须承认多头剧本被削弱。"
+        key_zone = "关键区间：重新站上 0.0020 才恢复墙区观察；站不上则看 0.0019/0.00185 的承接。"
+    else:
+        header = "方向：<font color='cus-watch'>● 🔵↔️ 新区间观察 / 等待确认</font>"
+        title = "AKE思路盯盘：离开旧卖墙区后，进入新价格区间"
+        judgement = "判断：价格已经离开最初的 0.0020-0.0022 剧本区间，但资金结构没有给出单边确认。现在要重新定义区间，而不是继续重复旧判断。"
+        key_zone = "新区间：下方看 0.0022 是否从压力变支撑；上方看 0.0024-0.0026 是否形成新压力。"
+
+    oi_line = f"持仓：{lark_compact_number(analysis.get('oi_value'))}"
+    if previous_oi and analysis.get("oi_value"):
+        oi_change = (analysis.get("oi_value") - previous_oi) / previous_oi * 100
+        oi_line += f"（较上次推送 {lark_plain_value(oi_change, 2, '%')}）"
+    price_line = f"价格：{lark_price_value(last)}"
+    if previous_price and last:
+        price_change = (last - previous_price) / previous_price * 100
+        price_line += f"（较上次推送 {lark_plain_value(price_change, 2, '%')}）"
+
+    return "\n".join([
+        header,
+        title,
+        f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"{price_line}，BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}，BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        f"{oi_line}，合约成交额：{lark_compact_number(analysis.get('futures_volume'))}，现货成交额：{lark_compact_number(analysis.get('spot_volume'))}",
+        f"开差：{lark_plain_value(analysis.get('open_spread'), 4, '%')}，平差：{lark_plain_value(analysis.get('close_spread'), 4, '%')}",
+        thought_window_line(validation, "30MIN", "30m"),
+        thought_window_line(validation, "1H", "1h"),
+        thought_window_line(validation, "2H", "2h"),
+        judgement,
+        key_zone,
+        f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
+    ])
+
+
+def thought_lark_message(analysis, direction):
+    if direction in {"t_bounce_long", "t_bounce_stall_short"}:
+        return thought_lark_t_message(analysis, direction)
+    if direction in AKE_STRUCTURE_DIRECTIONS:
+        return thought_lark_ake_structure_message(analysis, direction)
+    if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
+        return thought_lark_ake_wall_message(analysis, direction)
+    if analysis.get("source") == "db_fallback" or direction in {"bullish_db_watch", "bearish_db_watch"}:
+        return thought_lark_db_fallback_message(analysis, direction)
+    symbol = analysis["symbol"]
+    validation = analysis.get("validation") or {}
+    title_map = {
+        "bullish": "结构转强确认",
+        "bearish": "转弱观察",
+        "reversal": "涨势反转预警",
+        "distribution": "高位派发预警",
+        "tlm_trap_short": "诱多转弱做空盯盘",
+        "tlm_reversal": "做空假设反证",
+    }
+    return "\n".join([
+        thought_direction_badge(direction),
+        f"{symbol.split('/')[0]}思路盯盘：{title_map.get(direction, '结构观察')}",
+        f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"价格：{lark_price_value(analysis.get('last'))}，BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}，BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        thought_window_line(validation, "30MIN", "30m"),
+        thought_window_line(validation, "1H", "1h"),
+        thought_window_line(validation, "2H", "2h"),
+        f"判断：{thought_structure_summary(analysis, direction)}",
         thought_key_zone(analysis),
         f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
     ])

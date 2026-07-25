@@ -1990,6 +1990,7 @@ def daily_trends_page():
 
 MAJOR_MARKET_CACHE = {"ts": 0, "items": []}
 MAJOR_MARKET_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+DASHBOARD_OPPORTUNITY_CACHE = {"ts": 0, "items": []}
 
 
 def major_market_window_metrics(klines, oi_rows, ratio_rows, candle_count):
@@ -2108,9 +2109,79 @@ def fetch_major_market_overview():
     return MAJOR_MARKET_CACHE["items"]
 
 
+def fetch_dashboard_symbol_quotes(raw_symbol):
+    base = raw_symbol[:-4]
+    urls = {
+        "Binance": "https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({"symbol": raw_symbol}),
+        "OKX": "https://www.okx.com/api/v5/market/ticker?" + urlencode({"instId": f"{base}-USDT-SWAP"}),
+        "Bybit": "https://api.bybit.com/v5/market/tickers?" + urlencode({"category": "linear", "symbol": raw_symbol}),
+    }
+    quotes = {}
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(get_json, url, 4): exchange for exchange, url in urls.items()}
+        for future in as_completed(futures):
+            exchange = futures[future]
+            try:
+                payload = future.result()
+                if exchange == "Binance":
+                    price = float(payload.get("lastPrice", 0) or 0)
+                elif exchange == "OKX":
+                    rows = payload.get("data") or []
+                    price = float((rows[0] if rows else {}).get("last", 0) or 0)
+                else:
+                    rows = ((payload.get("result") or {}).get("list") or [])
+                    price = float((rows[0] if rows else {}).get("lastPrice", 0) or 0)
+                if price > 0:
+                    quotes[exchange] = price
+            except Exception:
+                continue
+    return raw_symbol[:-4] + "/USDT", quotes
+
+
+def live_dashboard_opportunities():
+    now_ts = time.time()
+    if DASHBOARD_OPPORTUNITY_CACHE["items"] and now_ts - DASHBOARD_OPPORTUNITY_CACHE["ts"] < 15:
+        return DASHBOARD_OPPORTUNITY_CACHE["items"]
+    rows = []
+    major_by_symbol = {item["symbol"]: item for item in fetch_major_market_overview()}
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(fetch_dashboard_symbol_quotes, symbol) for symbol in MAJOR_MARKET_SYMBOLS]
+        for future in as_completed(futures):
+            try:
+                symbol, quotes = future.result()
+            except Exception:
+                continue
+            if not quotes:
+                major = major_by_symbol.get(symbol)
+                if major and major.get("price"):
+                    quotes = {"Binance": major["price"]}
+            if not quotes:
+                continue
+            buy_exchange = min(quotes, key=quotes.get)
+            sell_exchange = max(quotes, key=quotes.get)
+            buy, sell = quotes[buy_exchange], quotes[sell_exchange]
+            spread = (sell / buy - 1) * 100 if buy else 0
+            major = major_by_symbol.get(symbol) or {}
+            rows.append({
+                "symbol": symbol,
+                "buy_exchange": buy_exchange,
+                "sell_exchange": sell_exchange,
+                "buy_price": round(buy, 8),
+                "sell_price": round(sell, 8),
+                "spread": round(spread, 4),
+                "estimated_profit": round(spread - 0.12, 4),
+                "funding": major.get("funding_rate") if major.get("funding_rate") is not None else 0,
+                "updated_at": datetime.now().strftime("%H:%M:%S"),
+            })
+    rows.sort(key=lambda item: item["estimated_profit"], reverse=True)
+    if rows:
+        DASHBOARD_OPPORTUNITY_CACHE.update({"ts": now_ts, "items": rows})
+    return DASHBOARD_OPPORTUNITY_CACHE["items"]
+
+
 @app.get("/api/dashboard")
 def dashboard():
-    items = opportunities()
+    items = live_dashboard_opportunities()
     active = Strategy.query.filter_by(enabled=True).count()
     return jsonify({
         "majors": fetch_major_market_overview(),
@@ -2119,7 +2190,7 @@ def dashboard():
             "active_strategies": active,
             "best_spread": items[0]["spread"] if items else 0,
             "markets_scanned": len(items) * len(EXCHANGES),
-            "mode": "现多期空 · 公开 API",
+            "mode": "机会看板 · 三所合约公开 API",
         },
     })
 

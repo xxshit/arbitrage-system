@@ -5,6 +5,7 @@ import time
 import threading
 import re
 import html
+import hashlib
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
@@ -276,6 +277,22 @@ class ThoughtPushSnapshot(db.Model):
     wall_notional = db.Column(db.Float)
     pushed_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
     updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+
+
+class ThoughtPushEvent(db.Model):
+    """不可覆盖的思路推送审计记录，同时用于重启/并发场景的发送预占位。"""
+    id = db.Column(db.Integer, primary_key=True)
+    symbol = db.Column(db.String(30), nullable=False, index=True)
+    direction = db.Column(db.String(60), nullable=False)
+    signal_key = db.Column(db.String(120), nullable=False)
+    reservation_key = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    trigger_reason = db.Column(db.String(255), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default="reserved", index=True)
+    snapshot_json = db.Column(db.Text)
+    message_text = db.Column(db.Text)
+    error_text = db.Column(db.String(500))
+    reserved_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+    sent_at = db.Column(db.DateTime)
 
 
 class SymbolAlias(db.Model):
@@ -3736,6 +3753,62 @@ def thought_push_has_new_information(previous, metrics):
     return thought_structural_has_new_information(previous, metrics)
 
 
+def thought_push_trigger_reason(previous, metrics):
+    if previous is None:
+        return "首次形成可推送结构"
+    reasons = []
+    if previous.direction != metrics["direction"]:
+        reasons.append(f"方向改变：{previous.direction} → {metrics['direction']}")
+    if previous.signal_key != metrics["signal_key"]:
+        reasons.append(f"信号区间改变：{previous.signal_key} → {metrics['signal_key']}")
+    previous_funding = previous.funding_rate
+    current_funding = metrics.get("funding_rate")
+    if current_funding is not None and previous_funding is not None and current_funding * previous_funding < 0:
+        reasons.append("资金费率正负翻转")
+    previous_basis = previous.basis
+    current_basis = metrics.get("basis")
+    if current_basis is not None and previous_basis is not None and current_basis * previous_basis < 0:
+        reasons.append("基差正负翻转")
+    if metric_changed(metrics.get("oi_value"), previous.oi_value, pct_threshold=0.25):
+        reasons.append("持仓较上次变化达到25%")
+    old_cvd = tuple(cvd_direction(getattr(previous, f"cvd_{suffix}", None)) for suffix in ("30m", "1h", "2h"))
+    new_cvd = thought_cvd_profile(metrics)
+    if abs(sum(item == "up" for item in new_cvd) - sum(item == "up" for item in old_cvd)) >= 2:
+        reasons.append("至少两个观察窗口的CVD方向改变")
+    if not reasons:
+        reasons.append("超过重复抑制周期后结构仍成立")
+    return "；".join(reasons)
+
+
+def thought_push_reservation_key(previous, metrics):
+    previous_version = previous.pushed_at.isoformat(timespec="microseconds") if previous and previous.pushed_at else "initial"
+    source = "|".join([
+        str(metrics.get("symbol") or ""),
+        str(metrics.get("direction") or ""),
+        str(metrics.get("signal_key") or ""),
+        previous_version,
+    ])
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def acquire_thought_push_lock():
+    """跨进程互斥；网站重启交叠时也只允许一个推送任务进入。"""
+    if db.engine.dialect.name not in {"mysql", "mariadb"}:
+        return None, True
+    connection = db.engine.connect()
+    acquired = connection.execute(text("SELECT GET_LOCK('arbitrage_thought_push', 0)")).scalar()
+    return connection, acquired == 1
+
+
+def release_thought_push_lock(connection):
+    if connection is None:
+        return
+    try:
+        connection.execute(text("SELECT RELEASE_LOCK('arbitrage_thought_push')"))
+    finally:
+        connection.close()
+
+
 def upsert_thought_push_snapshot(symbol, metrics):
     item = ThoughtPushSnapshot.query.filter_by(symbol=symbol).first()
     if item is None:
@@ -4231,6 +4304,17 @@ def thought_lark_message(analysis, direction):
 
 
 def send_thought_analysis_push():
+    lock_connection = None
+    try:
+        lock_connection, acquired = acquire_thought_push_lock()
+        if not acquired:
+            return False
+        return send_thought_analysis_push_locked()
+    finally:
+        release_thought_push_lock(lock_connection)
+
+
+def send_thought_analysis_push_locked():
     webhook = os.getenv("LARK_THOUGHT_ANALYSIS_WEBHOOK", "").strip()
     if not webhook:
         return False
@@ -4251,27 +4335,68 @@ def send_thought_analysis_push():
         previous_snapshot = ThoughtPushSnapshot.query.filter_by(symbol=analysis["symbol"]).first()
         if not thought_push_has_new_information(previous_snapshot, metrics):
             continue
-        sections.append(thought_lark_message(analysis, direction))
-        push_records.append((existing, analysis, signal_key, metrics))
+        message = thought_lark_message(analysis, direction)
+        event = ThoughtPushEvent(
+            symbol=analysis["symbol"],
+            direction=direction,
+            signal_key=signal_key,
+            reservation_key=thought_push_reservation_key(previous_snapshot, metrics),
+            trigger_reason=thought_push_trigger_reason(previous_snapshot, metrics),
+            status="reserved",
+            snapshot_json=json.dumps(metrics, ensure_ascii=False, default=str),
+            message_text=message,
+        )
+        db.session.add(event)
+        sections.append(message)
+        push_records.append((existing, analysis, signal_key, metrics, event))
     if not sections:
         return False
+
+    # 先把“准备发送”及比较快照提交。这样即使 webhook 已送达后网站立刻重启，
+    # 新进程也能看到本次信号已经被占位，不会把相同判断再发一遍。
+    reserved_at = datetime.now()
+    try:
+        for existing, analysis, signal_key, metrics, event in push_records:
+            if existing:
+                existing.pushed_at = reserved_at
+            else:
+                db.session.add(LarkPushState(channel="thought_analysis", symbol=analysis["symbol"], signal_key=signal_key, pushed_at=reserved_at))
+            event.reserved_at = reserved_at
+            upsert_thought_push_snapshot(analysis["symbol"], metrics)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return False
+
     payload = lark_trend_card(sections)
     try:
         request_obj = Request(webhook, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), headers={"Content-Type": "application/json", "User-Agent": "ArbiScope/1.0"})
         with urlopen(request_obj, timeout=10) as response:
             result = json.loads(response.read().decode("utf-8"))
         if not (result.get("code", 0) == 0 or result.get("StatusCode", 0) == 0):
+            for *_, event in push_records:
+                event.status = "rejected"
+                event.error_text = str(result)[:500]
+            db.session.commit()
             return False
-        for existing, analysis, signal_key, metrics in push_records:
-            if existing:
-                existing.pushed_at = datetime.now()
-            else:
-                db.session.add(LarkPushState(channel="thought_analysis", symbol=analysis["symbol"], signal_key=signal_key))
-            upsert_thought_push_snapshot(analysis["symbol"], metrics)
+        sent_at = datetime.now()
+        for *_, event in push_records:
+            event.status = "sent"
+            event.sent_at = sent_at
         db.session.commit()
         return True
-    except Exception:
+    except Exception as exc:
+        # 网络异常可能发生在 Lark 已接收之后，因此保留预占位，不自动重发。
+        # 事件状态可用于之后人工核对，避免“响应丢失 → 无限重试”的重复消息。
         db.session.rollback()
+        try:
+            event_ids = [record[-1].id for record in push_records if record[-1].id]
+            for event in ThoughtPushEvent.query.filter(ThoughtPushEvent.id.in_(event_ids)).all():
+                event.status = "uncertain"
+                event.error_text = str(exc)[:500]
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
         return False
 
 

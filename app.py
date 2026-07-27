@@ -1526,7 +1526,7 @@ def create_basis_open_alert(symbol, row, strategy, message):
         create_alert(symbol, "dual_basis_threshold", message, row, strategy, row.get("long_exchange"), row.get("short_exchange"))
 
 
-def track_basis(symbol, row, active_by_symbol, active_by_key, strategy="spot_futures"):
+def track_basis(symbol, row, active_by_symbol, active_by_key, strategy="spot_futures", emit_alert=True):
     basis = row["basis"]
     absolute = abs(basis)
     direction = "positive" if basis > 0 else "negative"
@@ -1554,7 +1554,8 @@ def track_basis(symbol, row, active_by_symbol, active_by_key, strategy="spot_fut
         active_by_symbol[(strategy, symbol)] = active
         active_by_key[(strategy, symbol, direction)] = active
         db.session.add(BasisExpansionLog(tracking_id=active.id, level=1.0, observed_basis=basis))
-        create_basis_open_alert(symbol, row, strategy, "basis reopened above 1 percent")
+        if emit_alert:
+            create_basis_open_alert(symbol, row, strategy, "basis reopened above 1 percent")
         if False and strategy == "spot_futures":
             create_alert(symbol, "basis_threshold", "基差连续两次越过 ±1% 阈值", row)
     if absolute > active.max_abs_basis:
@@ -1564,7 +1565,7 @@ def track_basis(symbol, row, active_by_symbol, active_by_key, strategy="spot_fut
         active.last_recorded_level = round(active.last_recorded_level + 0.2, 1)
         db.session.add(BasisExpansionLog(tracking_id=active.id, level=active.last_recorded_level, observed_basis=basis))
         expanded = True
-    if expanded:
+    if expanded and emit_alert:
         create_basis_open_alert(symbol, row, strategy, f"basis expanded to {active.last_recorded_level:.1f} percent level")
 
 
@@ -3544,6 +3545,10 @@ def soon_turnover_short_direction(analysis):
         return None
     features = turnover_structure_features(analysis)
     funding, basis = features["funding"], features["basis"]
+    observed_basis = (TURNOVER_BASIS_STATE.get("SOON/USDT") or {}).get("basis")
+    if observed_basis is not None and basis is not None:
+        basis = min(basis, observed_basis)
+        analysis["turnover_basis_observed"] = observed_basis
     if funding is None or basis is None or basis >= 0:
         return None
     if not (TURNOVER_BASIS_STATE.get(analysis.get("symbol")) or {}).get("stable"):
@@ -3564,16 +3569,27 @@ def zama_turnover_short_direction(analysis):
         return None
     features = turnover_structure_features(analysis)
     funding, basis = features["funding"], features["basis"]
+    observed_basis = (TURNOVER_BASIS_STATE.get("ZAMA/USDT") or {}).get("basis")
+    if observed_basis is not None and basis is not None:
+        basis = min(basis, observed_basis)
+        analysis["turnover_basis_observed"] = observed_basis
     if funding is None or basis is None or basis >= 0:
         return None
     if not (TURNOVER_BASIS_STATE.get(analysis.get("symbol")) or {}).get("stable"):
         return None
-    # ZAMA当前最重要的反证：负基差存在，但中周期仍是持仓增、人数比降、CVD涨的偏多犄角。
-    if features["bullish_horn"]:
-        return "zama_negative_basis_bullish_horn"
     turnover_confirmed = features["price_stalls"] and features["cvd_weakens"] and (
         features["oi_unwinds"] or features["ratio_chases_long"] or features["volume_hot"]
     )
+    # ZAMA的-2%瞬时深贴水是独立换手阶段；先提醒深基差，再由结构决定能否做空。
+    if basis <= -2.0:
+        if turnover_confirmed:
+            return "zama_turnover_short_ready"
+        if funding < 0:
+            return "zama_deep_basis_funding_follow"
+        return "zama_deep_basis_watch"
+    # ZAMA当前最重要的反证：负基差存在，但中周期仍是持仓增、人数比降、CVD涨的偏多犄角。
+    if features["bullish_horn"]:
+        return "zama_negative_basis_bullish_horn"
     if turnover_confirmed:
         return "zama_turnover_short_ready"
     if funding < 0:
@@ -3822,9 +3838,11 @@ def thought_signal_key(analysis, direction):
     if direction in {
         "soon_basis_negative_watch", "soon_funding_follow_watch", "soon_turnover_short_ready",
         "zama_basis_negative_watch", "zama_funding_follow_watch", "zama_turnover_short_ready",
-        "zama_negative_basis_bullish_horn",
+        "zama_negative_basis_bullish_horn", "zama_deep_basis_watch", "zama_deep_basis_funding_follow",
     }:
-        basis = analysis.get("basis") or 0
+        basis = analysis.get("turnover_basis_observed")
+        if basis is None:
+            basis = analysis.get("basis") or 0
         if basis <= -2.0:
             basis_zone = "below-minus-200"
         elif basis <= -1.0:
@@ -4231,13 +4249,14 @@ def thought_lark_turnover_body(analysis, header, title, judgement, key_note):
     validation = analysis.get("validation") or {}
     funding = analysis.get("funding_rate")
     basis = analysis.get("basis")
+    observed_basis = analysis.get("turnover_basis_observed")
     recent_high = micro.get("recent_high")
     recent_low = micro.get("recent_low")
     return "\n".join([
         header,
         title,
         f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
-        f"价格：{lark_price_value(analysis.get('last'))}｜BN基差：{lark_plain_value(basis, 4, '%')}｜BN资费：{lark_plain_value(funding, 4, '%')}",
+        f"价格：{lark_price_value(analysis.get('last'))}｜BN当前基差：{lark_plain_value(basis, 4, '%')}｜本轮捕捉基差：{lark_plain_value(observed_basis, 4, '%')}｜BN资费：{lark_plain_value(funding, 4, '%')}",
         t_micro_line(micro, "5MIN", "5m"),
         t_micro_line(micro, "15MIN", "15m"),
         thought_window_line(validation, "30MIN", "30m"),
@@ -4276,6 +4295,22 @@ def thought_lark_soon_message(analysis, direction):
 
 
 def thought_lark_zama_message(analysis, direction):
+    if direction == "zama_deep_basis_watch":
+        return thought_lark_turnover_body(
+            analysis,
+            "方向：<font color='orange'>●●● 🟠⬇️ ZAMA深负基差 / 换手加速观察</font>",
+            "ZAMA思路盯盘：盘中基差进入 -2% 深贴水区",
+            "判断：ZAMA本轮捕捉基差已到 -2% 以下，符合你提出的放量换手路径。深贴水说明合约端卖压或空头需求骤增，但在资费尚未明显跟负、价格与偏多犄角尚未同步破坏前，不能只凭基差直接追空；先判断这是短时插针、逼空前压盘，还是持续换手。",
+            "连续样本维持 -2% 以下、成交量放大且价格/CVD/持仓转弱，换手做空权重上升；若基差快速修复且犄角延续，则保留继续上拉的反证。",
+        )
+    if direction == "zama_deep_basis_funding_follow":
+        return thought_lark_turnover_body(
+            analysis,
+            "方向：<font color='cus-bear'>●●● 🔴⬇️ ZAMA深负基差 / 资费开始跟负</font>",
+            "ZAMA思路盯盘：深贴水正在向资金费传导",
+            "判断：ZAMA基差已进入 -2% 以下，资费也开始转负，说明合约端的换手压力不再只是瞬时价格偏离。若同时出现放量、价格滞涨、CVD转弱或持仓退出，才更接近主升后的换手阶段；偏多犄角仍完整时仍需防反向逼空。",
+            "继续比较基差扩大速度与资费跟随速度；价格跌破近端低点且反抽收不回时提高做空确认，结构修复则立即降级。",
+        )
     if direction == "zama_negative_basis_bullish_horn":
         return thought_lark_turnover_body(
             analysis,
@@ -4717,7 +4752,7 @@ def thought_lark_message(analysis, direction):
         return thought_lark_t_message(analysis, direction)
     if direction in {"soon_basis_negative_watch", "soon_funding_follow_watch", "soon_turnover_short_ready"}:
         return thought_lark_soon_message(analysis, direction)
-    if direction in {"zama_basis_negative_watch", "zama_funding_follow_watch", "zama_turnover_short_ready", "zama_negative_basis_bullish_horn"}:
+    if direction in {"zama_basis_negative_watch", "zama_funding_follow_watch", "zama_turnover_short_ready", "zama_negative_basis_bullish_horn", "zama_deep_basis_watch", "zama_deep_basis_funding_follow"}:
         return thought_lark_zama_message(analysis, direction)
     if direction in {"era_squeeze_probe", "era_squeeze_confirmed", "era_bounce_stall_short"}:
         return thought_lark_era_message(analysis, direction)
@@ -6433,8 +6468,26 @@ def background_thought_analysis_push():
         time.sleep(300)
 
 
+def persist_thought_watch_basis(symbol, basis, funding):
+    """将思路盯盘里的深基差按 1% 打开、每扩大 0.2% 留痕，不产生通用报警噪声。"""
+    strategy = "thought_watch"
+    active_trackings = BasisTracking.query.filter_by(resolved_at=None).all()
+    active_by_symbol = {(item.strategy or "spot_futures", item.symbol): item for item in active_trackings}
+    active_by_key = {(item.strategy or "spot_futures", item.symbol, item.direction): item for item in active_trackings}
+    row = {
+        "basis": basis,
+        "funding_rate": funding,
+        "open_spread": 0,
+        "close_spread": 0,
+        "long_exchange": "Binance",
+        "short_exchange": "Binance",
+    }
+    track_basis(symbol, row, active_by_symbol, active_by_key, strategy=strategy, emit_alert=False)
+    db.session.commit()
+
+
 def background_turnover_basis_watch():
-    """30秒检查SOON/ZAMA基差；连续两次转负后触发完整结构分析。"""
+    """ZAMA每5秒、SOON每30秒检查基差；连续两次确认后触发完整结构分析。"""
     time.sleep(12)
     symbols = {"SOON/USDT": "SOONUSDT", "ZAMA/USDT": "ZAMAUSDT"}
     negative_counts = {symbol: 0 for symbol in symbols}
@@ -6442,12 +6495,15 @@ def background_turnover_basis_watch():
     status_tick = 0
     while True:
         try:
-            update_status = status_tick % 10 == 0
+            update_status = status_tick % 60 == 0
             if update_status:
                 with app.app_context():
                     mark_automation_status("turnover_basis_watch", "started")
             should_push = False
-            for symbol, raw_symbol in symbols.items():
+            due_symbols = {"ZAMA/USDT": symbols["ZAMA/USDT"]}
+            if status_tick % 6 == 0:
+                due_symbols["SOON/USDT"] = symbols["SOON/USDT"]
+            for symbol, raw_symbol in due_symbols.items():
                 premium = get_json(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={raw_symbol}", timeout=5)
                 funding = float(premium.get("lastFundingRate", 0) or 0) * 100
                 mark_price = float(premium.get("markPrice", 0) or 0)
@@ -6461,8 +6517,10 @@ def background_turnover_basis_watch():
                 if not stable:
                     phase = "positive" if basis is None or basis >= 0 else "negative_pending"
                 else:
-                    if basis <= -1.0:
-                        basis_zone = "below-100"
+                    if basis <= -2.0:
+                        basis_zone = "below-200"
+                    elif basis <= -1.0:
+                        basis_zone = "minus-100-200"
                     elif basis <= -0.5:
                         basis_zone = "minus-050-100"
                     elif basis <= -0.2:
@@ -6478,6 +6536,9 @@ def background_turnover_basis_watch():
                     "phase": phase,
                     "updated_at": datetime.now(SHANGHAI_TZ).isoformat(),
                 }
+                if symbol == "ZAMA/USDT" and basis is not None:
+                    with app.app_context():
+                        persist_thought_watch_basis(symbol, basis, funding)
                 if stable and phase != last_phases[symbol]:
                     should_push = True
                 last_phases[symbol] = phase
@@ -6492,7 +6553,7 @@ def background_turnover_basis_watch():
                 db.session.rollback()
                 mark_automation_status("turnover_basis_watch", "error", exc)
         status_tick += 1
-        time.sleep(30)
+        time.sleep(5)
 
 
 def start_background_workers():

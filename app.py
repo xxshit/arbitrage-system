@@ -3867,6 +3867,13 @@ def metric_changed(current, previous, abs_threshold=None, pct_threshold=None):
     return False
 
 
+def meaningful_sign_flip(current, previous, min_abs_each, min_span):
+    """Ignore zero-axis jitter; a sign change is meaningful only after moving through a real deadband."""
+    if current is None or previous is None or current * previous >= 0:
+        return False
+    return min(abs(current), abs(previous)) >= min_abs_each and abs(current - previous) >= min_span
+
+
 def cvd_direction(value):
     if value is None:
         return "none"
@@ -3923,12 +3930,12 @@ def thought_major_narrative_shift(previous, metrics):
 
     previous_funding = previous.funding_rate
     current_funding = metrics.get("funding_rate")
-    if current_funding is not None and previous_funding is not None and current_funding * previous_funding < 0:
+    if meaningful_sign_flip(current_funding, previous_funding, min_abs_each=0.005, min_span=0.02):
         return True
 
     previous_basis = previous.basis
     current_basis = metrics.get("basis")
-    if current_basis is not None and previous_basis is not None and current_basis * previous_basis < 0:
+    if meaningful_sign_flip(current_basis, previous_basis, min_abs_each=0.10, min_span=0.30):
         return True
 
     if metric_changed(current_funding, previous_funding, abs_threshold=0.20):
@@ -3967,7 +3974,7 @@ def thought_structural_has_new_information(previous, metrics):
     previous_funding = previous.funding_rate
     current_funding = metrics.get("funding_rate")
     if current_funding is not None and previous_funding is not None:
-        if current_funding * previous_funding < 0:
+        if meaningful_sign_flip(current_funding, previous_funding, min_abs_each=0.005, min_span=0.02):
             return True
     if metric_changed(current_funding, previous_funding, abs_threshold=0.15):
         return True
@@ -3992,11 +3999,11 @@ def thought_ake_has_new_information(previous, metrics):
         return True
     previous_funding = previous.funding_rate
     current_funding = metrics.get("funding_rate")
-    if current_funding is not None and previous_funding is not None and current_funding * previous_funding < 0:
+    if meaningful_sign_flip(current_funding, previous_funding, min_abs_each=0.005, min_span=0.02):
         return True
     previous_basis = previous.basis
     current_basis = metrics.get("basis")
-    if current_basis is not None and previous_basis is not None and current_basis * previous_basis < 0:
+    if meaningful_sign_flip(current_basis, previous_basis, min_abs_each=0.10, min_span=0.30):
         return True
     if metric_changed(current_funding, previous_funding, abs_threshold=0.08):
         return True
@@ -4036,11 +4043,11 @@ def thought_push_trigger_reason(previous, metrics):
         reasons.append(f"信号区间改变：{previous.signal_key} → {metrics['signal_key']}")
     previous_funding = previous.funding_rate
     current_funding = metrics.get("funding_rate")
-    if current_funding is not None and previous_funding is not None and current_funding * previous_funding < 0:
+    if meaningful_sign_flip(current_funding, previous_funding, min_abs_each=0.005, min_span=0.02):
         reasons.append("资金费率正负翻转")
     previous_basis = previous.basis
     current_basis = metrics.get("basis")
-    if current_basis is not None and previous_basis is not None and current_basis * previous_basis < 0:
+    if meaningful_sign_flip(current_basis, previous_basis, min_abs_each=0.10, min_span=0.30):
         reasons.append("基差正负翻转")
     if metric_changed(metrics.get("oi_value"), previous.oi_value, pct_threshold=0.25):
         reasons.append("持仓较上次变化达到25%")

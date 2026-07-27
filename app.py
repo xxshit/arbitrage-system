@@ -2440,7 +2440,7 @@ def percentile(values, q):
 def fetch_t_micro_metrics(raw_symbol):
     """T/USDT 专用 5 分钟级盯盘：捕捉横盘后的短线向上异动与反抽停滞。"""
     try:
-        live_timeout = 5 if symbol == "TLM/USDT" else 2
+        live_timeout = 5 if raw_symbol == "TLMUSDT" else 2
         k5 = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "5m", "limit": 48}), timeout=live_timeout)
         oi5 = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 48}), timeout=live_timeout)
         ratios5 = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 48}), timeout=live_timeout)
@@ -2462,10 +2462,10 @@ def fetch_t_micro_metrics(raw_symbol):
         oi_change = None
         oi_value = None
         if len(oi_rows) >= candles:
-            oi_start = float(oi_rows[0].get("sumOpenInterestValue", 0) or 0)
-            oi_end = float(oi_rows[-1].get("sumOpenInterestValue", 0) or 0)
+            oi_start = float(oi_rows[0].get("sumOpenInterest", 0) or 0)
+            oi_end = float(oi_rows[-1].get("sumOpenInterest", 0) or 0)
             oi_change = percent_delta(oi_end, oi_start)
-            oi_value = oi_end
+            oi_value = float(oi_rows[-1].get("sumOpenInterestValue", 0) or 0)
         ratio_change = None
         ratio_value = None
         if len(ratio_rows) >= candles:
@@ -3288,9 +3288,13 @@ def thought_snapshot(symbol):
             return {"price_change": price_change, "oi_change": oi_change, "ratio_change": ratio_change, "cvd": cvd_value, "volume": volume, "volume_ratio": volume_ratio}
         index_price = float(premium.get("indexPrice", 0) or 0)
         mark_price = float(premium.get("markPrice", 0) or 0)
-        micro_validation = fetch_t_micro_metrics(raw_symbol) if symbol == "T/USDT" else {}
+        micro_validation = fetch_t_micro_metrics(raw_symbol) if symbol in {"T/USDT", "AKE/USDT", "ERA/USDT"} else {}
         orderbook_wall = fetch_ake_orderbook_wall(raw_symbol) if symbol == "AKE/USDT" else {}
         market_context = thought_market_context(symbol) or {}
+        validation = {"30m": window_metrics(1), "1h": window_metrics(2), "2h": window_metrics(4), "4h": window_metrics(8)}
+        for key in ("5m", "15m"):
+            if micro_validation.get(key):
+                validation[key] = micro_validation[key]
         return {
             **fallback,
             **{key: value for key, value in market_context.items() if value is not None},
@@ -3307,7 +3311,7 @@ def thought_snapshot(symbol):
             "change_4h": percent_delta(float(closed4h[-1][4]), float(closed4h[-8][4])),
             "funding_rate": float(premium.get("lastFundingRate", 0) or 0) * 100,
             "basis": percent_delta(mark_price, index_price) if index_price else None,
-            "validation": {"30m": window_metrics(1), "1h": window_metrics(2), "2h": window_metrics(4)},
+            "validation": validation,
             "micro_validation": micro_validation,
             "orderbook_wall": orderbook_wall,
             "source": "live",
@@ -3487,6 +3491,48 @@ def tlm_trap_short_direction(analysis):
     return None
 
 
+def era_squeeze_direction(analysis):
+    """ERA 两阶段盯盘：先抓拥挤空头的逼空反弹，再抓诱多停滞后的重新转弱。"""
+    if analysis.get("symbol") != "ERA/USDT":
+        return None
+    micro = analysis.get("micro_validation") or {}
+    validation = analysis.get("validation") or {}
+    last = analysis.get("last") or micro.get("current")
+    if not last:
+        return None
+
+    def value(row, key, default=0):
+        item = row.get(key)
+        return default if item is None else item
+
+    m5, m15, m30 = (micro.get(key) or {} for key in ("5m", "15m", "30m"))
+    h1 = validation.get("1h") or {}
+    short_rows = [row for row in (m5, m15, m30) if row.get("price_change") is not None]
+    price_up = sum(value(row, "price_change") >= 0.25 for row in short_rows)
+    cvd_up = sum(value(row, "cvd") > 0 for row in short_rows)
+    oi_supported = sum(value(row, "oi_change") >= -0.15 for row in short_rows)
+    ratio_compressed = sum(value(row, "ratio_change") <= 0 for row in short_rows)
+    volume_ratio = max([value(row, "volume_ratio") for row in short_rows] or [0])
+
+    # 第二阶段优先：反弹进入目标带后，短周期主动买入衰竭，提示诱多可能结束。
+    bounce_reached = last >= 0.0732
+    price_stalls = value(m5, "price_change") <= 0.10 and value(m15, "price_change") <= 0.35
+    cvd_weakens = value(m5, "cvd") < 0 or value(m15, "cvd") < 0
+    structure_unwinds = value(m15, "oi_change") <= -0.35 or value(m15, "ratio_change") >= 0.35
+    if bounce_reached and price_stalls and cvd_weakens and (structure_unwinds or volume_ratio >= 1.35):
+        return "era_bounce_stall_short"
+
+    # 第一阶段确认：站上0.0726，至少两个短周期价格/CVD转强，并有仓位和人数结构配合。
+    if last >= 0.0726 and price_up >= 2 and cvd_up >= 2 and oi_supported >= 2 and ratio_compressed >= 2 and volume_ratio >= 1.15:
+        return "era_squeeze_confirmed"
+
+    # 萌芽提示：离开0.0714低点区，30M/1H已改善，但仍明确标成反抽/逼空观察，不叫趋势反转。
+    h1_improves = value(h1, "price_change") > 0 and value(h1, "oi_change") > 0 and value(h1, "ratio_change") < 0 and value(h1, "cvd") > 0
+    if last >= 0.07205 and ((price_up >= 2 and cvd_up >= 2) or h1_improves) and oi_supported >= 2:
+        return "era_squeeze_probe"
+    return None
+
+
 def ake_orderbook_wall_direction(analysis):
     if analysis.get("symbol") != "AKE/USDT":
         return None
@@ -3594,9 +3640,17 @@ def ake_structure_direction(analysis):
 
 def thought_push_direction(analysis):
     symbol = analysis.get("symbol")
+    # AKE/ERA are high-frequency narrative watches. A temporary exchange timeout
+    # must not let a stale DB fallback flip their direction and generate a false
+    # "new idea" push. Wait for the next complete live snapshot instead.
+    if symbol in {"AKE/USDT", "ERA/USDT"} and analysis.get("source") != "live":
+        return None
     t_direction = t_micro_direction(analysis)
     if t_direction:
         return t_direction
+    era_direction = era_squeeze_direction(analysis)
+    if symbol == "ERA/USDT":
+        return era_direction
     tlm_direction = tlm_trap_short_direction(analysis)
     if tlm_direction:
         return tlm_direction
@@ -3671,6 +3725,20 @@ def thought_signal_key(analysis, direction):
     last = analysis.get("last") or 0
     resistance = analysis.get("resistance") or 0
     support = analysis.get("support") or 0
+    if direction in {"era_squeeze_probe", "era_squeeze_confirmed", "era_bounce_stall_short"}:
+        if last >= 0.0757:
+            price_zone = "above-757"
+        elif last >= 0.0738:
+            price_zone = "bounce-738-757"
+        elif last >= 0.0732:
+            price_zone = "bounce-732-738"
+        elif last >= 0.0726:
+            price_zone = "confirm-726-732"
+        elif last >= 0.0721:
+            price_zone = "probe-721-726"
+        else:
+            price_zone = "floor-watch"
+        return f"{direction}-{price_zone}"
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         if last >= 0.0047:
             price_zone = "above-470"
@@ -4004,6 +4072,39 @@ def thought_lark_t_message(analysis, direction):
     ])
 
 
+def thought_lark_era_message(analysis, direction):
+    symbol = analysis["symbol"]
+    micro = analysis.get("micro_validation") or {}
+    validation = analysis.get("validation") or {}
+    if direction == "era_squeeze_probe":
+        header = "方向：<font color='cus-bull-soft'>●● 🟦⬆️ 反抽萌芽 / 逼空燃料观察</font>"
+        title = "ERA思路盯盘：短周期开始转强，长周期仍未反转"
+        judgement = "判断：空头拥挤开始转化为反抽燃料，30MIN/1H结构改善，但这只是小拉或逼空萌芽，尚不能叫大级别反转。重点验证主动买入能否持续，以及价格能否离开0.0714低点区。"
+        key_zone = "关键位：先收回0.0721-0.0723；放量站上0.0726才升级为逼空确认。跌回0.0714下方且CVD重新转负，萌芽信号失效。"
+    elif direction == "era_squeeze_confirmed":
+        header = "方向：<font color='cus-bull'>●●● 🟦⬆️ 看涨 / 逼空反弹确认</font>"
+        title = "ERA思路盯盘：短中周期共振，开始执行小拉剧本"
+        judgement = "判断：价格、CVD、持仓与人数比开始形成短周期犄角，且已站上第一确认位。这里先按逼空/诱多上涨段处理，不提前假设它会反转成长期主升。"
+        key_zone = "关键位：站稳0.0726后先看0.0732-0.0738；只有继续放量并保持新仓增长，才观察0.0757。上涨时若持仓快速下降，更像空头回补，持续性要降级。"
+    else:
+        header = "方向：<font color='cus-bear'>●●● 🟦⬇️ 平多 / 诱多结束观察</font>"
+        title = "ERA思路盯盘：反弹停滞，准备验证重新下跌"
+        judgement = "判断：ERA完成一段逼空/诱多反弹后，短周期价格开始滞涨、CVD转弱，仓位或人数结构也不再支持上涨。此时才把你的‘拉高诱多再跌’剧本升级为可执行的重新看空观察。"
+        key_zone = "关键位：0.0732-0.0738是第一停滞观察带；若冲高失败后跌回0.0726下方，转弱确认度提高，下方重新看0.0721和0.0714。"
+    return "\n".join([
+        header, title,
+        f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"价格：{lark_price_value(analysis.get('last'))}｜BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}｜BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        t_micro_line(micro, "5MIN", "5m"),
+        t_micro_line(micro, "15MIN", "15m"),
+        t_micro_line(micro, "30MIN", "30m"),
+        thought_window_line(validation, "1H", "1h"),
+        thought_window_line(validation, "2H", "2h"),
+        judgement, key_zone,
+        f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
+    ])
+
+
 def ake_wall_bucket_line(wall):
     buckets = wall.get("buckets") or []
     live_qty = sum((item.get("qty") or 0) for item in buckets)
@@ -4159,8 +4260,8 @@ def thought_lark_db_fallback_message(analysis, direction):
 
 
 def thought_direction_badge(direction):
-    bullish = direction in {"bullish", "bullish_db_watch"}
-    distribution = direction == "distribution"
+    bullish = direction in {"bullish", "bullish_db_watch", "era_squeeze_probe", "era_squeeze_confirmed"}
+    distribution = direction in {"distribution", "era_bounce_stall_short"}
     if bullish:
         return "方向：<font color='cus-bull'>●●●</font> 🟦⬆️ 看涨/转强"
     if distribution:
@@ -4410,6 +4511,8 @@ def thought_lark_ake_structure_message(analysis, direction):
 def thought_lark_message(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         return thought_lark_t_message(analysis, direction)
+    if direction in {"era_squeeze_probe", "era_squeeze_confirmed", "era_bounce_stall_short"}:
+        return thought_lark_era_message(analysis, direction)
     if direction in AKE_STRUCTURE_DIRECTIONS:
         return thought_lark_ake_structure_message(analysis, direction)
     if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:

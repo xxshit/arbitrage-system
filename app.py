@@ -241,6 +241,28 @@ class DailyHornSignal(db.Model):
     __table_args__ = (db.UniqueConstraint("report_date", "symbol", "timeframe", name="uq_daily_horn_signal"),)
 
 
+class EarlyTrendSignal(db.Model):
+    """30 分钟早期启动与强启动信号；阶段判断单独存表，避免被结构分覆盖。"""
+    id = db.Column(db.Integer, primary_key=True)
+    report_date = db.Column(db.String(10), nullable=False, index=True)
+    symbol = db.Column(db.String(30), nullable=False, index=True)
+    signal_type = db.Column(db.String(20), nullable=False, index=True)
+    stage_key = db.Column(db.String(24), nullable=False)
+    stage_label = db.Column(db.String(60), nullable=False)
+    stage_number = db.Column(db.Integer, nullable=False, default=0)
+    stage_reason = db.Column(db.String(500), nullable=False)
+    price_change_5 = db.Column(db.Float, nullable=False)
+    cvd_change_5 = db.Column(db.Float, nullable=False)
+    oi_change_5 = db.Column(db.Float, nullable=False)
+    ratio_change_5 = db.Column(db.Float, nullable=False)
+    prior_price_change = db.Column(db.Float)
+    prior_range = db.Column(db.Float)
+    volume_ratio = db.Column(db.Float)
+    last_price = db.Column(db.Float)
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    __table_args__ = (db.UniqueConstraint("report_date", "symbol", name="uq_early_trend_signal"),)
+
+
 class LarkPushState(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     channel = db.Column(db.String(40), nullable=False)
@@ -2569,6 +2591,82 @@ def fetch_liquidation_summary(symbol, lookback_minutes=240):
     return {"total_quote": long_quote + short_quote, "long_quote": long_quote, "short_quote": short_quote, "count": len(payload or []), "available": True}
 
 
+def classify_early_trend_stage(closed, oi_rows, ratio_rows):
+    """识别启动前蓄势与已启动阶段；强信号按最近 5 根 30M 整体首尾涨幅判断。"""
+    if len(closed) < 25 or len(oi_rows) < 5 or len(ratio_rows) < 5:
+        return None
+    recent = closed[-5:]
+    prior = closed[-25:-5]
+    recent_oi = oi_rows[-5:]
+    recent_ratio = ratio_rows[-5:]
+    first_open = float(recent[0][1])
+    last_close = float(recent[-1][4])
+    price_change = percent_delta(last_close, first_open)
+    oi_change = percent_delta(
+        float(recent_oi[-1].get("sumOpenInterest", 0) or 0),
+        float(recent_oi[0].get("sumOpenInterest", 0) or 0),
+    )
+    ratio_change = percent_delta(
+        float(recent_ratio[-1].get("longShortRatio", 0) or 0),
+        float(recent_ratio[0].get("longShortRatio", 0) or 0),
+    )
+    if None in (price_change, oi_change, ratio_change):
+        return None
+    cvd_change = sum(2 * float(row[10]) - float(row[7]) for row in recent)
+    recent_volume = sum(float(row[7]) for row in recent)
+    prior_average_5 = (sum(float(row[7]) for row in prior) / len(prior) * 5) if prior else None
+    volume_ratio = recent_volume / prior_average_5 if prior_average_5 else None
+    prior_change = percent_delta(float(prior[-1][4]), float(prior[-10][1])) if len(prior) >= 10 else None
+    prior_low = min(float(row[3]) for row in prior)
+    prior_high = max(float(row[2]) for row in prior)
+    prior_range = percent_delta(prior_high, prior_low)
+    horn = oi_change > 0 and ratio_change < 0
+    cvd_up = cvd_change > 0
+
+    # 用户指定的强看多入口：不是逐根相加，而是第一根开盘到第五根收盘的整体涨幅。
+    if price_change >= 50 and horn and cvd_up:
+        latest = recent[-1]
+        body_high = max(float(latest[1]), float(latest[4]))
+        upper_wick = percent_delta(float(latest[2]), body_high) or 0
+        oi_values = [float(row.get("sumOpenInterest", 0) or 0) for row in recent_oi]
+        oi_drawdown = percent_delta(oi_values[-1], max(oi_values)) or 0
+        if (volume_ratio or 0) >= 4 and (upper_wick >= 12 or oi_drawdown <= -8):
+            stage_key, stage_label, stage_number = "overheated", "过热换手期 · 第4阶段", 4
+            reason = "5根已强涨且末端巨量/上影或持仓回落，趋势仍强，但已进入换手与派发风险区。"
+        elif (prior_change or 0) <= 15 and (prior_range or 999) <= 28:
+            stage_key, stage_label, stage_number = "ignition", "启动初期 · 第1阶段点火", 1
+            reason = "前20根以压缩整理为主，本轮5根是首次明显突破，属于刚从蓄势切入主升。"
+        elif (prior_change or 0) <= 70:
+            stage_key, stage_label, stage_number = "acceleration", "主升加速 · 第2阶段", 2
+            reason = "前置K线已有一段抬升，本轮5根再次放大，属于第二段加速而非最早起涨点。"
+        else:
+            stage_key, stage_label, stage_number = "late_main", "主升后段 · 第3阶段或更后", 3
+            reason = "本轮之前价格已经明显上涨，当前是趋势延续确认，不应再标成启动初期。"
+        return {
+            "signal_type": "strong_focus", "stage_key": stage_key, "stage_label": stage_label,
+            "stage_number": stage_number, "stage_reason": reason, "price_change_5": price_change,
+            "cvd_change_5": cvd_change, "oi_change_5": oi_change, "ratio_change_5": ratio_change,
+            "prior_price_change": prior_change, "prior_range": prior_range,
+            "volume_ratio": volume_ratio, "last_price": last_close,
+        }
+
+    # 真正的启动前观察：价格尚未大涨，但合约仓位与人数结构已经先形成犄角，CVD 开始积累。
+    if (
+        -5 <= price_change <= 15 and oi_change >= 5 and ratio_change <= -5 and cvd_up
+        and (prior_range or 999) <= 25 and (volume_ratio or 0) >= 1.15
+    ):
+        return {
+            "signal_type": "prelaunch", "stage_key": "prelaunch",
+            "stage_label": "启动前蓄势 · 第0阶段", "stage_number": 0,
+            "stage_reason": "价格仍在压缩区，持仓先增、人数比先降、CVD先累积；这是前置观察，不等于已经确认拉升。",
+            "price_change_5": price_change, "cvd_change_5": cvd_change,
+            "oi_change_5": oi_change, "ratio_change_5": ratio_change,
+            "prior_price_change": prior_change, "prior_range": prior_range,
+            "volume_ratio": volume_ratio, "last_price": last_close,
+        }
+    return None
+
+
 def fetch_horn_metrics(symbol, timeframe):
     raw_symbol = symbol.replace("/", "")
     try:
@@ -2596,7 +2694,10 @@ def fetch_horn_metrics(symbol, timeframe):
         ratio_structure_score = directional_consistency([row.get("longShortRatio", 0) for row in ratios], "down") * 10
         cvd_score = 6 if cvd_change > 0 else 0
         score = price_score + price_structure_score + oi_score + oi_structure_score + ratio_score + ratio_structure_score + cvd_score
-        return {"symbol": symbol, "timeframe": timeframe, "price_change": price_change, "oi_change": oi_change, "oi_value": oi_value, "ratio_change": ratio_change, "ratio_value": ratio_value, "cvd_change": cvd_change, "cvd_confirmed": cvd_change > 0, "score": round(score, 1)}
+        result = {"symbol": symbol, "timeframe": timeframe, "price_change": price_change, "oi_change": oi_change, "oi_value": oi_value, "ratio_change": ratio_change, "ratio_value": ratio_value, "cvd_change": cvd_change, "cvd_confirmed": cvd_change > 0, "score": round(score, 1)}
+        if timeframe == "30m":
+            result["early_trend"] = classify_early_trend_stage(closed, oi, ratios)
+        return result
     except Exception:
         return None
 
@@ -2731,12 +2832,15 @@ def scan_daily_horn_signals():
             candidates.append((priority, group["symbol"], timeframe))
     candidates = sorted(candidates, reverse=True)[:360]
     signals = []
+    early_signals = []
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(fetch_horn_metrics, symbol, timeframe) for _, symbol, timeframe in candidates]
         for future in as_completed(futures):
             item = future.result()
+            if item and item.get("early_trend"):
+                early_signals.append({"symbol": item["symbol"], **item["early_trend"]})
             if item and item["oi_change"] > 0 and item["ratio_change"] < 0 and item["score"] >= 42:
-                signals.append(item)
+                signals.append({key: value for key, value in item.items() if key != "early_trend"})
     continuation_symbols = []
     seen_symbols = set()
     for _, symbol, _ in candidates:
@@ -2751,21 +2855,35 @@ def scan_daily_horn_signals():
                 signals.append(item)
     report_date = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
     DailyHornSignal.query.filter_by(report_date=report_date).delete()
+    EarlyTrendSignal.query.filter_by(report_date=report_date).delete()
     selected = [item for timeframe in ("30m", "4h", "continue") for item in sorted((value for value in signals if value["timeframe"] == timeframe), key=lambda value: value["score"], reverse=True)[:20]]
+    for early in early_signals:
+        selected.append({
+            "symbol": early["symbol"], "timeframe": "focus",
+            "price_change": early["price_change_5"], "oi_change": early["oi_change_5"],
+            "oi_value": None, "ratio_change": early["ratio_change_5"], "ratio_value": None,
+            "cvd_change": early["cvd_change_5"], "cvd_confirmed": early["cvd_change_5"] > 0,
+            "score": 100.0 if early["signal_type"] == "strong_focus" else 68.0,
+        })
     for item in selected:
         db.session.add(DailyHornSignal(report_date=report_date, **item))
+    for item in sorted(early_signals, key=lambda value: (value["signal_type"] == "strong_focus", value["price_change_5"]), reverse=True)[:30]:
+        db.session.add(EarlyTrendSignal(report_date=report_date, **item))
     db.session.commit()
-    return len(selected)
+    return len(selected) + len(early_signals)
 
 
 def daily_lark_trend_candidates(report_date):
+    early_map = {item.symbol: item for item in EarlyTrendSignal.query.filter_by(report_date=report_date).all()}
     grouped = {}
     for item in DailyHornSignal.query.filter_by(report_date=report_date).order_by(DailyHornSignal.score.desc()).all():
         grouped.setdefault(item.symbol, []).append(item)
     candidates = []
     for symbol, items in grouped.items():
         primary = max(items, key=lambda item: item.score)
-        resonance = primary.score + (12 if len(items) > 1 else 0)
+        early = early_map.get(symbol)
+        early_bonus = 120 if early and early.signal_type == "strong_focus" else (25 if early else 0)
+        resonance = primary.score + (12 if len(items) > 1 else 0) + early_bonus
         candidates.append((resonance, symbol, items))
     return sorted(candidates, reverse=True)[:3]
 
@@ -2784,10 +2902,11 @@ def trend_key_levels(symbol, timeframe):
 
 def compact_trend_judgement(items, support, resistance):
     frames = {item.timeframe: item for item in items}
-    primary = frames.get("4h") or frames.get("30m") or frames.get("continue")
+    primary = frames.get("focus") or frames.get("4h") or frames.get("30m") or frames.get("continue")
     short = frames.get("30m")
     long = frames.get("4h")
     continuation = frames.get("continue")
+    focus = frames.get("focus")
     resonance = len(items) > 1
     cvd_ok = all(item.cvd_confirmed for item in items)
     strong = primary.score >= 85
@@ -2795,7 +2914,9 @@ def compact_trend_judgement(items, support, resistance):
     ratio_drop = primary.ratio_change or 0
     oi_text = f"持仓增加 {primary.oi_change:+.1f}%"
     ratio_text = f"多空人数比下降 {abs(ratio_drop):.1f}%"
-    if continuation and not (short or long):
+    if focus:
+        core = "最近5根30M整体涨幅、CVD与犄角结构同时满足重点条件；方向偏多，但必须结合前置K线判断是首次点火还是后段加速。"
+    elif continuation and not (short or long):
         core = "犄角延续型：前期持仓爆发后仍保留大部分仓位，多空人数比继续压低，价格结构仍在延续。"
     elif resonance and cvd_ok and strong:
         core = f"30M 与 4H 同时共振，{oi_text}、{ratio_text}，主动买入也在跟，属于比较标准的犄型主升结构。"
@@ -2941,7 +3062,7 @@ def send_daily_lark_trend_report():
     hydrated = False
     for index, (resonance, symbol, items) in enumerate(candidates, 1):
         for item in items:
-            if item.oi_value is None or item.ratio_value is None:
+            if item.timeframe != "focus" and (item.oi_value is None or item.ratio_value is None):
                 fresh = fetch_horn_continuation_metrics(symbol) if item.timeframe == "continue" else fetch_horn_metrics(symbol, item.timeframe)
                 if fresh:
                     item.oi_value = fresh.get("oi_value")
@@ -2960,7 +3081,7 @@ def send_daily_lark_trend_report():
 
         def metric_line(timeframe):
             item = rows.get(timeframe)
-            label = "延续" if timeframe == "continue" else timeframe.upper()
+            label = "延续" if timeframe == "continue" else ("5根重点" if timeframe == "focus" else timeframe.upper())
             if not item:
                 return f"近{label}：暂无完整结构"
             price_color = lark_signed_color(item.price_change)
@@ -2976,7 +3097,10 @@ def send_daily_lark_trend_report():
         short_item = rows.get("30m")
         long_item = rows.get("4h")
         continue_item = rows.get("continue")
-        if short_item and long_item:
+        early_stage = EarlyTrendSignal.query.filter_by(report_date=report_date, symbol=symbol).first()
+        if early_stage:
+            setup_title = early_stage.stage_label
+        elif short_item and long_item:
             setup_title = "双周期犄型共振"
         elif long_item:
             setup_title = "4H 主结构成立，30M 等回踩确认"
@@ -2987,9 +3111,10 @@ def send_daily_lark_trend_report():
         levels_text = f"向下看 {support:.6g}｜向上看 {resistance:.6g}" if support and resistance else "关键位暂未同步"
         sections.append("\n".join([
             f"{lark_dot_label('↑ 看涨 / ' + ('较强' if resonance >= 85 else '观察'), 'cus-bull')}",
-            f"**{index}. {symbol}**　{lark_dot_label(f'结构分 {resonance:.1f}', lark_score_color(resonance))}",
+            f"**{index}. {symbol}**　{lark_dot_label('重点启动信号' if early_stage and early_stage.signal_type == 'strong_focus' else f'结构分 {resonance:.1f}', 'cus-bull' if early_stage and early_stage.signal_type == 'strong_focus' else lark_score_color(resonance))}",
             f"结构：{setup_title}",
             f"时间：{report_date} 08:00",
+            metric_line("focus") if "focus" in rows else "",
             metric_line("30m"),
             metric_line("4h"),
             metric_line("continue") if "continue" in rows else "",
@@ -3027,7 +3152,7 @@ def mark_lark_daily_trend_pushed(report_date):
 def daily_report_trends():
     snapshot = load_latest_market_snapshot()
     if not snapshot:
-        return jsonify({"updated_at": None, "rising": [], "falling": [], "horn_30m": [], "horn_4h": [], "horn_continue": []})
+        return jsonify({"updated_at": None, "rising": [], "falling": [], "horn_30m": [], "horn_4h": [], "horn_continue": [], "early_focus": []})
     enrich_price_changes(snapshot["symbols"])
     rows = [
         {"symbol": group["symbol"], "change_24h": group["rows"][0].get("change_24h"), "change_7d": group["rows"][0].get("change_7d")}
@@ -3036,8 +3161,20 @@ def daily_report_trends():
     valid = [item for item in rows if item["change_24h"] is not None]
     report_date = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
     horn_rows = DailyHornSignal.query.filter_by(report_date=report_date).order_by(DailyHornSignal.score.desc()).all()
+    early_rows = EarlyTrendSignal.query.filter_by(report_date=report_date).order_by(
+        EarlyTrendSignal.stage_number.asc(), EarlyTrendSignal.price_change_5.desc()
+    ).all()
     signal_payload = lambda item: {"symbol": item.symbol, "timeframe": item.timeframe, "price_change": item.price_change, "oi_change": item.oi_change, "oi_value": item.oi_value, "ratio_change": item.ratio_change, "ratio_value": item.ratio_value, "cvd_confirmed": item.cvd_confirmed, "score": item.score}
-    return jsonify({"updated_at": snapshot["updated_at"], "rising": sorted(valid, key=lambda item: item["change_24h"], reverse=True)[:20], "falling": sorted(valid, key=lambda item: item["change_24h"])[:20], "horn_30m": [signal_payload(item) for item in horn_rows if item.timeframe == "30m"], "horn_4h": [signal_payload(item) for item in horn_rows if item.timeframe == "4h"], "horn_continue": [signal_payload(item) for item in horn_rows if item.timeframe == "continue"], "automation_status": automation_statuses("daily_horn_scan", "daily_lark_trend_push")})
+    early_payload = lambda item: {
+        "symbol": item.symbol, "signal_type": item.signal_type, "stage_key": item.stage_key,
+        "stage_label": item.stage_label, "stage_number": item.stage_number,
+        "stage_reason": item.stage_reason, "price_change_5": item.price_change_5,
+        "cvd_change_5": item.cvd_change_5, "oi_change_5": item.oi_change_5,
+        "ratio_change_5": item.ratio_change_5, "prior_price_change": item.prior_price_change,
+        "prior_range": item.prior_range, "volume_ratio": item.volume_ratio,
+        "last_price": item.last_price,
+    }
+    return jsonify({"updated_at": snapshot["updated_at"], "rising": sorted(valid, key=lambda item: item["change_24h"], reverse=True)[:20], "falling": sorted(valid, key=lambda item: item["change_24h"])[:20], "horn_30m": [signal_payload(item) for item in horn_rows if item.timeframe == "30m"], "horn_4h": [signal_payload(item) for item in horn_rows if item.timeframe == "4h"], "horn_continue": [signal_payload(item) for item in horn_rows if item.timeframe == "continue"], "early_focus": [early_payload(item) for item in early_rows], "automation_status": automation_statuses("daily_horn_scan", "daily_lark_trend_push")})
 
 
 THOUGHT_WATCHLIST = {
@@ -4659,6 +4796,36 @@ def thought_era_item(era):
     }
 
 
+def early_trend_thought_item(row):
+    strong = row.signal_type == "strong_focus"
+    stage_note = f"【{row.stage_label}】{row.stage_reason}"
+    return {
+        "symbol": row.symbol, "trade_side": "观察", "trade_status": row.stage_label,
+        "entry": None, "entry_time": row.created_at.strftime("%Y-%m-%d %H:%M"),
+        "exit": None, "exit_time": None, "last": row.last_price, "profit_pct": None,
+        "realized_profit_pct": None, "support": None, "resistance": None,
+        "oi_value": None, "oi_change_pct": row.oi_change_5, "ratio_value": None,
+        "ratio_change_pct": row.ratio_change_5, "cvd": row.cvd_change_5,
+        "change_30m": row.price_change_5, "change_4h": None,
+        "funding_rate": None, "basis": None,
+        "validation": {"30m": {"price_change": row.price_change_5, "oi_change": row.oi_change_5,
+            "ratio_change": row.ratio_change_5, "cvd": row.cvd_change_5, "volume": None}},
+        "source": "live", "screenshot_url": None, "stage_label": row.stage_label,
+        "thought_summary": stage_note,
+        "user_mistakes": ["强看多假设不等于可以忽略追高风险；阶段越靠后，越需要防高位换手。"],
+        "assistant_mistakes": ["不能再用统一结构分决定去留；本条由5根整体涨幅、CVD与犄角条件直接触发。"],
+        "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "新信号待盯盘验证，暂不计胜负。"},
+        "my_thesis": "你的判断：最近5根30分钟K线整体涨幅超过50%，同期CVD上涨，持仓上涨而多空人数比下跌时，属于强看多重点；同时要用前置K线判断启动阶段。",
+        "assistant_thesis": ("我的判断：该组合已经确认趋势启动，不能再叫启动前；重点是区分首次点火、第二段加速和后段过热。" if strong else
+            "我的判断：价格尚未明显启动，但持仓、人数比和CVD已经先行，属于启动前蓄势观察；仍需等待价格与成交量确认。"),
+        "challenge_points": ["5根整体涨幅按第一根开盘到第五根收盘计算，不把每根百分比机械相加。"],
+        "validation_view": f"5根价格 {row.price_change_5:+.2f}% · 持仓 {row.oi_change_5:+.2f}% · 人数比 {row.ratio_change_5:+.2f}% · 量能 {row.volume_ratio or 0:.2f}倍。",
+        "take_profit": ["先作为重点分析对象，不自动给追涨入场；结合阶段、回踩承接和放量质量再制定交易计划。"],
+        "stop_loss": ["若持仓快速回落、人数比明显回升、CVD转负且价格跌回点火区，本次强看多假设降级。"],
+        "review_notes": [stage_note, "后续持续记录阶段判断是否正确，并按真实走势修正阶段模型。"],
+    }
+
+
 @app.get("/api/daily-report/thoughts")
 def daily_report_thoughts():
     ake = thought_fast_snapshot("AKE/USDT")
@@ -4667,7 +4834,7 @@ def daily_report_thoughts():
     tlm = thought_fast_snapshot("TLM/USDT")
     era = thought_fast_snapshot("ERA/USDT")
     ake_support = ake.get("support") or ake["entry"] * 0.99
-    return jsonify({
+    payload = {
         "updated_at": ake["updated_at"],
         "items": [{
             "symbol": ake["symbol"],
@@ -4738,7 +4905,20 @@ def daily_report_thoughts():
                 "后续验证：如果价格创新高但 CVD 不再创新高，或者 OI 上升但价格滞涨，要把判断从吸筹延续切换为高位换手/派发风险。",
             ],
         }, thought_us_item(us), thought_t_item(t), thought_tlm_item(tlm), thought_era_item(era)]
-    })
+    }
+    report_date = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
+    focus_rows = EarlyTrendSignal.query.filter_by(report_date=report_date).order_by(
+        EarlyTrendSignal.stage_number.asc(), EarlyTrendSignal.price_change_5.desc()
+    ).limit(20).all()
+    existing = {item["symbol"]: item for item in payload["items"]}
+    for row in focus_rows:
+        if row.symbol in existing:
+            existing[row.symbol]["stage_label"] = row.stage_label
+            existing[row.symbol]["trade_status"] = row.stage_label
+            existing[row.symbol]["thought_summary"] = f"【{row.stage_label}】{row.stage_reason} " + existing[row.symbol]["thought_summary"]
+        else:
+            payload["items"].append(early_trend_thought_item(row))
+    return jsonify(payload)
 
 
 @app.get("/api/daily-report/listings")

@@ -3501,14 +3501,10 @@ def tlm_trap_short_direction(analysis):
     return None
 
 
-def rising_turnover_short_direction(analysis):
-    """主升后换手盯盘：基差领先、资费跟随，最终由价格与资金结构确认。"""
-    if analysis.get("symbol") not in {"SOON/USDT", "ZAMA/USDT"} or analysis.get("source") != "live":
-        return None
+def turnover_structure_features(analysis):
+    """Shared measurements only; SOON and ZAMA interpret them with separate hypotheses."""
     funding = analysis.get("funding_rate")
     basis = analysis.get("basis")
-    if funding is None or basis is None:
-        return None
     validation = analysis.get("validation") or {}
     micro = analysis.get("micro_validation") or {}
 
@@ -3525,20 +3521,64 @@ def rising_turnover_short_direction(analysis):
     oi_unwinds = sum(value(row, "oi_change") < -0.25 for row in short_rows) >= 1
     ratio_chases_long = sum(value(row, "ratio_change") > 0.35 for row in short_rows) >= 1
     volume_hot = max([value(row, "volume_ratio") for row in short_rows] or [0]) >= 1.35
+    medium_rows = [validation.get(key) or {} for key in ("30m", "1h", "4h")]
+    horn_price = sum(value(row, "price_change") > 0 for row in medium_rows) >= 2
+    horn_oi = sum(value(row, "oi_change") > 0 for row in medium_rows) >= 2
+    horn_ratio = sum(value(row, "ratio_change") < 0 for row in medium_rows) >= 2
+    horn_cvd = sum(value(row, "cvd") > 0 for row in medium_rows) >= 2
+    return {
+        "funding": funding,
+        "basis": basis,
+        "price_stalls": price_stalls,
+        "cvd_weakens": cvd_weakens,
+        "oi_unwinds": oi_unwinds,
+        "ratio_chases_long": ratio_chases_long,
+        "volume_hot": volume_hot,
+        "bullish_horn": horn_price and horn_oi and horn_ratio and horn_cvd,
+    }
 
-    basis_negative = basis < 0
-    funding_followed = funding < 0
-    if not basis_negative:
+
+def soon_turnover_short_direction(analysis):
+    """SOON: monitor the destruction of its positive-premium main trend."""
+    if analysis.get("symbol") != "SOON/USDT" or analysis.get("source") != "live":
+        return None
+    features = turnover_structure_features(analysis)
+    funding, basis = features["funding"], features["basis"]
+    if funding is None or basis is None or basis >= 0:
         return None
     if not (TURNOVER_BASIS_STATE.get(analysis.get("symbol")) or {}).get("stable"):
         return None
-    # 基差是先行信号；资费是否跌到-1%不再作为硬门槛。
-    turnover_confirmed = price_stalls and cvd_weakens and (oi_unwinds or ratio_chases_long or volume_hot)
+    turnover_confirmed = features["price_stalls"] and features["cvd_weakens"] and (
+        features["oi_unwinds"] or features["ratio_chases_long"] or features["volume_hot"]
+    )
     if turnover_confirmed:
-        return "turnover_short_ready"
-    if funding_followed:
-        return "turnover_funding_follow_watch"
-    return "turnover_basis_negative_watch"
+        return "soon_turnover_short_ready"
+    if funding < 0:
+        return "soon_funding_follow_watch"
+    return "soon_basis_negative_watch"
+
+
+def zama_turnover_short_direction(analysis):
+    """ZAMA: negative basis can coexist with a bullish horn, so protect against squeezing first."""
+    if analysis.get("symbol") != "ZAMA/USDT" or analysis.get("source") != "live":
+        return None
+    features = turnover_structure_features(analysis)
+    funding, basis = features["funding"], features["basis"]
+    if funding is None or basis is None or basis >= 0:
+        return None
+    if not (TURNOVER_BASIS_STATE.get(analysis.get("symbol")) or {}).get("stable"):
+        return None
+    # ZAMA当前最重要的反证：负基差存在，但中周期仍是持仓增、人数比降、CVD涨的偏多犄角。
+    if features["bullish_horn"]:
+        return "zama_negative_basis_bullish_horn"
+    turnover_confirmed = features["price_stalls"] and features["cvd_weakens"] and (
+        features["oi_unwinds"] or features["ratio_chases_long"] or features["volume_hot"]
+    )
+    if turnover_confirmed:
+        return "zama_turnover_short_ready"
+    if funding < 0:
+        return "zama_funding_follow_watch"
+    return "zama_basis_negative_watch"
 
 
 def era_squeeze_direction(analysis):
@@ -3701,9 +3741,10 @@ def thought_push_direction(analysis):
     era_direction = era_squeeze_direction(analysis)
     if symbol == "ERA/USDT":
         return era_direction
-    turnover_direction = rising_turnover_short_direction(analysis)
-    if symbol in {"SOON/USDT", "ZAMA/USDT"}:
-        return turnover_direction
+    if symbol == "SOON/USDT":
+        return soon_turnover_short_direction(analysis)
+    if symbol == "ZAMA/USDT":
+        return zama_turnover_short_direction(analysis)
     tlm_direction = tlm_trap_short_direction(analysis)
     if tlm_direction:
         return tlm_direction
@@ -3778,7 +3819,11 @@ def thought_signal_key(analysis, direction):
     last = analysis.get("last") or 0
     resistance = analysis.get("resistance") or 0
     support = analysis.get("support") or 0
-    if direction in {"turnover_basis_negative_watch", "turnover_funding_follow_watch", "turnover_short_ready"}:
+    if direction in {
+        "soon_basis_negative_watch", "soon_funding_follow_watch", "soon_turnover_short_ready",
+        "zama_basis_negative_watch", "zama_funding_follow_watch", "zama_turnover_short_ready",
+        "zama_negative_basis_bullish_horn",
+    }:
         basis = analysis.get("basis") or 0
         if basis <= -2.0:
             basis_zone = "below-minus-200"
@@ -4180,25 +4225,12 @@ def thought_lark_era_message(analysis, direction):
     ])
 
 
-def thought_lark_turnover_message(analysis, direction):
+def thought_lark_turnover_body(analysis, header, title, judgement, key_note):
     symbol = analysis["symbol"]
-    coin = symbol.split("/")[0]
     micro = analysis.get("micro_validation") or {}
     validation = analysis.get("validation") or {}
     funding = analysis.get("funding_rate")
     basis = analysis.get("basis")
-    if direction == "turnover_basis_negative_watch":
-        header = "方向：<font color='orange'>●● 🟠⬇️ 基差先行转负 / 换手观察</font>"
-        title = f"{coin}思路盯盘：合约率先转为贴水，资费尚在跟随阶段"
-        judgement = "判断：基差已经由正转负，这是用户定义的主升后换手先行信号。这里只先提醒并观察，不直接开空；重点看资费是否随后下移，以及价格、CVD、持仓和人数比是否从强势推进转成滞涨换手。"
-    elif direction == "turnover_funding_follow_watch":
-        header = "方向：<font color='cus-bear'>●● 🔴⬇️ 资费跟随转负 / 换手增强</font>"
-        title = f"{coin}思路盯盘：基差先负后资费跟负，换手证据增加"
-        judgement = "判断：基差先行转负后，资金费也已经跟随转负，说明合约贴水开始传导到持仓付费结构。资费跌到多少不再是硬门槛；继续等待价格滞涨、CVD转弱和仓位结构确认。"
-    else:
-        header = "方向：<font color='cus-bear'>●●● 🔴⬇️ 换手转弱 / 做空确认观察</font>"
-        title = f"{coin}思路盯盘：负基差后出现滞涨与主动卖出"
-        judgement = "判断：基差已经转负，同时短周期价格滞涨、CVD转弱，并伴随持仓退出、人数比追多或异常放量之一。这里比单纯贴水更接近主升后的换手做空窗口；资费若继续转负属于加分项，但不作为硬性要求。"
     recent_high = micro.get("recent_high")
     recent_low = micro.get("recent_low")
     return "\n".join([
@@ -4212,9 +4244,69 @@ def thought_lark_turnover_message(analysis, direction):
         thought_window_line(validation, "1H", "1h"),
         thought_window_line(validation, "2H", "2h"),
         f"判断：{judgement.removeprefix('判断：')}",
-        f"关键位：近1H高低区约 {lark_price_value(recent_low)} - {lark_price_value(recent_high)}。基差转负后若跌破近端低点且反抽收不回，做空确认增强；若放量突破近端高点，优先按主升/逼空延续处理。",
+        f"关键位：近1H高低区约 {lark_price_value(recent_low)} - {lark_price_value(recent_high)}。{key_note}",
         f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
     ])
+
+
+def thought_lark_soon_message(analysis, direction):
+    if direction == "soon_basis_negative_watch":
+        return thought_lark_turnover_body(
+            analysis,
+            "方向：<font color='orange'>●● 🟠⬇️ 正溢价破坏 / 基差转负观察</font>",
+            "SOON思路盯盘：持续正基差首次稳定转负",
+            "判断：SOON此前持续正基差、正资费，基差稳定转负代表原有合约溢价主升结构开始受损。这里只是第一道破坏信号，继续检查资费是否跟随，以及价格、CVD与持仓是否同步转弱。",
+            "跌破近端低点且反抽收不回，换手做空确认增强；若迅速修复基差并放量突破近端高点，按主升延续处理。",
+        )
+    if direction == "soon_funding_follow_watch":
+        return thought_lark_turnover_body(
+            analysis,
+            "方向：<font color='cus-bear'>●● 🔴⬇️ SOON资费跟随转负</font>",
+            "SOON思路盯盘：正溢价破坏开始传导到资金费",
+            "判断：SOON的基差先转负后，资费也跟随转负，原来持续正资费的主升结构进一步受损。仍需等待价格滞涨、主动卖出和仓位退出确认，不能只凭负资费追空。",
+            "反抽无法收回近端高点、CVD继续走弱时偏空增强；重新恢复正基差、正资费并创新高则否定换手假设。",
+        )
+    return thought_lark_turnover_body(
+        analysis,
+        "方向：<font color='cus-bear'>●●● 🔴⬇️ SOON换手转弱 / 做空确认观察</font>",
+        "SOON思路盯盘：正溢价主升结构破坏后出现滞涨卖出",
+        "判断：SOON在基差转负后，短周期价格滞涨、CVD转弱，并出现持仓退出、人数比追多或异常放量之一，已经比单纯贴水更接近主升后的换手做空窗口。",
+        "跌破近端低点且反抽无法收回才提高执行权重；重新放量创新高则立即降级空头假设。",
+    )
+
+
+def thought_lark_zama_message(analysis, direction):
+    if direction == "zama_negative_basis_bullish_horn":
+        return thought_lark_turnover_body(
+            analysis,
+            "方向：<font color='cus-bull'>●●● 🔵⬆️ 负基差但犄角偏多 / 防继续拉升</font>",
+            "ZAMA思路盯盘：合约贴水与偏多犄角形成背离",
+            "判断：ZAMA虽已稳定负基差，但30MIN/1H/4H仍以持仓增加、人数比下降、CVD上涨为主，说明新多与主动买入结构尚未破坏。负基差当前更像合约滞后或空头压力，不能直接解释成主力已经换手出货，先防继续上拉。",
+            "若价格、持仓和CVD继续创新高，维持偏多反证；只有CVD转弱、持仓退出并跌破近端低点，才把负基差升级为换手做空信号。",
+        )
+    if direction == "zama_funding_follow_watch":
+        return thought_lark_turnover_body(
+            analysis,
+            "方向：<font color='orange'>●● 🟠⬇️ ZAMA资费跟随转负 / 背离收敛</font>",
+            "ZAMA思路盯盘：基差先负后资费开始跟随",
+            "判断：ZAMA的资费已经开始跟随负基差，但是否完成换手仍取决于偏多犄角是否破坏。若价格、持仓和CVD依然强，继续防逼空；若它们同步转弱，做空权重才上升。",
+            "重点看偏多犄角是否失效；跌破近端低点且持仓/CVD转弱才算结构确认。",
+        )
+    if direction == "zama_turnover_short_ready":
+        return thought_lark_turnover_body(
+            analysis,
+            "方向：<font color='cus-bear'>●●● 🔴⬇️ ZAMA犄角破坏 / 换手做空观察</font>",
+            "ZAMA思路盯盘：负基差开始与价格和资金面转弱共振",
+            "判断：ZAMA不再只是负基差，短周期已出现滞涨、CVD转弱，并伴随持仓退出、人数比追多或异常放量，说明原偏多犄角正在破坏，才进入真正的换手做空观察。",
+            "跌破近端低点且反抽无力提高确认；若持仓和CVD快速修复，撤销做空升级。",
+        )
+    return thought_lark_turnover_body(
+        analysis,
+        "方向：<font color='orange'>●● 🟠⬇️ ZAMA负基差独立观察</font>",
+        "ZAMA思路盯盘：基差为负，但尚无完整换手确认",
+        "判断：ZAMA的负基差已经稳定存在，但它不能套用SOON的正溢价破坏逻辑。继续独立检查自身的价格、持仓、人数比和CVD，等待偏多结构真正失效。",
+        "若偏多犄角继续，防继续拉升；若主动卖出增强并跌破近端低点，再升级做空。",
+    )
 
 
 def ake_wall_bucket_line(wall):
@@ -4623,8 +4715,10 @@ def thought_lark_ake_structure_message(analysis, direction):
 def thought_lark_message(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         return thought_lark_t_message(analysis, direction)
-    if direction in {"turnover_basis_negative_watch", "turnover_funding_follow_watch", "turnover_short_ready"}:
-        return thought_lark_turnover_message(analysis, direction)
+    if direction in {"soon_basis_negative_watch", "soon_funding_follow_watch", "soon_turnover_short_ready"}:
+        return thought_lark_soon_message(analysis, direction)
+    if direction in {"zama_basis_negative_watch", "zama_funding_follow_watch", "zama_turnover_short_ready", "zama_negative_basis_bullish_horn"}:
+        return thought_lark_zama_message(analysis, direction)
     if direction in {"era_squeeze_probe", "era_squeeze_confirmed", "era_bounce_stall_short"}:
         return thought_lark_era_message(analysis, direction)
     if direction in AKE_STRUCTURE_DIRECTIONS:
@@ -5019,6 +5113,42 @@ def thought_turnover_item(item):
     }
 
 
+def thought_soon_item(soon):
+    item = thought_turnover_item(soon)
+    item.update({
+        "trade_status": "正溢价主升观察" if (soon.get("basis") or 0) >= 0 else item["trade_status"],
+        "thought_summary": "SOON独立盯盘：它此前长期保持正基差、正资费，当前核心不是看见一点回调就猜出货，而是观察持续正溢价何时稳定破坏。基差转负是第一阶段，资费跟随和价格/CVD/持仓转弱是后续确认。",
+        "my_thesis": "你的SOON思路：主升换手时基差会先转负，资费再跟随；系统要持续盯价格和资金面，等待真正换手后寻找做空机会。",
+        "assistant_thesis": "我的SOON判断：当前仍以正溢价主升为基准。人数比与价格、持仓一起上涨说明追涨账户增加，既可能继续推升，也提高后期换手风险；只有正基差稳定破坏并与主动卖出共振，才升级做空。",
+        "challenge_points": [
+            "SOON的核心基准是持续正资费、正基差，不能套用ZAMA已经负基差的解释。",
+            "人数比上涨表示更多账户偏多，后期若价格滞涨而持仓继续增加，才更像追多换手。",
+            "基差靠近零但没有连续转负时，只是溢价收窄，不等于结构已经破坏。",
+        ],
+        "validation_view": "SOON单独验证正溢价主升是否破坏：基差连续转负→资费跟随→价格/CVD/持仓转弱；任何一步重新修复都降低做空权重。",
+    })
+    return item
+
+
+def thought_zama_item(zama):
+    item = thought_turnover_item(zama)
+    basis = zama.get("basis")
+    funding = zama.get("funding_rate")
+    item.update({
+        "trade_status": "负基差 / 偏多犄角背离" if basis is not None and basis < 0 and (funding is None or funding >= 0) else item["trade_status"],
+        "thought_summary": "ZAMA独立盯盘：负基差已经出现，但当前中周期仍可见价格与持仓上升、人数比下降、CVD上涨的偏多犄角。这里先解释为合约滞后或空头压力与强势结构并存，不能因为贴水就直接认定主力已经出货。",
+        "my_thesis": "你的ZAMA要求：它的数据和走势与SOON不同，必须单独分析；继续盯基差、资费、币价、CVD、持仓、人数比和成交量，不能复制SOON结论。",
+        "assistant_thesis": "我的ZAMA判断：当前最重要的是负基差与偏多犄角的背离。若价格、持仓和CVD继续上升，负基差可能成为逼空燃料；只有CVD转弱、持仓退出并跌破近端结构，负基差才升级为换手做空证据。",
+        "challenge_points": [
+            "负基差是早期异常，不等于趋势已经转空；ZAMA当前偏多犄角仍是强反证。",
+            "1H价格小幅回落但持仓增加、人数比下降、CVD为正，更像承接或布多，尚非出货确认。",
+            "资费若转负但偏多犄角未破坏，仍需先防继续拉升和逼空。",
+        ],
+        "validation_view": "ZAMA单独验证负基差是否演化为换手：先检查偏多犄角是否失效，再看资费跟随和价格破位；犄角延续时禁止机械追空。",
+    })
+    return item
+
+
 def thought_era_item(era):
     return {
         "symbol": era["symbol"],
@@ -5188,7 +5318,7 @@ def daily_report_thoughts():
                 "需要修正：不能只盯多空人数比下跌；当前窗口首尾已经小幅回升，说明散户空头进一步拥挤的条件变弱。",
                 "后续验证：如果价格创新高但 CVD 不再创新高，或者 OI 上升但价格滞涨，要把判断从吸筹延续切换为高位换手/派发风险。",
             ],
-        }, thought_us_item(us), thought_t_item(t), thought_turnover_item(soon), thought_turnover_item(zama), thought_era_item(era)]
+        }, thought_us_item(us), thought_t_item(t), thought_soon_item(soon), thought_zama_item(zama), thought_era_item(era)]
     }
     report_date = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
     focus_rows = EarlyTrendSignal.query.filter_by(report_date=report_date).order_by(

@@ -699,6 +699,7 @@ AUTOMATION_LABELS = {
     "daily_horn_scan": "日报趋势扫描",
     "daily_lark_trend_push": "日报趋势推送",
     "thought_analysis_push": "思路分析盯盘推送",
+    "soon_extreme_funding_watch": "SOON极负资费监控",
     "transfer_network_sync": "充提网络同步",
     "index_component_sync": "指数成分同步",
 }
@@ -3204,10 +3205,10 @@ THOUGHT_WATCHLIST = {
         "side": "short",
         "fallback": {},
     },
-    "TLM/USDT": {
-        "entry": 0.0018855,
-        "entry_time": "2026-07-22 22:22 本地快照附近",
-        "side": "short",
+    "SOON/USDT": {
+        "entry": None,
+        "entry_time": "2026-07-28 等待负基差与极负资费换手",
+        "side": "short_watch",
         "fallback": {},
     },
     "ERA/USDT": {
@@ -3288,7 +3289,7 @@ def thought_snapshot(symbol):
             return {"price_change": price_change, "oi_change": oi_change, "ratio_change": ratio_change, "cvd": cvd_value, "volume": volume, "volume_ratio": volume_ratio}
         index_price = float(premium.get("indexPrice", 0) or 0)
         mark_price = float(premium.get("markPrice", 0) or 0)
-        micro_validation = fetch_t_micro_metrics(raw_symbol) if symbol in {"T/USDT", "AKE/USDT", "ERA/USDT"} else {}
+        micro_validation = fetch_t_micro_metrics(raw_symbol) if symbol in {"T/USDT", "AKE/USDT", "ERA/USDT", "SOON/USDT"} else {}
         orderbook_wall = fetch_ake_orderbook_wall(raw_symbol) if symbol == "AKE/USDT" else {}
         market_context = thought_market_context(symbol) or {}
         validation = {"30m": window_metrics(1), "1h": window_metrics(2), "2h": window_metrics(4), "4h": window_metrics(8)}
@@ -3491,6 +3492,43 @@ def tlm_trap_short_direction(analysis):
     return None
 
 
+def soon_turnover_short_direction(analysis):
+    """SOON 主升后换手盯盘：极负资费必须提醒，但不把空头拥挤机械等同于做空确认。"""
+    if analysis.get("symbol") != "SOON/USDT" or analysis.get("source") != "live":
+        return None
+    funding = analysis.get("funding_rate")
+    basis = analysis.get("basis")
+    if funding is None or basis is None:
+        return None
+    validation = analysis.get("validation") or {}
+    micro = analysis.get("micro_validation") or {}
+
+    def value(row, key, default=0):
+        item = (row or {}).get(key)
+        return default if item is None else item
+
+    m5 = micro.get("5m") or {}
+    m15 = micro.get("15m") or {}
+    m30 = validation.get("30m") or micro.get("30m") or {}
+    short_rows = [row for row in (m5, m15, m30) if row.get("price_change") is not None]
+    price_stalls = sum(value(row, "price_change") <= 0.15 for row in short_rows) >= 2
+    cvd_weakens = sum(value(row, "cvd") < 0 for row in short_rows) >= 2
+    oi_unwinds = sum(value(row, "oi_change") < -0.25 for row in short_rows) >= 1
+    ratio_chases_long = sum(value(row, "ratio_change") > 0.35 for row in short_rows) >= 1
+    volume_hot = max([value(row, "volume_ratio") for row in short_rows] or [0]) >= 1.35
+
+    both_negative = basis < 0 and funding < 0
+    extreme_funding = funding <= -1.0
+    # 用户要求的硬提醒阈值：基差、资费均为负，且资金费低于-1%。
+    # 若同时出现滞涨/主动卖出/仓位换手，升级为可执行的反手空观察。
+    if both_negative and extreme_funding:
+        turnover_confirmed = price_stalls and cvd_weakens and (oi_unwinds or ratio_chases_long or volume_hot)
+        return "soon_turnover_short_ready" if turnover_confirmed else "soon_extreme_negative_funding"
+    if both_negative:
+        return "soon_negative_basis_funding_watch"
+    return None
+
+
 def era_squeeze_direction(analysis):
     """ERA 两阶段盯盘：先抓拥挤空头的逼空反弹，再抓诱多停滞后的重新转弱。"""
     if analysis.get("symbol") != "ERA/USDT":
@@ -3643,7 +3681,7 @@ def thought_push_direction(analysis):
     # AKE/ERA are high-frequency narrative watches. A temporary exchange timeout
     # must not let a stale DB fallback flip their direction and generate a false
     # "new idea" push. Wait for the next complete live snapshot instead.
-    if symbol in {"AKE/USDT", "ERA/USDT"} and analysis.get("source") != "live":
+    if symbol in {"AKE/USDT", "ERA/USDT", "SOON/USDT"} and analysis.get("source") != "live":
         return None
     t_direction = t_micro_direction(analysis)
     if t_direction:
@@ -3651,6 +3689,9 @@ def thought_push_direction(analysis):
     era_direction = era_squeeze_direction(analysis)
     if symbol == "ERA/USDT":
         return era_direction
+    soon_direction = soon_turnover_short_direction(analysis)
+    if symbol == "SOON/USDT":
+        return soon_direction
     tlm_direction = tlm_trap_short_direction(analysis)
     if tlm_direction:
         return tlm_direction
@@ -3725,6 +3766,21 @@ def thought_signal_key(analysis, direction):
     last = analysis.get("last") or 0
     resistance = analysis.get("resistance") or 0
     support = analysis.get("support") or 0
+    if direction in {"soon_negative_basis_funding_watch", "soon_extreme_negative_funding", "soon_turnover_short_ready"}:
+        funding = analysis.get("funding_rate") or 0
+        if funding <= -2.0:
+            funding_zone = "below-minus-200"
+        elif funding <= -1.5:
+            funding_zone = "minus-150-200"
+        elif funding <= -1.25:
+            funding_zone = "minus-125-150"
+        elif funding <= -1.0:
+            funding_zone = "minus-100-125"
+        elif funding < 0:
+            funding_zone = "negative-watch"
+        else:
+            funding_zone = "positive"
+        return f"{direction}-{funding_zone}"
     if direction in {"era_squeeze_probe", "era_squeeze_confirmed", "era_bounce_stall_short"}:
         if last >= 0.0757:
             price_zone = "above-757"
@@ -4101,6 +4157,42 @@ def thought_lark_era_message(analysis, direction):
         thought_window_line(validation, "1H", "1h"),
         thought_window_line(validation, "2H", "2h"),
         judgement, key_zone,
+        f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
+    ])
+
+
+def thought_lark_soon_message(analysis, direction):
+    symbol = analysis["symbol"]
+    micro = analysis.get("micro_validation") or {}
+    validation = analysis.get("validation") or {}
+    funding = analysis.get("funding_rate")
+    basis = analysis.get("basis")
+    if direction == "soon_negative_basis_funding_watch":
+        header = "方向：<font color='orange'>●● 🟠 负基差/负资费换手观察</font>"
+        title = "SOON思路盯盘：合约开始转贴水，尚未到极负资费阈值"
+        judgement = "判断：基差与资费已经同时转负，说明合约情绪开始由主升偏多转向空头拥挤。这里只进入换手观察，不直接开空；继续等资费低于-1%，并检查价格是否滞涨、CVD是否转弱、持仓是否开始退出。"
+    elif direction == "soon_extreme_negative_funding":
+        header = "方向：<font color='cus-bear'>●●● 🔴⬇️ 极负资费立即提醒</font>"
+        title = "SOON思路盯盘：资金费低于-1%，进入重点换手区"
+        judgement = "判断：用户设定的硬阈值已经触发。极负资费代表空头拥挤、做空需要支付高额资金费，本身也可能成为继续逼空的燃料；若价格和CVD仍强，不机械追空，等待上涨停滞与换手证据。"
+    else:
+        header = "方向：<font color='cus-bear'>●●● 🔴⬇️ 换手转弱 / 做空确认观察</font>"
+        title = "SOON思路盯盘：极负资费后出现滞涨与主动卖出"
+        judgement = "判断：负基差、低于-1%的极负资费已经出现，同时短周期价格滞涨、CVD转弱，并伴随持仓退出、人数比追多或异常放量之一。这里比单纯极负资费更接近主升后的换手做空窗口，但仍要用价格跌破近端结构确认。"
+    recent_high = micro.get("recent_high")
+    recent_low = micro.get("recent_low")
+    return "\n".join([
+        header,
+        title,
+        f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"价格：{lark_price_value(analysis.get('last'))}｜BN基差：{lark_plain_value(basis, 4, '%')}｜BN资费：{lark_plain_value(funding, 4, '%')}",
+        t_micro_line(micro, "5MIN", "5m"),
+        t_micro_line(micro, "15MIN", "15m"),
+        thought_window_line(validation, "30MIN", "30m"),
+        thought_window_line(validation, "1H", "1h"),
+        thought_window_line(validation, "2H", "2h"),
+        f"判断：{judgement.removeprefix('判断：')}",
+        f"关键位：近1H高低区约 {lark_price_value(recent_low)} - {lark_price_value(recent_high)}。极负资费后若跌破近端低点且反抽收不回，做空确认增强；若放量突破近端高点，优先按逼空延续处理。",
         f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
     ])
 
@@ -4511,6 +4603,8 @@ def thought_lark_ake_structure_message(analysis, direction):
 def thought_lark_message(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         return thought_lark_t_message(analysis, direction)
+    if direction in {"soon_negative_basis_funding_watch", "soon_extreme_negative_funding", "soon_turnover_short_ready"}:
+        return thought_lark_soon_message(analysis, direction)
     if direction in {"era_squeeze_probe", "era_squeeze_confirmed", "era_bounce_stall_short"}:
         return thought_lark_era_message(analysis, direction)
     if direction in AKE_STRUCTURE_DIRECTIONS:
@@ -4839,6 +4933,73 @@ def thought_tlm_item(tlm):
     }
 
 
+def thought_soon_item(soon):
+    last = soon.get("last")
+    funding = soon.get("funding_rate")
+    basis = soon.get("basis")
+    both_negative = funding is not None and basis is not None and funding < 0 and basis < 0
+    extreme = both_negative and funding <= -1.0
+    if extreme:
+        status = "极负资费换手区"
+    elif both_negative:
+        status = "负基差/负资费观察"
+    else:
+        status = "等待换手做空"
+    support = soon.get("support") or (last * 0.94 if last else None)
+    resistance = soon.get("resistance") or (last * 1.06 if last else None)
+    return {
+        "symbol": soon["symbol"],
+        "trade_side": "等待做空",
+        "trade_status": status,
+        "entry": None,
+        "entry_time": soon.get("entry_time"),
+        "exit": None,
+        "exit_time": None,
+        "last": last,
+        "profit_pct": None,
+        "realized_profit_pct": None,
+        "support": support,
+        "resistance": resistance,
+        "oi_value": soon.get("oi_value"),
+        "oi_change_pct": soon.get("oi_change_pct"),
+        "ratio_value": soon.get("ratio_value"),
+        "ratio_change_pct": soon.get("ratio_change_pct"),
+        "cvd": soon.get("cvd"),
+        "change_30m": soon.get("change_30m"),
+        "change_4h": soon.get("change_4h"),
+        "funding_rate": funding,
+        "basis": basis,
+        "validation": soon.get("validation") or {},
+        "source": soon.get("source"),
+        "screenshot_url": None,
+        "thought_summary": "SOON 主升后换手做空观察：先盯BN基差与资金费由正转负；当两者均为负且资金费低于-1%时立即提醒。极负资费代表空头拥挤，也可能继续逼空，所以真正做空还要等待价格滞涨、CVD转弱以及持仓/人数结构出现换手。",
+        "user_mistakes": [
+            "两天上涨、CVD与持仓走强说明值得关注，但多空人数比会随观察窗口变化，不能把所有周期都概括成同步上涨。",
+            "资金费低于-1%会让空单承担很高的资金成本，也可能说明空头过度拥挤，不能仅凭极负资费直接追空。",
+        ],
+        "assistant_mistakes": [
+            "不能把极负资费机械解释成下跌确认；需要区分主力换手出货和利用拥挤空头继续逼空。",
+            "必须保留反证：价格继续放量创新高、CVD保持上涨且持仓继续增加时，做空窗口尚未成熟。",
+        ],
+        "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "SOON 为新增换手做空假设，等待真实盯盘验证。"},
+        "my_thesis": "你的思路：SOON 最近两天上涨明显，CVD、持仓与人数结构值得关注；后续若主升进入换手，基差和资金费会被打负。你希望基差、资金费同时为负且资金费低于-1%时立刻通知，等待换手后寻找做空机会。",
+        "assistant_thesis": "我的验证思路：先把信号拆成负基差/负资费观察、极负资费硬提醒、滞涨换手做空确认三层。极负资费先说明空头拥挤和合约贴水；只有价格滞涨、CVD转弱，并伴随持仓退出、人数比追多或异常放量之一，才更像主力高位换手完成。",
+        "challenge_points": [
+            "当前实时资金费约为正0.005%，基差也仍为正，尚未触发换手做空阈值。",
+            "24H人数比上涨，但48H首尾可能下降；后续推送必须注明具体周期，不再笼统写成全部上涨。",
+            "若资费极负但价格继续强势上破，先防逼空，不急着把高额付费空单当成便宜机会。",
+        ],
+        "validation_view": "后台5分钟做完整结构检查；基差与资费同时打负进入观察，资金费<=-1%触发硬提醒，随后继续验证滞涨、CVD、持仓和人数比是否构成换手做空。",
+        "take_profit": ["目前没有开仓，不预设盈利目标；形成换手确认后再根据当时放量区、近端低点和持仓结构制定。"],
+        "stop_loss": ["若做空观察后价格放量突破近端高点、CVD继续上升且持仓同步增长，按逼空延续处理，禁止机械追空。"],
+        "review_notes": [
+            "2026-07-28：停止TLM主动盯盘，新增SOON换手做空观察。",
+            "初始复核：近48H价格和CVD、持仓总体上涨；短周期已经出现价格/CVD回落，需要继续区分普通回调与高位换手。",
+            "硬提醒规则：BN基差<0、BN资金费<0且资金费<=-1%，在下一次实时监测中立即发送。",
+        ],
+    }
+
+
 def thought_era_item(era):
     return {
         "symbol": era["symbol"],
@@ -4934,7 +5095,7 @@ def daily_report_thoughts():
     ake = thought_fast_snapshot("AKE/USDT")
     us = thought_fast_snapshot("US/USDT")
     t = thought_fast_snapshot("T/USDT")
-    tlm = thought_fast_snapshot("TLM/USDT")
+    soon = thought_fast_snapshot("SOON/USDT")
     era = thought_fast_snapshot("ERA/USDT")
     ake_support = ake.get("support") or ake["entry"] * 0.99
     payload = {
@@ -5007,7 +5168,7 @@ def daily_report_thoughts():
                 "需要修正：不能只盯多空人数比下跌；当前窗口首尾已经小幅回升，说明散户空头进一步拥挤的条件变弱。",
                 "后续验证：如果价格创新高但 CVD 不再创新高，或者 OI 上升但价格滞涨，要把判断从吸筹延续切换为高位换手/派发风险。",
             ],
-        }, thought_us_item(us), thought_t_item(t), thought_tlm_item(tlm), thought_era_item(era)]
+        }, thought_us_item(us), thought_t_item(t), thought_soon_item(soon), thought_era_item(era)]
     }
     report_date = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
     focus_rows = EarlyTrendSignal.query.filter_by(report_date=report_date).order_by(
@@ -6122,6 +6283,42 @@ def background_thought_analysis_push():
         time.sleep(300)
 
 
+def background_soon_extreme_funding_watch():
+    """30秒轻量检查SOON资金费；只在跨入新的极负区间时启动完整盯盘推送。"""
+    time.sleep(12)
+    last_bucket = None
+    status_tick = 0
+    while True:
+        try:
+            update_status = status_tick % 10 == 0
+            if update_status:
+                with app.app_context():
+                    mark_automation_status("soon_extreme_funding_watch", "started")
+            premium = get_json("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=SOONUSDT", timeout=5)
+            funding = float(premium.get("lastFundingRate", 0) or 0) * 100
+            mark_price = float(premium.get("markPrice", 0) or 0)
+            index_price = float(premium.get("indexPrice", 0) or 0)
+            basis = percent_delta(mark_price, index_price) if index_price else None
+            if basis is not None and basis < 0 and funding <= -1.0:
+                bucket = int(abs(funding) // 0.25)
+                if bucket != last_bucket:
+                    with app.app_context():
+                        send_thought_analysis_push()
+                    last_bucket = bucket
+            else:
+                # 离开阈值后允许下一次重新跌破时再次即时提醒。
+                last_bucket = None
+            if update_status:
+                with app.app_context():
+                    mark_automation_status("soon_extreme_funding_watch", "success")
+        except Exception as exc:
+            with app.app_context():
+                db.session.rollback()
+                mark_automation_status("soon_extreme_funding_watch", "error", exc)
+        status_tick += 1
+        time.sleep(30)
+
+
 def start_background_workers():
     global BACKGROUND_WORKERS_STARTED
     if BACKGROUND_WORKERS_STARTED:
@@ -6136,6 +6333,7 @@ def start_background_workers():
     threading.Thread(target=background_daily_horn_scan, daemon=True, name="daily-horn-scan").start()
     threading.Thread(target=background_transfer_network_sync, daemon=True, name="transfer-network-sync").start()
     threading.Thread(target=background_thought_analysis_push, daemon=True, name="thought-analysis-push").start()
+    threading.Thread(target=background_soon_extreme_funding_watch, daemon=True, name="soon-extreme-funding-watch").start()
 
 
 if __name__ == "__main__":

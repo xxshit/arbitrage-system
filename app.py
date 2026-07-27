@@ -2168,6 +2168,11 @@ def live_dashboard_opportunities():
                 "sell_exchange": sell_exchange,
                 "buy_price": round(buy, 8),
                 "sell_price": round(sell, 8),
+                "exchange_prices": {
+                    "Binance": round(quotes["Binance"], 8) if "Binance" in quotes else None,
+                    "OKX": round(quotes["OKX"], 8) if "OKX" in quotes else None,
+                    "Bybit": round(quotes["Bybit"], 8) if "Bybit" in quotes else None,
+                },
                 "spread": round(spread, 4),
                 "estimated_profit": round(spread - 0.12, 4),
                 "funding": major.get("funding_rate") if major.get("funding_rate") is not None else 0,

@@ -6013,6 +6013,71 @@ def thought_era_item(era):
     }
 
 
+def thought_coti_item(coti):
+    """COTI 分周期研判：保留用户假设，同时显式展示反证条件。"""
+    current_basis = coti.get("basis")
+    current_funding = coti.get("funding_rate")
+    return {
+        "symbol": coti["symbol"],
+        "trade_side": "中长线看空 / 短线待确认",
+        "trade_status": "极端换手后分周期观察",
+        "entry": None,
+        "entry_time": "2026-07-29 00:44",
+        "exit": None,
+        "exit_time": None,
+        "last": coti.get("last"),
+        "profit_pct": None,
+        "realized_profit_pct": None,
+        "support": coti.get("support"),
+        "resistance": coti.get("resistance"),
+        "oi_value": coti.get("oi_value"),
+        "oi_change_pct": coti.get("oi_change_pct"),
+        "ratio_value": coti.get("ratio_value"),
+        "ratio_change_pct": coti.get("ratio_change_pct"),
+        "cvd": coti.get("cvd"),
+        "change_30m": coti.get("change_30m"),
+        "change_4h": coti.get("change_4h"),
+        "funding_rate": current_funding,
+        "basis": current_basis,
+        "validation": coti.get("validation") or {},
+        "source": coti.get("source"),
+        "screenshot_url": None,
+        "thought_summary": "COTI 当前不是立即追空信号：中长线保留换手后偏空假设，短线因持仓上升、人数比下降的偏多犄角尚未破坏而保持中性偏强观察。先等犄角失效，再判断主力是否从换手转入派发或新空建立。",
+        "user_mistakes": [
+            "需要防止把‘资费周期从4H缩短为1H’直接等同于主力已经完成换手。它能确认合约端失衡和风险升高，但不能单独确认随后必跌。",
+            "CVD持续下跌而价格抗跌时，不只代表卖压，也可能代表主动卖单被被动买盘吸收；若持仓继续增加、人数比继续下降，短线仍可能逼空。",
+        ],
+        "assistant_mistakes": [
+            "我不能把极负基差、极负资费机械翻译成做空信号；空头越拥挤，价格越抗跌，反向逼空风险反而越高。",
+            "后续必须分别统计短线、波段和中长线判断，不能用一个方向覆盖所有周期，也不能在短线犄角仍完整时提前宣布中长线剧本已经开始。",
+        ],
+        "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "COTI 为新增长周期假设，尚未完成验证；短线和中长线分开记分。"},
+        "my_thesis": "你的判断：COTI 中长线偏空、短线暂不确定。7月28日约05:00-08:00出现极负基差，结算前资费顶到负向上限，结算周期随后由4H缩短为1H，你把它理解为主力换手信号；同时CVD持续走低，说明主动卖出强于主动买入。你预计主力换手接近完成后，价格转跌，持仓和多空人数比会逐步出现与偏多犄角相反的结构。当前持仓上升、人数比下降的犄角仍在，因此不把短线直接判空。",
+        "assistant_thesis": "我的判断：你的中长线偏空假设有逻辑基础，但证据目前只够定义为‘高风险换手期’，还不够定义为‘出货完成’。短线先按中性偏强处理：若CVD下降但价格不跌、持仓增加且人数比下降，说明卖盘可能正在被承接，极负资费与负基差还会成为逼空燃料。中线转空要等偏多犄角破坏；长线看空则还需价格结构、持续派发和官方供给/解锁等证据补全。",
+        "challenge_points": [
+            "短线（5MIN-4H）：中性偏强。价格抗跌 + 持仓增加 + 人数比下降时，先防吸收卖盘后的逼空；CVD下跌只降低多头质量，不直接触发做空。",
+            "波段（1D-3D）：偏空观察。若价格跌破换手区低点后反抽失败，CVD继续下降，且偏多犄角同步破坏，才升级为可执行的空头窗口。",
+            "中长线（1W+）：看空假设。需要看到派发/平多或新空建立的连续结构，不能只用一次极端结算事件定论。",
+            "两条看空路径要区分：价格跌、持仓跌、人数比回升更像多头撤退；价格跌、持仓增、人数比回升且CVD跌更像新空建立。两者都偏空，但速度与反抽风险不同。",
+        ],
+        "validation_view": "验证顺序：先看价格能否继续抗住负CVD；再看持仓与人数比的偏多犄角是否破坏；最后看负基差/负资费下价格是否由抗跌转为跌破并反抽失败。只有三层依次成立，才把中长线看空转成实际做空信号。",
+        "take_profit": [
+            "当前没有空单，不设置机械止盈。出现做空确认后，第一目标应放在换手区低点或放量支撑，而不是凭固定百分比猜目标。",
+            "若未来价格下跌但持仓快速坍塌、负基差迅速收敛，可能只是集中平仓或爆仓，应先锁定利润，防止剧烈反抽。",
+        ],
+        "stop_loss": [
+            "空头假设降级：价格在CVD持续为负时仍不断抬高低点，持仓增加、人数比继续下降，负基差和负资费逐步修复。",
+            "若放量突破换手区高点且回踩不破，同时CVD由负转正，说明主动买入接管，短中线看空均暂时失效。",
+        ],
+        "review_notes": [
+            "2026-07-29：用户加入COTI盯盘，提出中长线看空、短线待确认的分周期假设。",
+            "数据库核验：2026-07-28 08:00结算资费为-2.0000%，随后09:00至次日00:00连续按1小时结算，确认极端失衡后结算周期由原8小时记录切为1小时；用户观察的4H→1H变化以盘面记录为准。",
+            f"当前数据库快照：价格约 {coti.get('last') or 0:.7f}，BN基差 {current_basis:+.4f}%（若有值），BN资费 {current_funding:+.4f}%（若有值）。当前历史结构数据因上游暂不可用，持仓变化、人数比与CVD沿用用户观察，恢复后再自动补证。" if current_basis is not None and current_funding is not None else "当前数据库仅保留部分行情快照；持仓变化、人数比和CVD待上游恢复后补证，不编造缺失值。",
+            "待验证：偏多犄角是否先破坏；负CVD下价格是否从抗跌转为失守；极负资费是换手出货证据，还是短线逼空燃料。",
+        ],
+    }
+
+
 def early_trend_thought_item(row):
     strong = row.signal_type == "strong_focus"
     stage_note = f"【{row.stage_label}】{row.stage_reason}"
@@ -6199,6 +6264,7 @@ def daily_report_thoughts():
     soon = thought_fast_snapshot("SOON/USDT")
     zama = thought_fast_snapshot("ZAMA/USDT")
     era = thought_fast_snapshot("ERA/USDT")
+    coti = thought_fast_snapshot("COTI/USDT")
     ake_support = ake.get("support") or ake["entry"] * 0.99
     payload = {
         "updated_at": ake["updated_at"],
@@ -6270,7 +6336,7 @@ def daily_report_thoughts():
                 "需要修正：不能只盯多空人数比下跌；当前窗口首尾已经小幅回升，说明散户空头进一步拥挤的条件变弱。",
                 "后续验证：如果价格创新高但 CVD 不再创新高，或者 OI 上升但价格滞涨，要把判断从吸筹延续切换为高位换手/派发风险。",
             ],
-        }, thought_us_item(us), thought_t_item(t), thought_soon_item(soon), thought_zama_item(zama), thought_era_item(era)]
+        }, thought_us_item(us), thought_t_item(t), thought_soon_item(soon), thought_zama_item(zama), thought_era_item(era), thought_coti_item(coti)]
     }
     report_date = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
     focus_rows = EarlyTrendSignal.query.filter_by(report_date=report_date).order_by(

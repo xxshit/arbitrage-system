@@ -3370,6 +3370,20 @@ def seed_thought_watches():
 def active_thought_symbols():
     return {row.symbol for row in ThoughtWatch.query.filter_by(active=True).all()}
 
+
+def thought_watch_config(symbol):
+    """Return a persistent generic configuration for symbols added from the web UI."""
+    config = THOUGHT_WATCHLIST.get(symbol)
+    if config is not None:
+        return config
+    row = ThoughtWatch.query.filter_by(symbol=symbol).first()
+    return {
+        "entry": None,
+        "entry_time": row.started_at.strftime("%Y-%m-%d %H:%M") if row else "网页新增盯盘",
+        "side": "watch",
+        "fallback": {},
+    }
+
 # 30秒基差监控连续确认状态。完整盯盘只接受已连续两次为负的基差，防止单点插针。
 TURNOVER_BASIS_STATE = {}
 # 换手方向切换候选：滚动K线在未收盘时会快速抖动，方向改变必须跨两次独立完整扫描。
@@ -3377,7 +3391,7 @@ TURNOVER_DIRECTION_CANDIDATES = {}
 
 
 def thought_snapshot(symbol):
-    config = THOUGHT_WATCHLIST[symbol]
+    config = thought_watch_config(symbol)
     raw_symbol = symbol.replace("/", "")
     entry = config.get("entry")
     entry_time = config.get("entry_time") or "重点观察"
@@ -3500,7 +3514,7 @@ def thought_snapshot_from_db(symbol, fallback):
 
 
 def thought_fast_snapshot(symbol):
-    config = THOUGHT_WATCHLIST[symbol]
+    config = thought_watch_config(symbol)
     now = datetime.now(SHANGHAI_TZ)
     fallback = {
         "symbol": symbol,
@@ -3532,7 +3546,28 @@ def thought_fast_snapshot(symbol):
 def thought_market_context(symbol):
     market_rows = LatestMarketSnapshot.query.filter_by(symbol=symbol).order_by(LatestMarketSnapshot.captured_at.desc()).all()
     if not market_rows:
-        return None
+        dual = LatestDualFuturesSnapshot.query.filter(
+            LatestDualFuturesSnapshot.symbol == symbol,
+            or_(LatestDualFuturesSnapshot.long_exchange == "Binance", LatestDualFuturesSnapshot.short_exchange == "Binance"),
+        ).order_by(LatestDualFuturesSnapshot.captured_at.desc()).first()
+        if not dual:
+            return None
+        binance_is_long = dual.long_exchange == "Binance"
+        bid = dual.long_bid if binance_is_long else dual.short_bid
+        ask = dual.long_ask if binance_is_long else dual.short_ask
+        futures_mid = ((bid or 0) + (ask or 0)) / 2 if bid and ask else None
+        return {
+            "last": futures_mid,
+            "oi_value": dual.long_open_interest if binance_is_long else dual.short_open_interest,
+            "funding_rate": dual.long_funding_rate if binance_is_long else dual.short_funding_rate,
+            "basis": dual.long_basis if binance_is_long else dual.short_basis,
+            "open_spread": dual.open_spread,
+            "close_spread": dual.close_spread,
+            "spot_volume": None,
+            "futures_volume": dual.long_volume if binance_is_long else dual.short_volume,
+            "futures_spot_volume_ratio": None,
+            "updated_at": dual.captured_at.strftime("%Y-%m-%d %H:%M:%S"),
+        }
     preferred = next((row for row in market_rows if row.long_exchange == "Binance"), None) or market_rows[0]
     futures_mid = ((preferred.short_bid or 0) + (preferred.short_ask or 0)) / 2 if preferred.short_bid and preferred.short_ask else None
     spot_volume = max([row.spot_volume or 0 for row in market_rows] or [0])
@@ -3558,7 +3593,7 @@ def ake_thought_snapshot():
 
 def thought_watch_snapshots(only_symbols=None):
     active_symbols = active_thought_symbols()
-    symbols = [symbol for symbol in THOUGHT_WATCHLIST if symbol in active_symbols and (not only_symbols or symbol in only_symbols)]
+    symbols = sorted(symbol for symbol in active_symbols if not only_symbols or symbol in only_symbols)
 
     def load_symbol(symbol):
         with app.app_context():
@@ -3666,7 +3701,7 @@ def turnover_structure_features(analysis):
     oi_unwinds = sum(value(row, "oi_change") < -0.25 for row in short_rows) >= 1
     ratio_chases_long = sum(value(row, "ratio_change") > 0.35 for row in short_rows) >= 1
     volume_hot = max([value(row, "volume_ratio") for row in short_rows] or [0]) >= 1.35
-    medium_rows = [validation.get(key) or {} for key in ("30m", "1h", "4h")]
+    medium_rows = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
     horn_price = sum(value(row, "price_change") > 0 for row in medium_rows) >= 2
     horn_oi = sum(value(row, "oi_change") > 0 for row in medium_rows) >= 2
     horn_ratio = sum(value(row, "ratio_change") < 0 for row in medium_rows) >= 2
@@ -3679,6 +3714,7 @@ def turnover_structure_features(analysis):
         "oi_unwinds": oi_unwinds,
         "ratio_chases_long": ratio_chases_long,
         "volume_hot": volume_hot,
+        "bullish_horn_core": horn_price and horn_oi and horn_ratio,
         "bullish_horn": horn_price and horn_oi and horn_ratio and horn_cvd,
     }
 
@@ -3697,6 +3733,10 @@ def soon_turnover_short_direction(analysis):
         return None
     if not (TURNOVER_BASIS_STATE.get(analysis.get("symbol")) or {}).get("stable"):
         return None
+    # 负基差只能说明合约短暂贴水。若1H/2H仍是价格涨、持仓涨、人数比跌的犄角核心，
+    # 先按主升延续的反证保护，不能被5MIN/15MIN回调误升级为做空确认。
+    if features["bullish_horn_core"]:
+        return "soon_basis_negative_watch"
     turnover_confirmed = features["price_stalls"] and features["cvd_weakens"] and (
         features["oi_unwinds"] or features["ratio_chases_long"] or features["volume_hot"]
     )
@@ -5376,6 +5416,24 @@ def thought_soon_item(soon):
         ],
         "validation_view": "SOON单独验证正溢价主升是否破坏：基差连续转负→资费跟随→价格/CVD/持仓转弱；任何一步重新修复都降低做空权重。",
     })
+    item["assistant_mistakes"] = [
+        "2026-07-28 20:17 的‘换手转弱/做空确认观察’属于阶段判断错误：当时只放大了5MIN/15MIN回落与混合CVD，却没有让1H/2H仍成立的价格上涨、持仓增加、人数比下降犄角拥有否决权。",
+        "当时基差仅约-0.12%，资费仍为+0.0337%，负基差幅度浅且没有传导到资费；它更可能是短时贴水或洗盘，证据不足以称为正溢价主升结构已经破坏。",
+        "推送后SOON由约0.2527继续上涨到约0.278附近，基差与资费重新转正，直接反证了当时的做空升级时点。",
+    ] + item.get("assistant_mistakes", [])
+    item["review_notes"] = item.get("review_notes", []) + [
+        "阶段复盘：SOON从20:17推送价约0.2527继续上涨，当前约0.278；这次应记录为‘做空升级过早’，而不是等待中的换手假设已经验证。",
+        "规则修正：1H/2H若仍满足价格涨、持仓涨、人数比跌的犄角核心，即使CVD混合、短周期回调和浅负基差同时出现，也只能保留贴水观察，禁止升级做空确认。",
+        "后续只有中周期犄角破坏、价格跌破近端结构且反抽失败，并伴随CVD持续转弱或持仓退出，才重新提高换手做空权重。",
+    ]
+    item["thesis_win_rate"] = {
+        "wins": 0,
+        "losses": 1,
+        "pending": 1,
+        "rate": 0.0,
+        "note": "SOON长期等待换手的主假设仍待验证；20:17的阶段性做空升级已被后续上涨和正溢价修复判为错误。",
+    }
+    item["thought_summary"] = "SOON当前仍是主升延续优先。20:17的浅负基差与短周期转弱没有破坏1H/2H犄角，随后价格继续上涨且基差、资费修复，说明我的做空升级过早。" + item.get("thought_summary", "")
     return item
 
 
@@ -5517,7 +5575,7 @@ def thought_watchlist_payload():
             latest_pushes.setdefault(push.symbol, push)
     items = []
     for row in rows:
-        snapshot = thought_fast_snapshot(row.symbol) if row.symbol in THOUGHT_WATCHLIST else {}
+        snapshot = thought_fast_snapshot(row.symbol)
         current_price = snapshot.get("last")
         effective_price = current_price if row.active else (row.stop_price or current_price)
         low_recorded, high_recorded = history_ranges.get(row.symbol, (None, None))
@@ -5556,16 +5614,66 @@ def thought_watchlist_api():
     return jsonify({"items": items, "active_count": sum(item["active"] for item in items), "updated_at": datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")})
 
 
+def normalize_thought_watch_symbol(value):
+    compact = re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+    if compact.endswith("USDT"):
+        compact = compact[:-4]
+    return f"{compact}/USDT" if compact else None
+
+
+@app.post("/api/thought-watchlist")
+def add_thought_watch():
+    body = request.get_json(silent=True) or {}
+    canonical = normalize_thought_watch_symbol(body.get("symbol"))
+    if not canonical:
+        return jsonify({"ok": False, "error": "请输入币种名称，例如 SOON 或 SOON/USDT"}), 400
+    if is_rwa_stock_pair(canonical):
+        return jsonify({"ok": False, "error": "美股 RWA 代币暂不加入普通盯盘"}), 400
+    context = thought_market_context(canonical) or {}
+    current_price = context.get("last")
+    if not current_price:
+        try:
+            ticker = get_json(
+                "https://fapi.binance.com/fapi/v1/ticker/price?" + urlencode({"symbol": canonical.replace("/", "")}),
+                timeout=3,
+            )
+            current_price = float(ticker.get("price", 0) or 0)
+        except Exception:
+            current_price = None
+    if not current_price:
+        return jsonify({"ok": False, "error": "Binance 暂未找到该币的 USDT 永续合约行情"}), 400
+    now = datetime.now()
+    row = ThoughtWatch.query.filter_by(symbol=canonical).first()
+    if row and row.active:
+        return jsonify({"ok": True, "symbol": canonical, "active": True, "already_active": True})
+    if row:
+        row.active = True
+        row.started_at = now
+        row.start_price = current_price
+        row.stopped_at = None
+        row.stop_price = None
+        row.note = "由网页重新加入盯盘"
+    else:
+        row = ThoughtWatch(
+            symbol=canonical,
+            active=True,
+            started_at=now,
+            start_price=current_price,
+            note="由网页手动加入盯盘",
+        )
+        db.session.add(row)
+    db.session.commit()
+    return jsonify({"ok": True, "symbol": canonical, "active": True, "start_price": current_price})
+
+
 @app.post("/api/thought-watchlist/<symbol>/state")
 def update_thought_watch_state(symbol):
-    canonical = symbol.upper().replace("_", "/")
-    if "/" not in canonical:
-        canonical = f"{canonical}/USDT"
+    canonical = normalize_thought_watch_symbol(symbol)
     row = ThoughtWatch.query.filter_by(symbol=canonical).first()
     if not row:
         return jsonify({"ok": False, "error": "未找到该盯盘币种"}), 404
     action = (request.get_json(silent=True) or {}).get("action", "stop")
-    snapshot = thought_fast_snapshot(canonical) if canonical in THOUGHT_WATCHLIST else {}
+    snapshot = thought_fast_snapshot(canonical)
     current_price = snapshot.get("last")
     now = datetime.now()
     if action == "resume":

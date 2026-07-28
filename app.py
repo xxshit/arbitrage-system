@@ -3951,7 +3951,7 @@ def thought_push_metrics(analysis, direction, signal_key):
         "direction": direction,
         "signal_key": signal_key,
         "last_price": analysis.get("last"),
-        "basis": analysis.get("basis"),
+        "basis": analysis.get("turnover_basis_observed") if direction in TURNOVER_THOUGHT_DIRECTIONS and analysis.get("turnover_basis_observed") is not None else analysis.get("basis"),
         "funding_rate": analysis.get("funding_rate"),
         "oi_value": analysis.get("oi_value"),
         "futures_volume": analysis.get("futures_volume"),
@@ -3973,6 +3973,12 @@ def thought_cvd_profile(metrics):
 
 
 THOUGHT_REPEAT_COOLDOWN_HOURS = 4
+
+TURNOVER_THOUGHT_DIRECTIONS = {
+    "soon_basis_negative_watch", "soon_funding_follow_watch", "soon_turnover_short_ready",
+    "zama_basis_negative_watch", "zama_funding_follow_watch", "zama_turnover_short_ready",
+    "zama_negative_basis_bullish_horn", "zama_deep_basis_watch", "zama_deep_basis_funding_follow",
+}
 
 
 def thought_hours_since_push(previous):
@@ -4018,6 +4024,41 @@ def thought_major_narrative_shift(previous, metrics):
         if abs(new_up - old_up) >= 2:
             return True
     return False
+
+
+def thought_turnover_has_new_information(previous, metrics):
+    """换手盯盘只在叙事改变或风险绝对值继续扩大时推送，基差修复不算同方向新消息。"""
+    if previous is None:
+        return True
+    if previous.direction != metrics["direction"]:
+        return True
+
+    previous_basis = previous.basis
+    current_basis = metrics.get("basis")
+    # 同方向下只承认风险继续扩大。跨区间但绝对值缩小（如 -0.20% → -0.02%）是修复，
+    # 不得用 signal_key 变化绕过重复抑制。
+    if previous_basis is not None and current_basis is not None:
+        if abs(current_basis) >= abs(previous_basis) + 0.20:
+            return True
+    elif current_basis is not None and abs(current_basis) >= 0.50:
+        return True
+
+    previous_funding = previous.funding_rate
+    current_funding = metrics.get("funding_rate")
+    if meaningful_sign_flip(current_funding, previous_funding, min_abs_each=0.005, min_span=0.02):
+        return True
+    if metric_changed(metrics.get("last_price"), previous.last_price, pct_threshold=0.06):
+        return True
+    if metric_changed(metrics.get("oi_value"), previous.oi_value, pct_threshold=0.25):
+        return True
+
+    old_cvd = tuple(cvd_direction(getattr(previous, f"cvd_{suffix}", None)) for suffix in ("30m", "1h", "2h"))
+    new_cvd = thought_cvd_profile(metrics)
+    if abs(sum(item == "up" for item in new_cvd) - sum(item == "up" for item in old_cvd)) >= 2:
+        return True
+
+    hours_since_push = thought_hours_since_push(previous)
+    return hours_since_push is not None and hours_since_push >= THOUGHT_REPEAT_COOLDOWN_HOURS
 
 
 def thought_structural_has_new_information(previous, metrics):
@@ -4082,6 +4123,8 @@ def thought_ake_has_new_information(previous, metrics):
 def thought_push_has_new_information(previous, metrics):
     if previous is None:
         return True
+    if metrics.get("direction") in TURNOVER_THOUGHT_DIRECTIONS:
+        return thought_turnover_has_new_information(previous, metrics)
     if previous.direction != metrics["direction"]:
         return True
     if previous.signal_key != metrics["signal_key"]:
@@ -4103,7 +4146,13 @@ def thought_push_trigger_reason(previous, metrics):
     if previous.direction != metrics["direction"]:
         reasons.append(f"方向改变：{previous.direction} → {metrics['direction']}")
     if previous.signal_key != metrics["signal_key"]:
-        reasons.append(f"信号区间改变：{previous.signal_key} → {metrics['signal_key']}")
+        if previous.direction == metrics["direction"] and metrics.get("direction") in TURNOVER_THOUGHT_DIRECTIONS:
+            previous_basis = previous.basis
+            current_basis = metrics.get("basis")
+            if previous_basis is not None and current_basis is not None and abs(current_basis) >= abs(previous_basis) + 0.20:
+                reasons.append(f"基差绝对值继续扩大：{previous_basis:+.4f}% → {current_basis:+.4f}%")
+        else:
+            reasons.append(f"信号区间改变：{previous.signal_key} → {metrics['signal_key']}")
     previous_funding = previous.funding_rate
     current_funding = metrics.get("funding_rate")
     if meaningful_sign_flip(current_funding, previous_funding, min_abs_each=0.005, min_span=0.02):

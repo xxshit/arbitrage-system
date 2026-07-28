@@ -3231,6 +3231,8 @@ THOUGHT_WATCHLIST = {
 
 # 30秒基差监控连续确认状态。完整盯盘只接受已连续两次为负的基差，防止单点插针。
 TURNOVER_BASIS_STATE = {}
+# 换手方向切换候选：滚动K线在未收盘时会快速抖动，方向改变必须跨两次独立完整扫描。
+TURNOVER_DIRECTION_CANDIDATES = {}
 
 
 def thought_snapshot(symbol):
@@ -3413,8 +3415,8 @@ def ake_thought_snapshot():
     return thought_snapshot("AKE/USDT")
 
 
-def thought_watch_snapshots():
-    symbols = list(THOUGHT_WATCHLIST)
+def thought_watch_snapshots(only_symbols=None):
+    symbols = [symbol for symbol in THOUGHT_WATCHLIST if not only_symbols or symbol in only_symbols]
 
     def load_symbol(symbol):
         with app.app_context():
@@ -4031,7 +4033,28 @@ def thought_turnover_has_new_information(previous, metrics):
     if previous is None:
         return True
     if previous.direction != metrics["direction"]:
+        # -2%深基差已经由5秒同步快照连续确认，属于需要立即提醒的价格风险；
+        # 其余结构方向会受未收盘5/15/30分钟线影响，必须持续至少20秒并连续两次一致。
+        if metrics["direction"] in {"zama_deep_basis_watch", "zama_deep_basis_funding_follow"}:
+            TURNOVER_DIRECTION_CANDIDATES.pop(metrics.get("symbol"), None)
+            return True
+        symbol = metrics.get("symbol")
+        now = time.monotonic()
+        candidate = TURNOVER_DIRECTION_CANDIDATES.get(symbol)
+        if not candidate or candidate.get("direction") != metrics["direction"]:
+            TURNOVER_DIRECTION_CANDIDATES[symbol] = {
+                "direction": metrics["direction"],
+                "first_seen": now,
+                "count": 1,
+            }
+            return False
+        candidate["count"] += 1
+        if candidate["count"] < 2 or now - candidate["first_seen"] < 20:
+            return False
+        TURNOVER_DIRECTION_CANDIDATES.pop(symbol, None)
         return True
+
+    TURNOVER_DIRECTION_CANDIDATES.pop(metrics.get("symbol"), None)
 
     previous_basis = previous.basis
     current_basis = metrics.get("basis")
@@ -4835,24 +4858,24 @@ def thought_lark_message(analysis, direction):
     ])
 
 
-def send_thought_analysis_push():
+def send_thought_analysis_push(only_symbols=None):
     lock_connection = None
     try:
         lock_connection, acquired = acquire_thought_push_lock()
         if not acquired:
             return False
-        return send_thought_analysis_push_locked()
+        return send_thought_analysis_push_locked(only_symbols=only_symbols)
     finally:
         release_thought_push_lock(lock_connection)
 
 
-def send_thought_analysis_push_locked():
+def send_thought_analysis_push_locked(only_symbols=None):
     webhook = os.getenv("LARK_THOUGHT_ANALYSIS_WEBHOOK", "").strip()
     if not webhook:
         return False
     sections = []
     push_records = []
-    for analysis in thought_watch_snapshots():
+    for analysis in thought_watch_snapshots(only_symbols=only_symbols):
         if analysis.get("source") not in {"live", "db_fallback"}:
             continue
         direction = thought_push_direction(analysis)
@@ -6591,9 +6614,12 @@ def background_turnover_basis_watch():
                 if stable and phase != last_phases[symbol]:
                     should_push = True
                 last_phases[symbol] = phase
-            if should_push:
+            # 每30秒只复核SOON/ZAMA两枚重点币，使结构方向候选能在约30秒后完成二次确认，
+            # 不必等待全市场5分钟扫描，也不会让其它币被高频重复扫描。
+            structural_recheck = status_tick % 6 == 0
+            if should_push or structural_recheck:
                 with app.app_context():
-                    send_thought_analysis_push()
+                    send_thought_analysis_push(only_symbols=set(symbols))
             if update_status:
                 with app.app_context():
                     mark_automation_status("turnover_basis_watch", "success")

@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, render_template, request
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import func, inspect, text, tuple_
+from sqlalchemy import and_, case, func, inspect, or_, text, tuple_
 
 load_dotenv()
 
@@ -374,10 +374,15 @@ MARKETS = {
 }
 EXCHANGES = ["Binance", "OKX", "Bybit"]
 SPOT_FUTURES_CACHE = {"snapshot": None, "expires_at": 0.0}
+DUAL_FUTURES_CACHE = {"snapshot": None}
+LAST_MARKET_DB_PERSIST_AT = {"spot": 0.0, "dual": 0.0}
 MARKET_PAYLOAD_CACHE = {}
 SPOT_VIEW_CACHE = {"key": None, "symbols": None}
 DUAL_VIEW_CACHE = {"key": None, "symbols": None}
 FUNDING_HISTORY_CACHE = {}
+FUNDING_STATISTICS_CACHE = {"ts": 0.0, "symbols": frozenset(), "data": {}}
+FUNDING_STATISTICS_LOCK = threading.Lock()
+LAST_PRICE_HISTORY_BUCKET = None
 SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 BASIS_CANDIDATES = {}
 PUMP_CANDIDATES = {}
@@ -423,10 +428,11 @@ ANNOUNCEMENT_SOURCES = {
 INDEX_COMPONENT_CURSOR = 0
 FUNDING_SYNC_CURSOR = 0
 MARKET_REFRESH_SECONDS = 5
+MARKET_DB_PERSIST_SECONDS = 15
 HORN_SCAN_HOUR = 8
 LAST_HORN_SCAN_DATE = None
 LAST_LARK_TREND_PUSH_DATE = None
-INDEX_COMPONENT_REFRESH_SECONDS = 5
+INDEX_COMPONENT_REFRESH_SECONDS = 5 * 60
 FUNDING_HISTORY_SYNC_SECONDS = 60
 PRICE_BACKFILL_SYNC_SECONDS = 2 * 60
 PRICE_HISTORY_BUCKET_SECONDS = 5 * 60
@@ -920,23 +926,72 @@ def sync_funding_history(symbols):
 
 
 def funding_statistics(symbols):
-    now = datetime.now(SHANGHAI_TZ)
-    start_day = now.date() - timedelta(days=29)
-    start_time = int(datetime.combine(start_day, datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
-    end_time = int(now.timestamp() * 1000)
-    stored_rows = FundingRateRecord.query.filter(FundingRateRecord.symbol.in_(symbols), FundingRateRecord.funding_time >= start_time, FundingRateRecord.funding_time <= end_time).all()
-    stored_by_symbol = {}
-    for item in stored_rows:
-        stored_by_symbol.setdefault(item.symbol, []).append(item)
-    output = {}
-    for symbol in symbols:
-        rows = sorted(stored_by_symbol.get(symbol, []), key=lambda item: item.funding_time)
-        by_date = {}
-        for item in rows:
-            funding_date = datetime.fromtimestamp(item.funding_time / 1000, tz=timezone.utc).astimezone(SHANGHAI_TZ).date()
-            by_date[funding_date] = by_date.get(funding_date, 0.0) + item.funding_rate
-        output[symbol] = {"previous": rows[-1].funding_rate if rows else None, "day_1": sum(by_date.get(now.date() - timedelta(days=offset), 0.0) for offset in range(1)) if rows else None, "day_3": sum(by_date.get(now.date() - timedelta(days=offset), 0.0) for offset in range(3)) if rows else None, "day_7": sum(by_date.get(now.date() - timedelta(days=offset), 0.0) for offset in range(7)) if rows else None, "day_30": sum(by_date.get(now.date() - timedelta(days=offset), 0.0) for offset in range(30)) if rows else None}
-    return output
+    requested_symbols = frozenset(symbols)
+    def cached_result(now_ts):
+        if (
+            FUNDING_STATISTICS_CACHE["data"]
+            and now_ts - FUNDING_STATISTICS_CACHE["ts"] < 60
+            and requested_symbols.issubset(FUNDING_STATISTICS_CACHE["symbols"])
+        ):
+            return {symbol: FUNDING_STATISTICS_CACHE["data"].get(symbol, {}) for symbol in symbols}
+        return None
+
+    result = cached_result(time.time())
+    if result is not None:
+        return result
+    # 防止首轮多个页面同时命中空缓存，重复读取数万条固定历史资费记录。
+    with FUNDING_STATISTICS_LOCK:
+        now_ts = time.time()
+        result = cached_result(now_ts)
+        if result is not None:
+            return result
+        now = datetime.now(SHANGHAI_TZ)
+        start_day = now.date() - timedelta(days=29)
+        start_time = int(datetime.combine(start_day, datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
+        end_time = int(now.timestamp() * 1000)
+        starts = {
+            days: int(datetime.combine(now.date() - timedelta(days=days - 1), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
+            for days in (1, 3, 7, 30)
+        }
+        aggregates = db.session.query(
+            FundingRateRecord.symbol,
+            func.sum(case((FundingRateRecord.funding_time >= starts[1], FundingRateRecord.funding_rate), else_=0.0)),
+            func.sum(case((FundingRateRecord.funding_time >= starts[3], FundingRateRecord.funding_rate), else_=0.0)),
+            func.sum(case((FundingRateRecord.funding_time >= starts[7], FundingRateRecord.funding_rate), else_=0.0)),
+            func.sum(case((FundingRateRecord.funding_time >= starts[30], FundingRateRecord.funding_rate), else_=0.0)),
+        ).filter(
+            FundingRateRecord.symbol.in_(symbols),
+            FundingRateRecord.funding_time >= start_time,
+            FundingRateRecord.funding_time <= end_time,
+        ).group_by(FundingRateRecord.symbol).all()
+        aggregate_by_symbol = {row[0]: row[1:] for row in aggregates}
+        latest_times = db.session.query(
+            FundingRateRecord.symbol.label("symbol"),
+            func.max(FundingRateRecord.funding_time).label("funding_time"),
+        ).filter(
+            FundingRateRecord.symbol.in_(symbols),
+            FundingRateRecord.funding_time <= end_time,
+        ).group_by(FundingRateRecord.symbol).subquery()
+        previous_by_symbol = dict(db.session.query(
+            FundingRateRecord.symbol,
+            FundingRateRecord.funding_rate,
+        ).join(
+            latest_times,
+            (FundingRateRecord.symbol == latest_times.c.symbol)
+            & (FundingRateRecord.funding_time == latest_times.c.funding_time),
+        ).all())
+        output = {}
+        for symbol in symbols:
+            totals = aggregate_by_symbol.get(symbol)
+            output[symbol] = {
+                "previous": previous_by_symbol.get(symbol),
+                "day_1": totals[0] if totals else None,
+                "day_3": totals[1] if totals else None,
+                "day_7": totals[2] if totals else None,
+                "day_30": totals[3] if totals else None,
+            }
+        FUNDING_STATISTICS_CACHE.update({"ts": now_ts, "symbols": requested_symbols, "data": output})
+        return output
 
 
 def enrich_funding_statistics(groups):
@@ -953,8 +1008,12 @@ def contract_mid_price(group):
 
 
 def capture_price_history(groups):
+    global LAST_PRICE_HISTORY_BUCKET
     now = int(time.time())
     bucket_at = now // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
+    # 价格趋势使用 5 分钟桶；同一桶内无需每 5 秒重复扫描、清理并提交百万行历史表。
+    if LAST_PRICE_HISTORY_BUCKET == bucket_at:
+        return
     symbols = [group["symbol"] for group in groups]
     existing = {
         item.symbol for item in FuturesPriceHistory.query.filter(
@@ -967,6 +1026,7 @@ def capture_price_history(groups):
     cutoff = now - PRICE_HISTORY_RETENTION_SECONDS
     FuturesPriceHistory.query.filter(FuturesPriceHistory.bucket_at < cutoff).delete(synchronize_session=False)
     db.session.commit()
+    LAST_PRICE_HISTORY_BUCKET = bucket_at
 
 
 def trend_candidate_buckets(target_buckets, lag_buckets=2):
@@ -1341,6 +1401,8 @@ def enrich_dual_binance_reference(groups):
 
 
 def load_latest_dual_futures_snapshot():
+    if DUAL_FUTURES_CACHE["snapshot"]:
+        return DUAL_FUTURES_CACHE["snapshot"]
     rows = LatestDualFuturesSnapshot.query.order_by(LatestDualFuturesSnapshot.symbol, LatestDualFuturesSnapshot.long_exchange, LatestDualFuturesSnapshot.short_exchange).all()
     if not rows:
         return None
@@ -1778,6 +1840,8 @@ def save_latest_market_snapshot(groups):
 
 
 def load_latest_market_snapshot():
+    if SPOT_FUTURES_CACHE["snapshot"]:
+        return SPOT_FUTURES_CACHE["snapshot"]
     rows = LatestMarketSnapshot.query.order_by(LatestMarketSnapshot.symbol, LatestMarketSnapshot.long_exchange).all()
     if not rows:
         return None
@@ -1873,9 +1937,22 @@ def spot_futures_snapshot():
     rows_finished_at = time.perf_counter()
     evaluate_alerts(rows_by_symbol)
     alerts_finished_at = time.perf_counter()
-    save_latest_market_snapshot(rows_by_symbol)
+    captured_at = datetime.now()
+    live_snapshot = {
+        "symbols": rows_by_symbol,
+        "errors": errors,
+        "updated_at": captured_at.strftime("%H:%M:%S"),
+        "next_refresh_in_seconds": MARKET_REFRESH_SECONDS,
+        "stored": True,
+    }
+    SPOT_FUTURES_CACHE["snapshot"] = live_snapshot
+    persist_due = time.time() - LAST_MARKET_DB_PERSIST_AT["spot"] >= MARKET_DB_PERSIST_SECONDS
+    if persist_due:
+        save_latest_market_snapshot(rows_by_symbol)
+        LAST_MARKET_DB_PERSIST_AT["spot"] = time.time()
     snapshot_finished_at = time.perf_counter()
-    capture_price_history(rows_by_symbol)
+    if persist_due:
+        capture_price_history(rows_by_symbol)
     total_seconds = time.perf_counter() - started_at
     MARKET_REFRESH_METRICS = {
         "network_seconds": round(network_seconds, 3),
@@ -1891,7 +1968,7 @@ def spot_futures_snapshot():
             "history_write": round(total_seconds - (snapshot_finished_at - started_at), 3),
         },
     }
-    return {"symbols": rows_by_symbol, "errors": errors, "updated_at": datetime.now().strftime("%H:%M:%S")}
+    return live_snapshot
 
 
 def dual_futures_snapshot():
@@ -2005,8 +2082,19 @@ def dual_futures_snapshot():
             groups.append({"symbol": f"{symbol[:-4]}/USDT", "rows": rows})
     enrich_next_funding_net(groups)
     evaluate_dual_alerts(groups)
-    save_latest_dual_futures_snapshot(groups)
-    return {"symbols": groups, "errors": errors, "updated_at": datetime.now().strftime("%H:%M:%S")}
+    captured_at = datetime.now()
+    live_snapshot = {
+        "symbols": groups,
+        "errors": errors,
+        "updated_at": captured_at.strftime("%H:%M:%S"),
+        "next_refresh_in_seconds": MARKET_REFRESH_SECONDS,
+        "stored": True,
+    }
+    DUAL_FUTURES_CACHE["snapshot"] = live_snapshot
+    if time.time() - LAST_MARKET_DB_PERSIST_AT["dual"] >= MARKET_DB_PERSIST_SECONDS:
+        save_latest_dual_futures_snapshot(groups)
+        LAST_MARKET_DB_PERSIST_AT["dual"] = time.time()
+    return live_snapshot
 
 
 def opportunities():
@@ -5402,27 +5490,43 @@ def early_trend_thought_item(row):
 
 def thought_watchlist_payload():
     rows = ThoughtWatch.query.order_by(ThoughtWatch.active.desc(), ThoughtWatch.started_at.desc()).all()
+    history_conditions = []
+    for row in rows:
+        start_bucket = int(row.started_at.replace(tzinfo=SHANGHAI_TZ).timestamp())
+        condition = and_(FuturesPriceHistory.symbol == row.symbol, FuturesPriceHistory.bucket_at >= start_bucket)
+        if not row.active and row.stopped_at:
+            stop_bucket = int(row.stopped_at.replace(tzinfo=SHANGHAI_TZ).timestamp())
+            condition = and_(condition, FuturesPriceHistory.bucket_at <= stop_bucket)
+        history_conditions.append(condition)
+    history_ranges = {}
+    if history_conditions:
+        history_ranges = {
+            symbol: (low_price, high_price)
+            for symbol, low_price, high_price in db.session.query(
+                FuturesPriceHistory.symbol,
+                func.min(FuturesPriceHistory.price),
+                func.max(FuturesPriceHistory.price),
+            ).filter(or_(*history_conditions)).group_by(FuturesPriceHistory.symbol).all()
+        }
+    latest_pushes = {}
+    symbols = [row.symbol for row in rows]
+    if symbols:
+        for push in ThoughtPushEvent.query.filter(
+            ThoughtPushEvent.symbol.in_(symbols), ThoughtPushEvent.status == "sent"
+        ).order_by(ThoughtPushEvent.sent_at.desc()).all():
+            latest_pushes.setdefault(push.symbol, push)
     items = []
     for row in rows:
         snapshot = thought_fast_snapshot(row.symbol) if row.symbol in THOUGHT_WATCHLIST else {}
         current_price = snapshot.get("last")
         effective_price = current_price if row.active else (row.stop_price or current_price)
-        start_bucket = int(row.started_at.replace(tzinfo=SHANGHAI_TZ).timestamp())
-        history_query = FuturesPriceHistory.query.filter(
-            FuturesPriceHistory.symbol == row.symbol,
-            FuturesPriceHistory.bucket_at >= start_bucket,
-        )
-        if not row.active and row.stopped_at:
-            stop_bucket = int(row.stopped_at.replace(tzinfo=SHANGHAI_TZ).timestamp())
-            history_query = history_query.filter(FuturesPriceHistory.bucket_at <= stop_bucket)
-        history = history_query.order_by(FuturesPriceHistory.bucket_at.asc()).all()
-        prices = [item.price for item in history if item.price]
-        start_price = row.start_price or (prices[0] if prices else effective_price)
+        low_recorded, high_recorded = history_ranges.get(row.symbol, (None, None))
+        start_price = row.start_price or effective_price
         if row.start_price is None and start_price:
             row.start_price = start_price
-        high_price = max(prices) if prices else effective_price
-        low_price = min(prices) if prices else effective_price
-        latest_push = ThoughtPushEvent.query.filter_by(symbol=row.symbol, status="sent").order_by(ThoughtPushEvent.sent_at.desc()).first()
+        high_price = high_recorded if high_recorded is not None else effective_price
+        low_price = low_recorded if low_recorded is not None else effective_price
+        latest_push = latest_pushes.get(row.symbol)
         end_at = datetime.now() if row.active else (row.stopped_at or datetime.now())
         items.append({
             "symbol": row.symbol,
@@ -5959,9 +6063,19 @@ def alerts():
     latest_events = [items[0] for items in grouped_events.values()]
     active_events = [item for item in latest_events if (datetime.now() - item.created_at).total_seconds() <= 120]
     tracking = [item for item in BasisTracking.query.filter_by(resolved_at=None).order_by(BasisTracking.max_abs_basis.desc()).limit(50).all() if not is_rwa_stock_pair(item.symbol)]
+    event_symbols = list(grouped_events)
+    dual_context = {
+        (item.symbol, item.long_exchange, item.short_exchange): item
+        for item in LatestDualFuturesSnapshot.query.filter(LatestDualFuturesSnapshot.symbol.in_(event_symbols)).all()
+    } if event_symbols else {}
+    market_context = {}
+    if event_symbols:
+        for item in LatestMarketSnapshot.query.filter(LatestMarketSnapshot.symbol.in_(event_symbols)).all():
+            market_context.setdefault(item.symbol, item)
+
     def alert_context(item):
         if item.strategy == "futures_futures":
-            latest = LatestDualFuturesSnapshot.query.filter_by(symbol=item.symbol, long_exchange=item.long_exchange, short_exchange=item.short_exchange).first()
+            latest = dual_context.get((item.symbol, item.long_exchange, item.short_exchange))
             return {
                 "strategy": "futures_futures",
                 "long_exchange": item.long_exchange or "Bybit",
@@ -5972,7 +6086,7 @@ def alerts():
                 "short_interval": latest.short_funding_interval_hours if latest else None,
             }
         long_exchange = next((name for name in ("Binance", "Gate", "Bitget") if item.message.startswith(name)), "Binance")
-        latest = LatestMarketSnapshot.query.filter_by(symbol=item.symbol).first()
+        latest = market_context.get(item.symbol)
         return {
             "strategy": "spot_futures",
             "long_exchange": long_exchange,
@@ -6530,10 +6644,12 @@ def background_spot_market_refresh():
             MARKET_REFRESH_METRICS["last_error"] = f"{type(exc).__name__}: {exc}"
             with app.app_context():
                 db.session.rollback()
-        time.sleep(max(0, MARKET_REFRESH_SECONDS - (time.time() - cycle_started_at)))
+        time.sleep(max(0.25, MARKET_REFRESH_SECONDS - (time.time() - cycle_started_at)))
 
 
 def background_dual_market_refresh():
+    # 与现多期空错峰，避免两轮交易所请求和 MySQL 写入每 5 秒同时抢占资源。
+    time.sleep(MARKET_REFRESH_SECONDS / 2)
     while True:
         cycle_started_at = time.time()
         try:
@@ -6542,7 +6658,7 @@ def background_dual_market_refresh():
         except Exception:
             with app.app_context():
                 db.session.rollback()
-        time.sleep(max(0, MARKET_REFRESH_SECONDS - (time.time() - cycle_started_at)))
+        time.sleep(max(0.25, MARKET_REFRESH_SECONDS - (time.time() - cycle_started_at)))
 
 
 def background_funding_history_sync():

@@ -317,6 +317,19 @@ class ThoughtPushEvent(db.Model):
     sent_at = db.Column(db.DateTime)
 
 
+class ThoughtWatch(db.Model):
+    """可由网页管理的盯盘清单；思路历史保留，active只控制后续自动扫描和推送。"""
+    id = db.Column(db.Integer, primary_key=True)
+    symbol = db.Column(db.String(30), nullable=False, unique=True, index=True)
+    active = db.Column(db.Boolean, nullable=False, default=True, index=True)
+    started_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    start_price = db.Column(db.Float)
+    stopped_at = db.Column(db.DateTime)
+    stop_price = db.Column(db.Float)
+    note = db.Column(db.String(255))
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+
 class SymbolAlias(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     canonical_symbol = db.Column(db.String(30), nullable=False, index=True)
@@ -3229,6 +3242,46 @@ THOUGHT_WATCHLIST = {
     },
 }
 
+THOUGHT_WATCH_SEED = {
+    "AKE/USDT": ("2026-07-16 19:07", True, "AKE新机会与主力出货结构"),
+    "US/USDT": ("2026-07-18 00:00", False, "已按用户要求停止盯盘"),
+    "T/USDT": ("2026-07-17 11:00", True, "底部反抽后先多再空"),
+    "SOON/USDT": ("2026-07-28 00:00", True, "主升后基差换手"),
+    "ZAMA/USDT": ("2026-07-28 00:00", True, "深负基差与换手结构"),
+    "ERA/USDT": ("2026-07-24 00:00", True, "弱支撑与反转结构"),
+}
+
+
+def first_thought_watch_price(symbol, fallback=None):
+    if fallback:
+        return fallback
+    event = ThoughtPushEvent.query.filter_by(symbol=symbol).order_by(ThoughtPushEvent.reserved_at.asc()).first()
+    if event and event.snapshot_json:
+        try:
+            return float((json.loads(event.snapshot_json) or {}).get("last_price") or 0) or None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+    history = FuturesPriceHistory.query.filter_by(symbol=symbol).order_by(FuturesPriceHistory.bucket_at.asc()).first()
+    return history.price if history else None
+
+
+def seed_thought_watches():
+    for symbol, (started_text, active, note) in THOUGHT_WATCH_SEED.items():
+        if ThoughtWatch.query.filter_by(symbol=symbol).first():
+            continue
+        started_at = datetime.strptime(started_text, "%Y-%m-%d %H:%M")
+        start_price = first_thought_watch_price(symbol, (THOUGHT_WATCHLIST.get(symbol) or {}).get("entry"))
+        row = ThoughtWatch(symbol=symbol, active=active, started_at=started_at, start_price=start_price, note=note)
+        if not active:
+            row.stopped_at = datetime.now()
+            row.stop_price = start_price
+        db.session.add(row)
+    db.session.commit()
+
+
+def active_thought_symbols():
+    return {row.symbol for row in ThoughtWatch.query.filter_by(active=True).all()}
+
 # 30秒基差监控连续确认状态。完整盯盘只接受已连续两次为负的基差，防止单点插针。
 TURNOVER_BASIS_STATE = {}
 # 换手方向切换候选：滚动K线在未收盘时会快速抖动，方向改变必须跨两次独立完整扫描。
@@ -3416,7 +3469,8 @@ def ake_thought_snapshot():
 
 
 def thought_watch_snapshots(only_symbols=None):
-    symbols = [symbol for symbol in THOUGHT_WATCHLIST if not only_symbols or symbol in only_symbols]
+    active_symbols = active_thought_symbols()
+    symbols = [symbol for symbol in THOUGHT_WATCHLIST if symbol in active_symbols and (not only_symbols or symbol in only_symbols)]
 
     def load_symbol(symbol):
         with app.app_context():
@@ -5346,6 +5400,88 @@ def early_trend_thought_item(row):
     }
 
 
+def thought_watchlist_payload():
+    rows = ThoughtWatch.query.order_by(ThoughtWatch.active.desc(), ThoughtWatch.started_at.desc()).all()
+    items = []
+    for row in rows:
+        snapshot = thought_fast_snapshot(row.symbol) if row.symbol in THOUGHT_WATCHLIST else {}
+        current_price = snapshot.get("last")
+        effective_price = current_price if row.active else (row.stop_price or current_price)
+        start_bucket = int(row.started_at.replace(tzinfo=SHANGHAI_TZ).timestamp())
+        history_query = FuturesPriceHistory.query.filter(
+            FuturesPriceHistory.symbol == row.symbol,
+            FuturesPriceHistory.bucket_at >= start_bucket,
+        )
+        if not row.active and row.stopped_at:
+            stop_bucket = int(row.stopped_at.replace(tzinfo=SHANGHAI_TZ).timestamp())
+            history_query = history_query.filter(FuturesPriceHistory.bucket_at <= stop_bucket)
+        history = history_query.order_by(FuturesPriceHistory.bucket_at.asc()).all()
+        prices = [item.price for item in history if item.price]
+        start_price = row.start_price or (prices[0] if prices else effective_price)
+        if row.start_price is None and start_price:
+            row.start_price = start_price
+        high_price = max(prices) if prices else effective_price
+        low_price = min(prices) if prices else effective_price
+        latest_push = ThoughtPushEvent.query.filter_by(symbol=row.symbol, status="sent").order_by(ThoughtPushEvent.sent_at.desc()).first()
+        end_at = datetime.now() if row.active else (row.stopped_at or datetime.now())
+        items.append({
+            "symbol": row.symbol,
+            "active": row.active,
+            "started_at": row.started_at.strftime("%Y-%m-%d %H:%M"),
+            "stopped_at": row.stopped_at.strftime("%Y-%m-%d %H:%M") if row.stopped_at else None,
+            "start_price": start_price,
+            "current_price": current_price,
+            "stop_price": row.stop_price,
+            "change_pct": percent_delta(effective_price, start_price) if effective_price and start_price else None,
+            "high_price": high_price,
+            "high_change_pct": percent_delta(high_price, start_price) if high_price and start_price else None,
+            "low_price": low_price,
+            "low_change_pct": percent_delta(low_price, start_price) if low_price and start_price else None,
+            "duration_seconds": max(int((end_at - row.started_at).total_seconds()), 0),
+            "note": row.note,
+            "last_push_at": latest_push.sent_at.strftime("%Y-%m-%d %H:%M:%S") if latest_push and latest_push.sent_at else None,
+            "last_direction": latest_push.direction if latest_push else None,
+        })
+    db.session.commit()
+    return items
+
+
+@app.get("/api/thought-watchlist")
+def thought_watchlist_api():
+    items = thought_watchlist_payload()
+    return jsonify({"items": items, "active_count": sum(item["active"] for item in items), "updated_at": datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")})
+
+
+@app.post("/api/thought-watchlist/<symbol>/state")
+def update_thought_watch_state(symbol):
+    canonical = symbol.upper().replace("_", "/")
+    if "/" not in canonical:
+        canonical = f"{canonical}/USDT"
+    row = ThoughtWatch.query.filter_by(symbol=canonical).first()
+    if not row:
+        return jsonify({"ok": False, "error": "未找到该盯盘币种"}), 404
+    action = (request.get_json(silent=True) or {}).get("action", "stop")
+    snapshot = thought_fast_snapshot(canonical) if canonical in THOUGHT_WATCHLIST else {}
+    current_price = snapshot.get("last")
+    now = datetime.now()
+    if action == "resume":
+        row.active = True
+        row.started_at = now
+        row.start_price = current_price
+        row.stopped_at = None
+        row.stop_price = None
+        row.note = "由网页重新开始盯盘"
+    else:
+        row.active = False
+        row.stopped_at = now
+        row.stop_price = current_price
+        row.note = "由网页停止盯盘"
+        TURNOVER_DIRECTION_CANDIDATES.pop(canonical, None)
+        TURNOVER_BASIS_STATE.pop(canonical, None)
+    db.session.commit()
+    return jsonify({"ok": True, "symbol": canonical, "active": row.active})
+
+
 @app.get("/api/daily-report/thoughts")
 def daily_report_thoughts():
     ake = thought_fast_snapshot("AKE/USDT")
@@ -5439,6 +5575,12 @@ def daily_report_thoughts():
             existing[row.symbol]["thought_summary"] = f"【{row.stage_label}】{row.stage_reason} " + existing[row.symbol]["thought_summary"]
         else:
             payload["items"].append(early_trend_thought_item(row))
+    watch_states = {row.symbol: row.active for row in ThoughtWatch.query.all()}
+    for item in payload["items"]:
+        if item["symbol"] in watch_states:
+            item["watch_active"] = watch_states[item["symbol"]]
+            if not watch_states[item["symbol"]]:
+                item["trade_status"] = "已停止盯盘 / 历史复盘"
     return jsonify(payload)
 
 
@@ -6340,6 +6482,7 @@ with app.app_context():
     db.create_all()
     seed_symbol_aliases()
     seed_trade_validation()
+    seed_thought_watches()
     alert_columns = {column["name"] for column in inspect(db.engine).get_columns("alert_event")}
     for column_name, column_type in (("strategy", "VARCHAR(30)"), ("long_exchange", "VARCHAR(30)"), ("short_exchange", "VARCHAR(30)")):
         if column_name not in alert_columns:
@@ -6564,6 +6707,7 @@ def background_turnover_basis_watch():
     symbols = {"SOON/USDT": "SOONUSDT", "ZAMA/USDT": "ZAMAUSDT"}
     negative_counts = {symbol: 0 for symbol in symbols}
     last_phases = {symbol: "positive" for symbol in symbols}
+    active_turnover_symbols = set(symbols)
     status_tick = 0
     while True:
         try:
@@ -6572,8 +6716,13 @@ def background_turnover_basis_watch():
                 with app.app_context():
                     mark_automation_status("turnover_basis_watch", "started")
             should_push = False
-            due_symbols = {"ZAMA/USDT": symbols["ZAMA/USDT"]}
             if status_tick % 6 == 0:
+                with app.app_context():
+                    active_turnover_symbols = set(symbols) & active_thought_symbols()
+            due_symbols = {}
+            if "ZAMA/USDT" in active_turnover_symbols:
+                due_symbols["ZAMA/USDT"] = symbols["ZAMA/USDT"]
+            if status_tick % 6 == 0 and "SOON/USDT" in active_turnover_symbols:
                 due_symbols["SOON/USDT"] = symbols["SOON/USDT"]
             for symbol, raw_symbol in due_symbols.items():
                 premium = get_json(f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={raw_symbol}", timeout=5)
@@ -6617,9 +6766,9 @@ def background_turnover_basis_watch():
             # 每30秒只复核SOON/ZAMA两枚重点币，使结构方向候选能在约30秒后完成二次确认，
             # 不必等待全市场5分钟扫描，也不会让其它币被高频重复扫描。
             structural_recheck = status_tick % 6 == 0
-            if should_push or structural_recheck:
+            if active_turnover_symbols and (should_push or structural_recheck):
                 with app.app_context():
-                    send_thought_analysis_push(only_symbols=set(symbols))
+                    send_thought_analysis_push(only_symbols=active_turnover_symbols)
             if update_status:
                 with app.app_context():
                     mark_automation_status("turnover_basis_watch", "success")

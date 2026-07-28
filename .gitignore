@@ -4,4 +4,6 @@ __pycache__/
 instance/
 backups/
 logs/
+server.out.log
+server.err.log
 *.pyc

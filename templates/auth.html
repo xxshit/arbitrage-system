@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ '登录' if mode == 'login' else '邀请码注册' }} | ArbiScope</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260729-auth-rules">
+</head>
+<body class="auth-page">
+  <main class="auth-shell">
+    <section class="auth-brand">
+      <span class="auth-mark">◈</span>
+      <p class="eyebrow">ARBITRAGE INTELLIGENCE</p>
+      <h1>ArbiScope</h1>
+      <p>你的套利监控、趋势研判和知识记录都安静地守在这里。</p>
+      <div class="auth-security"><b>单端登录保护</b><span>同一账号在新设备登录后，旧设备会自动退出。</span></div>
+    </section>
+    <form id="authForm" class="auth-card">
+      <p class="eyebrow">{{ 'WELCOME BACK' if mode == 'login' else 'INVITATION ONLY' }}</p>
+      <h2>{{ '欢迎回来' if mode == 'login' else '创建查看账号' }}</h2>
+      <p class="sub">{{ '登录后继续查看实时行情与分析。' if mode == 'login' else '普通账号必须使用管理员生成的一次性邀请码。' }}</p>
+      <label>账号<input id="authUsername" required minlength="3" maxlength="24" autocomplete="username" placeholder="小写字母、数字或下划线"></label>
+      <label>密码<input id="authPassword" type="password" required minlength="10" autocomplete="{{ 'current-password' if mode == 'login' else 'new-password' }}" placeholder="至少 10 位"></label>
+      {% if mode == 'register' %}<label>邀请码<input id="inviteCode" required autocomplete="off" placeholder="ARBI-XXXXXXXXXX"></label>{% endif %}
+      <p id="authError" class="auth-error"></p>
+      <button class="primary auth-submit" type="submit">{{ '登录系统' if mode == 'login' else '使用邀请码注册' }}</button>
+      <a class="auth-switch" href="{{ '/register' if mode == 'login' else '/login' }}">{{ '我有邀请码，创建账号' if mode == 'login' else '已经有账号，返回登录' }}</a>
+    </form>
+  </main>
+  <script>
+    const mode={{ mode|tojson }};
+    document.getElementById('authForm').addEventListener('submit',async event=>{
+      event.preventDefault();
+      const error=document.getElementById('authError'),button=event.currentTarget.querySelector('button');
+      error.textContent='';button.disabled=true;button.textContent='正在验证…';
+      const payload={username:document.getElementById('authUsername').value.trim(),password:document.getElementById('authPassword').value};
+      if(mode==='register')payload.invite_code=document.getElementById('inviteCode').value.trim();
+      try{
+        const response=await fetch(`/api/auth/${mode}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+        const data=await response.json();
+        if(!response.ok)throw new Error(data.error||'操作失败');
+        location.href=data.redirect||'/';
+      }catch(e){error.textContent=e.message;button.disabled=false;button.textContent=mode==='login'?'登录系统':'使用邀请码注册'}
+    });
+  </script>
+</body></html>

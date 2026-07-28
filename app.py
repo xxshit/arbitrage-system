@@ -6,15 +6,19 @@ import threading
 import re
 import html
 import hashlib
+import secrets
+import click
+from functools import wraps
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, render_template, request
+from flask import Flask, g, has_app_context, jsonify, redirect, render_template, request, session, url_for
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import and_, case, func, inspect, or_, text, tuple_
+from werkzeug.security import check_password_hash, generate_password_hash
 
 load_dotenv()
 
@@ -23,6 +27,9 @@ app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "local-development-key")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///arbitrage_hub.db")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
 
 
@@ -358,6 +365,46 @@ class AutomationStatus(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
+class UserAccount(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(40), nullable=False, unique=True, index=True)
+    password_hash = db.Column(db.String(255), nullable=False)
+    role = db.Column(db.String(20), nullable=False, default="viewer", index=True)
+    active = db.Column(db.Boolean, nullable=False, default=True)
+    active_session_hash = db.Column(db.String(64))
+    last_login_at = db.Column(db.DateTime)
+    last_seen_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+
+
+class InviteCode(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    code_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    code_prefix = db.Column(db.String(12), nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False)
+    used_by = db.Column(db.Integer, db.ForeignKey("user_account.id"))
+    expires_at = db.Column(db.DateTime)
+    used_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+
+
+class RuntimeRule(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    rule_key = db.Column(db.String(80), nullable=False, unique=True, index=True)
+    category = db.Column(db.String(40), nullable=False, index=True)
+    label = db.Column(db.String(120), nullable=False)
+    schedule_type = db.Column(db.String(20), nullable=False, default="interval")
+    value = db.Column(db.String(40), nullable=False)
+    unit = db.Column(db.String(20), nullable=False, default="秒")
+    min_value = db.Column(db.Float)
+    max_value = db.Column(db.Float)
+    editable = db.Column(db.Boolean, nullable=False, default=True)
+    enabled = db.Column(db.Boolean, nullable=False, default=True)
+    description = db.Column(db.String(500), nullable=False)
+    updated_by = db.Column(db.Integer, db.ForeignKey("user_account.id"))
+    updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False, onupdate=datetime.now)
+
+
 class TransferNetworkSnapshot(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     exchange = db.Column(db.String(30), nullable=False)
@@ -453,6 +500,24 @@ TREND_WINDOWS = {
     "change_7d": 7 * 24 * 60 * 60,
 }
 BACKGROUND_WORKERS_STARTED = False
+EARLY_TREND_SCAN_LOCK = threading.Lock()
+RUNTIME_RULE_DEFAULTS = [
+    {"rule_key": "spot_market_refresh", "category": "实时行情", "label": "现多期空行情刷新", "schedule_type": "interval", "value": "5", "unit": "秒", "min_value": 2, "max_value": 60, "description": "拉取现货与 Binance 合约盘口，刷新开差、平差、基差和报警候选。"},
+    {"rule_key": "dual_market_refresh", "category": "实时行情", "label": "期多期空行情刷新", "schedule_type": "interval", "value": "5", "unit": "秒", "min_value": 2, "max_value": 60, "description": "拉取 Binance、Bybit、OKX 合约盘口和套利路径。"},
+    {"rule_key": "browser_alert_refresh", "category": "页面显示", "label": "报警弹窗读取", "schedule_type": "interval", "value": "5", "unit": "秒", "min_value": 2, "max_value": 60, "description": "网页只读取服务器已经确认的报警，不重新请求交易所。"},
+    {"rule_key": "thought_watch_scan", "category": "走势盯盘", "label": "思路分析盯盘", "schedule_type": "interval", "value": "300", "unit": "秒", "min_value": 60, "max_value": 14400, "description": "扫描思路分析中已加入盯盘的币；仅在出现新结构或判断变化时推送。"},
+    {"rule_key": "early_trend_scan", "category": "趋势筛选", "label": "全市场五根 30MIN 扫描", "schedule_type": "interval", "value": "1800", "unit": "秒", "min_value": 900, "max_value": 7200, "description": "每根 30MIN K线收盘后扫描全市场；只使用已收盘K线，识别启动前蓄势和五根强启动。"},
+    {"rule_key": "daily_trend_push", "category": "每日任务", "label": "日报趋势汇总与推送", "schedule_type": "daily_time", "value": "08:00", "unit": "北京时间", "description": "汇总最新趋势结果并推送确定性最强的三个币；不承担首次发现信号。"},
+    {"rule_key": "announcement_scan", "category": "每日任务", "label": "上下架公告抓取", "schedule_type": "daily_time", "value": "08:00", "unit": "北京时间", "description": "读取五家交易所公告，解析公告时间和具体执行时间并保存 MySQL。"},
+    {"rule_key": "funding_history_sync", "category": "历史数据", "label": "历史资费补充", "schedule_type": "interval", "value": "60", "unit": "秒", "min_value": 30, "max_value": 3600, "description": "分批补充 Binance 资金费历史，历史固定数据直接从 MySQL 读取。"},
+    {"rule_key": "price_history_backfill", "category": "历史数据", "label": "价格历史自检补充", "schedule_type": "interval", "value": "120", "unit": "秒", "min_value": 60, "max_value": 3600, "description": "检查价格历史是否缺口并补充，用于涨跌幅与趋势图。"},
+    {"rule_key": "index_component_sync", "category": "静态资料", "label": "指数成分同步", "schedule_type": "interval", "value": "300", "unit": "秒", "min_value": 300, "max_value": 86400, "description": "补充缺失的合约指数成分；已有且未变化的数据从 MySQL 读取。"},
+    {"rule_key": "transfer_network_sync", "category": "静态资料", "label": "充提网络同步", "schedule_type": "interval", "value": "900", "unit": "秒", "min_value": 300, "max_value": 86400, "description": "更新现货交易所充提链路状态，关闭充提时醒目标记。"},
+    {"rule_key": "alarm_threshold", "category": "报警规则", "label": "绝对值阈值报警", "schedule_type": "policy", "value": "1% / 扩大0.2%", "unit": "规则", "editable": False, "description": "开差或 Binance 基差绝对值从 1% 打开；确认非插针后，每扩大 0.2% 再报警。"},
+    {"rule_key": "rapid_move_threshold", "category": "报警规则", "label": "30秒速变报警", "schedule_type": "policy", "value": "30秒 / 0.5%", "unit": "规则", "editable": False, "description": "30秒内开差或基差绝对值明显扩大；同一30分钟窗口必须继续扩大才允许续报。"},
+    {"rule_key": "funding_retention", "category": "数据保留", "label": "资费历史保留", "schedule_type": "retention", "value": "30", "unit": "天", "editable": False, "description": "最近一个月资金费率留库，超过一个月自动清理。"},
+    {"rule_key": "price_retention", "category": "数据保留", "label": "价格快照保留", "schedule_type": "retention", "value": "8", "unit": "天", "editable": False, "description": "涨跌幅计算所需的 Binance 价格快照滚动保留 8 天。"},
+]
 MARKET_REFRESH_METRICS = {
     "network_seconds": 0.0,
     "processing_seconds": 0.0,
@@ -716,6 +781,7 @@ def mark_announced_delistings(groups):
 AUTOMATION_LABELS = {
     "announcement_scan": "上下架公告抓取",
     "daily_horn_scan": "日报趋势扫描",
+    "intraday_early_trend_scan": "五根30MIN全市场扫描",
     "daily_lark_trend_push": "日报趋势推送",
     "thought_analysis_push": "思路分析盯盘推送",
     "turnover_basis_watch": "SOON/ZAMA基差换手监控",
@@ -725,7 +791,8 @@ AUTOMATION_LABELS = {
 
 
 def mark_automation_status(task_key, state, error=None, label=None):
-    now = datetime.now()
+    # Store UTC as a naive database timestamp; automation_payload converts it to Asia/Shanghai once.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     status = AutomationStatus.query.filter_by(task_key=task_key).first()
     if not status:
         status = AutomationStatus(task_key=task_key, label=label or AUTOMATION_LABELS.get(task_key, task_key))
@@ -759,7 +826,7 @@ def automation_payload(task_key):
         "last_success_at": fmt(status.last_success_at) if status else (datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d 08:00:00") if task_key == "daily_lark_trend_push" and lark_daily_trend_already_pushed(datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")) else None),
         "last_error_at": fmt(status.last_error_at) if status else None,
         "last_error": status.last_error if status else None,
-        "ran_today": bool((status and status.last_success_at and status.last_success_at.astimezone(SHANGHAI_TZ).date() == datetime.now(SHANGHAI_TZ).date()) or (task_key == "daily_lark_trend_push" and lark_daily_trend_already_pushed(datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")))),
+        "ran_today": bool((status and status.last_success_at and status.last_success_at.replace(tzinfo=timezone.utc).astimezone(SHANGHAI_TZ).date() == datetime.now(SHANGHAI_TZ).date()) or (task_key == "daily_lark_trend_push" and lark_daily_trend_already_pushed(datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")))),
     }
 
 
@@ -2120,9 +2187,282 @@ def opportunities():
     return sorted(rows, key=lambda item: item["estimated_profit"], reverse=True)
 
 
+def seed_runtime_rules():
+    existing = {row.rule_key: row for row in RuntimeRule.query.all()}
+    for definition in RUNTIME_RULE_DEFAULTS:
+        if definition["rule_key"] in existing:
+            continue
+        db.session.add(RuntimeRule(**definition))
+    db.session.commit()
+
+
+def runtime_rule(rule_key):
+    return RuntimeRule.query.filter_by(rule_key=rule_key).first()
+
+
+def runtime_interval(rule_key, fallback):
+    def read_value():
+        row = runtime_rule(rule_key)
+        return (row.enabled, row.value) if row else (False, None)
+    if not has_app_context():
+        with app.app_context():
+            enabled, value = read_value()
+    else:
+        enabled, value = read_value()
+    if not enabled:
+        return fallback
+    try:
+        return max(0.25, float(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def runtime_daily_time(rule_key, fallback="08:00"):
+    def read_value():
+        row = runtime_rule(rule_key)
+        return (row.enabled, row.value) if row else (False, None)
+    if has_app_context():
+        enabled, value = read_value()
+    else:
+        with app.app_context():
+            enabled, value = read_value()
+    try:
+        hour, minute = str(value if enabled else fallback).split(":", 1)
+        return int(hour), int(minute)
+    except (TypeError, ValueError):
+        hour, minute = fallback.split(":", 1)
+        return int(hour), int(minute)
+
+
+def session_digest(token):
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def current_user():
+    return getattr(g, "current_user", None)
+
+
+def admin_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        user = current_user()
+        if not user or user.role != "admin":
+            return jsonify({"ok": False, "error": "仅管理员可以执行此操作。"}), 403
+        return view(*args, **kwargs)
+    return wrapped
+
+
+@app.before_request
+def require_account_login():
+    if request.endpoint == "static" or request.path in {"/login", "/register", "/api/auth/login", "/api/auth/register"}:
+        return None
+    user_id = session.get("user_id")
+    token = session.get("auth_token")
+    user = db.session.get(UserAccount, user_id) if user_id else None
+    if not user or not user.active or not token or user.active_session_hash != session_digest(token):
+        session.clear()
+        if request.path.startswith("/api/"):
+            return jsonify({"ok": False, "error": "登录已失效，请重新登录。", "login_required": True}), 401
+        return redirect(url_for("login_page", next=request.full_path))
+    g.current_user = user
+    if not user.last_seen_at or datetime.now() - user.last_seen_at > timedelta(minutes=5):
+        user.last_seen_at = datetime.now()
+        db.session.commit()
+    return None
+
+
+@app.get("/login")
+def login_page():
+    if session.get("user_id"):
+        return redirect("/")
+    return render_template("auth.html", mode="login")
+
+
+@app.get("/register")
+def register_page():
+    return render_template("auth.html", mode="register")
+
+
+@app.post("/api/auth/login")
+def login_api():
+    body = request.get_json(silent=True) or {}
+    username = str(body.get("username", "")).strip().lower()
+    password = str(body.get("password", ""))
+    user = UserAccount.query.filter_by(username=username).first()
+    if not user or not user.active or not check_password_hash(user.password_hash, password):
+        return jsonify({"ok": False, "error": "账号或密码不正确。"}), 401
+    raw_token = secrets.token_urlsafe(32)
+    user.active_session_hash = session_digest(raw_token)
+    user.last_login_at = datetime.now()
+    user.last_seen_at = datetime.now()
+    db.session.commit()
+    session.clear()
+    session.permanent = True
+    session["user_id"] = user.id
+    session["auth_token"] = raw_token
+    session["csrf_token"] = secrets.token_urlsafe(24)
+    return jsonify({"ok": True, "redirect": "/", "role": user.role})
+
+
+@app.post("/api/auth/register")
+def register_api():
+    body = request.get_json(silent=True) or {}
+    username = str(body.get("username", "")).strip().lower()
+    password = str(body.get("password", ""))
+    invite_code = re.sub(r"\s+", "", str(body.get("invite_code", "")).upper())
+    if not re.fullmatch(r"[a-z0-9_]{3,24}", username):
+        return jsonify({"ok": False, "error": "账号只能使用 3-24 位小写字母、数字或下划线。"}), 400
+    if len(password) < 10:
+        return jsonify({"ok": False, "error": "密码至少需要 10 位。"}), 400
+    if UserAccount.query.filter_by(username=username).first():
+        return jsonify({"ok": False, "error": "这个账号已经存在。"}), 409
+    invite = InviteCode.query.filter_by(code_hash=session_digest(invite_code)).first()
+    if not invite or invite.used_at or (invite.expires_at and invite.expires_at < datetime.now()):
+        return jsonify({"ok": False, "error": "邀请码无效、已使用或已过期。"}), 400
+    user = UserAccount(username=username, password_hash=generate_password_hash(password), role="viewer")
+    db.session.add(user)
+    db.session.flush()
+    invite.used_by = user.id
+    invite.used_at = datetime.now()
+    db.session.commit()
+    return jsonify({"ok": True, "redirect": "/login"})
+
+
+@app.post("/api/auth/logout")
+def logout_api():
+    user_id = session.get("user_id")
+    token = session.get("auth_token")
+    user = db.session.get(UserAccount, user_id) if user_id else None
+    if user and token and user.active_session_hash == session_digest(token):
+        user.active_session_hash = None
+        db.session.commit()
+    session.clear()
+    return jsonify({"ok": True, "redirect": "/login"})
+
+
+@app.get("/api/auth/me")
+def auth_me():
+    user = current_user()
+    return jsonify({
+        "ok": True, "username": user.username, "role": user.role,
+        "is_admin": user.role == "admin", "csrf_token": session.get("csrf_token"),
+    })
+
+
 @app.get("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", current_user=current_user())
+
+
+def valid_admin_csrf():
+    return secrets.compare_digest(str(session.get("csrf_token") or ""), str(request.headers.get("X-CSRF-Token") or ""))
+
+
+@app.cli.command("create-admin")
+@click.option("--username", default="owner", show_default=True)
+@click.option("--password", prompt=True, hide_input=True, confirmation_prompt=True)
+def create_admin_command(username, password):
+    """Create or reset the single owner account without storing plaintext passwords."""
+    username = username.strip().lower()
+    if len(password) < 12:
+        raise click.ClickException("管理员密码至少需要 12 位。")
+    row = UserAccount.query.filter_by(username=username).first()
+    if row:
+        row.password_hash = generate_password_hash(password)
+        row.role = "admin"
+        row.active = True
+        row.active_session_hash = None
+    else:
+        db.session.add(UserAccount(username=username, password_hash=generate_password_hash(password), role="admin"))
+    db.session.commit()
+    click.echo(f"管理员 {username} 已创建/重置。")
+
+
+def runtime_rule_payload(row):
+    status_key = {
+        "early_trend_scan": "intraday_early_trend_scan",
+        "daily_trend_push": "daily_lark_trend_push",
+        "announcement_scan": "announcement_scan",
+        "thought_watch_scan": "thought_analysis_push",
+        "index_component_sync": "index_component_sync",
+        "transfer_network_sync": "transfer_network_sync",
+    }.get(row.rule_key)
+    return {
+        "key": row.rule_key, "category": row.category, "label": row.label,
+        "schedule_type": row.schedule_type, "value": row.value, "unit": row.unit,
+        "min_value": row.min_value, "max_value": row.max_value,
+        "editable": row.editable, "enabled": row.enabled, "description": row.description,
+        "updated_at": row.updated_at.strftime("%Y-%m-%d %H:%M:%S") if row.updated_at else None,
+        "automation": automation_payload(status_key) if status_key else None,
+    }
+
+
+@app.get("/api/runtime-rules")
+def runtime_rules_api():
+    rows = RuntimeRule.query.order_by(RuntimeRule.category, RuntimeRule.id).all()
+    user = current_user()
+    return jsonify({"items": [runtime_rule_payload(row) for row in rows], "is_admin": user.role == "admin"})
+
+
+@app.patch("/api/runtime-rules/<rule_key>")
+@admin_required
+def update_runtime_rule(rule_key):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    row = RuntimeRule.query.filter_by(rule_key=rule_key).first_or_404()
+    if not row.editable:
+        return jsonify({"ok": False, "error": "这条规则是知识规则，只能查看，不能在这里修改。"}), 400
+    body = request.get_json(silent=True) or {}
+    value = str(body.get("value", row.value)).strip()
+    if row.schedule_type == "daily_time":
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
+            return jsonify({"ok": False, "error": "时间格式需要是 HH:MM。"}), 400
+    else:
+        try:
+            numeric = float(value)
+        except ValueError:
+            return jsonify({"ok": False, "error": "请输入有效数字。"}), 400
+        if row.min_value is not None and numeric < row.min_value or row.max_value is not None and numeric > row.max_value:
+            return jsonify({"ok": False, "error": f"允许范围：{row.min_value:g} - {row.max_value:g} {row.unit}。"}), 400
+        value = str(int(numeric) if numeric.is_integer() else numeric)
+    row.value = value
+    row.enabled = bool(body.get("enabled", row.enabled))
+    row.updated_by = current_user().id
+    row.updated_at = datetime.now()
+    db.session.commit()
+    return jsonify({"ok": True, "item": runtime_rule_payload(row)})
+
+
+@app.get("/api/admin/invites")
+@admin_required
+def list_invites():
+    rows = InviteCode.query.order_by(InviteCode.created_at.desc()).limit(50).all()
+    return jsonify({"items": [{
+        "id": row.id, "prefix": row.code_prefix, "used": bool(row.used_at),
+        "expires_at": row.expires_at.strftime("%Y-%m-%d %H:%M") if row.expires_at else None,
+        "created_at": row.created_at.strftime("%Y-%m-%d %H:%M"),
+    } for row in rows]})
+
+
+@app.post("/api/admin/invites")
+@admin_required
+def create_invite():
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    code = "ARBI-" + secrets.token_hex(5).upper()
+    expires_at = datetime.now() + timedelta(days=7)
+    db.session.add(InviteCode(code_hash=session_digest(code), code_prefix=code[:10], created_by=current_user().id, expires_at=expires_at))
+    db.session.commit()
+    return jsonify({"ok": True, "code": code, "expires_at": expires_at.strftime("%Y-%m-%d %H:%M")})
+
+
+@app.get("/api/admin/users")
+@admin_required
+def list_users():
+    return jsonify({"items": [{
+        "username": row.username, "role": row.role, "active": row.active,
+        "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
+    } for row in UserAccount.query.order_by(UserAccount.created_at).all()]})
 
 
 @app.get("/daily-trends")
@@ -2976,6 +3316,67 @@ def scan_daily_horn_signals():
     return len(selected) + len(early_signals)
 
 
+def scan_intraday_early_trends():
+    """Every 30 minutes, scan closed 30M candles only and keep the latest stage signals."""
+    if not EARLY_TREND_SCAN_LOCK.acquire(blocking=False):
+        return 0
+    try:
+        snapshot = load_latest_market_snapshot()
+        if not snapshot:
+            return 0
+        symbols = []
+        for group in snapshot["symbols"]:
+            if is_rwa_stock_pair(group["symbol"]):
+                continue
+            row = group["rows"][0]
+            priority = row.get("futures_volume") or 0
+            symbols.append((priority, group["symbol"]))
+        symbols = [symbol for _, symbol in sorted(symbols, reverse=True)]
+        early_signals = []
+        metric_count = 0
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [executor.submit(fetch_horn_metrics, symbol, "30m") for symbol in symbols]
+            for future in as_completed(futures):
+                item = future.result()
+                if item:
+                    metric_count += 1
+                if item and item.get("early_trend"):
+                    early_signals.append({"symbol": item["symbol"], **item["early_trend"]})
+        if symbols and metric_count == 0:
+            raise RuntimeError("Binance 30MIN K线、持仓或人数比暂时无法获取，本轮未覆盖任何币种")
+        report_date = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
+        previous = {row.symbol: row for row in EarlyTrendSignal.query.filter_by(report_date=report_date).all()}
+        EarlyTrendSignal.query.filter_by(report_date=report_date).delete(synchronize_session=False)
+        DailyHornSignal.query.filter_by(report_date=report_date, timeframe="focus").delete(synchronize_session=False)
+        newly_added = set()
+        for item in sorted(early_signals, key=lambda value: (value["signal_type"] == "strong_focus", value["price_change_5"]), reverse=True)[:50]:
+            db.session.add(EarlyTrendSignal(report_date=report_date, **item))
+            db.session.add(DailyHornSignal(
+                report_date=report_date, symbol=item["symbol"], timeframe="focus",
+                price_change=item["price_change_5"], oi_change=item["oi_change_5"], oi_value=None,
+                ratio_change=item["ratio_change_5"], ratio_value=None, cvd_change=item["cvd_change_5"],
+                cvd_confirmed=item["cvd_change_5"] > 0,
+                score=100.0 if item["signal_type"] == "strong_focus" else 68.0,
+            ))
+            if item["signal_type"] == "strong_focus":
+                watch = ThoughtWatch.query.filter_by(symbol=item["symbol"]).first()
+                if not watch:
+                    db.session.add(ThoughtWatch(
+                        symbol=item["symbol"], active=True, started_at=datetime.now(),
+                        start_price=item.get("last_price"), note=f"五根30MIN强启动自动加入 · {item['stage_label']}",
+                    ))
+                    newly_added.add(item["symbol"])
+                old = previous.get(item["symbol"])
+                if not old or old.stage_key != item["stage_key"]:
+                    newly_added.add(item["symbol"])
+        db.session.commit()
+        if newly_added:
+            send_thought_analysis_push(only_symbols=newly_added)
+        return len(early_signals)
+    finally:
+        EARLY_TREND_SCAN_LOCK.release()
+
+
 def daily_lark_trend_candidates(report_date):
     early_map = {item.symbol: item for item in EarlyTrendSignal.query.filter_by(report_date=report_date).all()}
     grouped = {}
@@ -3285,7 +3686,9 @@ def daily_report_trends():
         "prior_range": item.prior_range, "volume_ratio": item.volume_ratio,
         "last_price": item.last_price,
     }
-    return jsonify({"updated_at": snapshot["updated_at"], "rising": sorted(valid, key=lambda item: item["change_24h"], reverse=True)[:20], "falling": sorted(valid, key=lambda item: item["change_24h"])[:20], "horn_30m": [signal_payload(item) for item in horn_rows if item.timeframe == "30m"], "horn_4h": [signal_payload(item) for item in horn_rows if item.timeframe == "4h"], "horn_continue": [signal_payload(item) for item in horn_rows if item.timeframe == "continue"], "early_focus": [early_payload(item) for item in early_rows], "automation_status": automation_statuses("daily_horn_scan", "daily_lark_trend_push")})
+    early_updated = max((item.created_at for item in early_rows), default=None)
+    updated_at = early_updated.strftime("%Y-%m-%d %H:%M:%S") if early_updated else snapshot["updated_at"]
+    return jsonify({"updated_at": updated_at, "rising": sorted(valid, key=lambda item: item["change_24h"], reverse=True)[:20], "falling": sorted(valid, key=lambda item: item["change_24h"])[:20], "horn_30m": [signal_payload(item) for item in horn_rows if item.timeframe == "30m"], "horn_4h": [signal_payload(item) for item in horn_rows if item.timeframe == "4h"], "horn_continue": [signal_payload(item) for item in horn_rows if item.timeframe == "continue"], "early_focus": [early_payload(item) for item in early_rows], "automation_status": automation_statuses("intraday_early_trend_scan", "daily_horn_scan", "daily_lark_trend_push")})
 
 
 THOUGHT_WATCHLIST = {
@@ -6796,6 +7199,7 @@ def trade_validation_detail(plan_id):
 
 with app.app_context():
     db.create_all()
+    seed_runtime_rules()
     seed_symbol_aliases()
     seed_trade_validation()
     seed_thought_watches()
@@ -6846,7 +7250,7 @@ def background_spot_market_refresh():
             MARKET_REFRESH_METRICS["last_error"] = f"{type(exc).__name__}: {exc}"
             with app.app_context():
                 db.session.rollback()
-        time.sleep(max(0.25, MARKET_REFRESH_SECONDS - (time.time() - cycle_started_at)))
+        time.sleep(max(0.25, runtime_interval("spot_market_refresh", MARKET_REFRESH_SECONDS) - (time.time() - cycle_started_at)))
 
 
 def background_dual_market_refresh():
@@ -6860,7 +7264,7 @@ def background_dual_market_refresh():
         except Exception:
             with app.app_context():
                 db.session.rollback()
-        time.sleep(max(0.25, MARKET_REFRESH_SECONDS - (time.time() - cycle_started_at)))
+        time.sleep(max(0.25, runtime_interval("dual_market_refresh", MARKET_REFRESH_SECONDS) - (time.time() - cycle_started_at)))
 
 
 def background_funding_history_sync():
@@ -6880,7 +7284,7 @@ def background_funding_history_sync():
                     sync_funding_history(batch)
         except Exception:
             db.session.rollback()
-        time.sleep(FUNDING_HISTORY_SYNC_SECONDS)
+        time.sleep(runtime_interval("funding_history_sync", FUNDING_HISTORY_SYNC_SECONDS))
 
 
 def background_price_history_backfill():
@@ -6905,14 +7309,15 @@ def background_price_history_backfill():
                     backfill_price_history(groups)
         except Exception:
             db.session.rollback()
-        time.sleep(PRICE_BACKFILL_SYNC_SECONDS)
+        time.sleep(runtime_interval("price_history_backfill", PRICE_BACKFILL_SYNC_SECONDS))
 
 
 def background_announcement_scan():
     global LAST_ANNOUNCEMENT_SCAN_DATE
     while True:
         now = datetime.now(SHANGHAI_TZ)
-        if now.hour >= ANNOUNCEMENT_SCAN_HOUR and LAST_ANNOUNCEMENT_SCAN_DATE != now.date():
+        schedule = runtime_daily_time("announcement_scan", f"{ANNOUNCEMENT_SCAN_HOUR:02d}:00")
+        if (now.hour, now.minute) >= schedule and LAST_ANNOUNCEMENT_SCAN_DATE != now.date():
             try:
                 with app.app_context():
                     mark_automation_status("announcement_scan", "started")
@@ -6931,7 +7336,8 @@ def background_daily_horn_scan():
     while True:
         now = datetime.now(SHANGHAI_TZ)
         report_date = now.strftime("%Y-%m-%d")
-        if now.hour == HORN_SCAN_HOUR and LAST_HORN_SCAN_DATE != now.date():
+        schedule = runtime_daily_time("daily_trend_push", f"{HORN_SCAN_HOUR:02d}:00")
+        if (now.hour, now.minute) >= schedule and LAST_HORN_SCAN_DATE != now.date():
             try:
                 with app.app_context():
                     mark_automation_status("daily_horn_scan", "started")
@@ -6956,6 +7362,27 @@ def background_daily_horn_scan():
         time.sleep(60)
 
 
+def background_intraday_early_trend_scan():
+    """Align to configured slots and evaluate only the most recently closed 30-minute candles."""
+    last_slot = None
+    time.sleep(25)
+    while True:
+        interval = int(runtime_interval("early_trend_scan", 1800))
+        slot = int(time.time()) // interval
+        if slot != last_slot:
+            try:
+                with app.app_context():
+                    mark_automation_status("intraday_early_trend_scan", "started")
+                    scan_intraday_early_trends()
+                    mark_automation_status("intraday_early_trend_scan", "success")
+                last_slot = slot
+            except Exception as exc:
+                with app.app_context():
+                    db.session.rollback()
+                    mark_automation_status("intraday_early_trend_scan", "error", exc)
+        time.sleep(20)
+
+
 def background_transfer_network_sync():
     time.sleep(10)
     while True:
@@ -6968,7 +7395,7 @@ def background_transfer_network_sync():
             with app.app_context():
                 db.session.rollback()
                 mark_automation_status("transfer_network_sync", "error", exc)
-        time.sleep(TRANSFER_NETWORK_SYNC_SECONDS)
+        time.sleep(runtime_interval("transfer_network_sync", TRANSFER_NETWORK_SYNC_SECONDS))
 
 
 def background_index_component_sync():
@@ -6983,7 +7410,7 @@ def background_index_component_sync():
             with app.app_context():
                 db.session.rollback()
                 mark_automation_status("index_component_sync", "error", exc)
-        time.sleep(INDEX_COMPONENT_REFRESH_SECONDS)
+        time.sleep(runtime_interval("index_component_sync", INDEX_COMPONENT_REFRESH_SECONDS))
 
 
 def background_thought_analysis_push():
@@ -6998,7 +7425,7 @@ def background_thought_analysis_push():
             with app.app_context():
                 db.session.rollback()
                 mark_automation_status("thought_analysis_push", "error", exc)
-        time.sleep(300)
+        time.sleep(runtime_interval("thought_watch_scan", 300))
 
 
 def persist_thought_watch_basis(symbol, basis, funding):
@@ -7110,6 +7537,7 @@ def start_background_workers():
     threading.Thread(target=background_index_component_sync, daemon=True, name="index-component-sync").start()
     threading.Thread(target=background_announcement_scan, daemon=True, name="announcement-scan").start()
     threading.Thread(target=background_daily_horn_scan, daemon=True, name="daily-horn-scan").start()
+    threading.Thread(target=background_intraday_early_trend_scan, daemon=True, name="intraday-early-trend-scan").start()
     threading.Thread(target=background_transfer_network_sync, daemon=True, name="transfer-network-sync").start()
     threading.Thread(target=background_thought_analysis_push, daemon=True, name="thought-analysis-push").start()
     threading.Thread(target=background_turnover_basis_watch, daemon=True, name="turnover-basis-watch").start()

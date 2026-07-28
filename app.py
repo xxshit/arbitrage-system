@@ -3211,10 +3211,18 @@ def send_daily_lark_trend_report():
             setup_title = "犄角延续型，结构分参与前三排序"
         else:
             setup_title = "30M 短线点火，等待 4H 跟随"
+        short_bias = "偏多" if short_item or early_stage else "未确认"
+        medium_bias = "偏多" if long_item else ("观察" if continue_item else "未确认")
+        horizon_text = (
+            f"周期观点：短线30M <font color='{'cus-bull' if short_bias == '偏多' else 'cus-muted'}'>{short_bias}</font>"
+            f"｜中线4H <font color='{'cus-bull' if medium_bias == '偏多' else 'cus-watch'}'>{medium_bias}</font>"
+            "｜长线1D-3D <font color='cus-muted'>未纳入本次日报确认</font>"
+        )
         levels_text = f"向下看 {support:.6g}｜向上看 {resistance:.6g}" if support and resistance else "关键位暂未同步"
         sections.append("\n".join([
             f"{lark_dot_label('↑ 看涨 / ' + ('较强' if resonance >= 85 else '观察'), 'cus-bull')}",
             f"**{index}. {symbol}**　{lark_dot_label('重点启动信号' if early_stage and early_stage.signal_type == 'strong_focus' else f'结构分 {resonance:.1f}', 'cus-bull' if early_stage and early_stage.signal_type == 'strong_focus' else lark_score_color(resonance))}",
+            horizon_text,
             f"结构：{setup_title}",
             f"时间：{report_date} 08:00",
             metric_line("focus") if "focus" in rows else "",
@@ -3477,6 +3485,8 @@ def thought_snapshot(symbol):
             "cvd": cvd,
             "change_30m": percent_delta(float(closed30[-1][4]), float(closed30[-13][4])),
             "change_4h": percent_delta(float(closed4h[-1][4]), float(closed4h[-8][4])),
+            "change_1d": percent_delta(float(closed4h[-1][4]), float(closed4h[-7][1])) if len(closed4h) >= 7 else None,
+            "change_3d": percent_delta(float(closed4h[-1][4]), float(closed4h[-19][1])) if len(closed4h) >= 19 else None,
             "funding_rate": float(premium.get("lastFundingRate", 0) or 0) * 100,
             "basis": percent_delta(mark_price, index_price) if index_price else None,
             "validation": validation,
@@ -4417,6 +4427,83 @@ def upsert_thought_push_snapshot(symbol, metrics):
     item.updated_at = datetime.now()
 
 
+def thought_horizon_outlook(analysis):
+    """Separate short, medium and multi-day direction instead of flattening them into one call."""
+    validation = analysis.get("validation") or {}
+    micro = analysis.get("micro_validation") or {}
+
+    def row(key):
+        return validation.get(key) or micro.get(key) or {}
+
+    def structure_score(keys):
+        scores = []
+        for key in keys:
+            item = row(key)
+            price = item.get("price_change")
+            if price is None:
+                continue
+            score = 1.1 if price > 0 else (-1.1 if price < 0 else 0)
+            cvd = item.get("cvd")
+            if cvd is not None:
+                score += 0.55 if cvd > 0 else (-0.55 if cvd < 0 else 0)
+            oi = item.get("oi_change")
+            ratio = item.get("ratio_change")
+            if oi is not None and ratio is not None:
+                if price > 0 and oi > 0 and ratio < 0:
+                    score += 0.8
+                elif price < 0 and oi > 0 and ratio > 0:
+                    score -= 0.65
+                elif price > 0 and oi < 0:
+                    score -= 0.35
+                elif price < 0 and oi < 0:
+                    score += 0.2
+            scores.append(score)
+        return sum(scores) / len(scores) if scores else None
+
+    def price_score(values):
+        valid = [value for value in values if value is not None]
+        if not valid:
+            return None
+        return sum(1 if value > 0 else (-1 if value < 0 else 0) for value in valid) / len(valid)
+
+    def describe(score, evidence):
+        if score is None:
+            return {"bias": "未确认", "tone": "muted", "evidence": "数据不足，不强行判断"}
+        if score >= 0.55:
+            return {"bias": "偏多", "tone": "bull", "evidence": evidence}
+        if score <= -0.55:
+            return {"bias": "偏空", "tone": "bear", "evidence": evidence}
+        return {"bias": "震荡/分歧", "tone": "watch", "evidence": evidence}
+
+    short_score = structure_score(("5m", "15m", "30m"))
+    medium_score = structure_score(("1h", "2h", "4h"))
+    long_score = price_score((analysis.get("change_1d"), analysis.get("change_3d")))
+    funding = analysis.get("funding_rate")
+    basis = analysis.get("basis")
+    if long_score is not None and funding is not None and basis is not None:
+        if funding > 0 and basis > 0:
+            long_score += 0.25
+        elif funding < 0 and basis < 0:
+            long_score -= 0.25
+    return {
+        "short": describe(short_score, "参考5MIN/15MIN/30MIN量价、持仓、人数比与CVD"),
+        "medium": describe(medium_score, "参考1H/2H/4H结构是否共振"),
+        "long": describe(long_score, "参考1D/3D价格趋势，资金费和基差只作辅助"),
+    }
+
+
+def thought_horizon_line(analysis):
+    outlook = thought_horizon_outlook(analysis)
+    colors = {"bull": "cus-bull", "bear": "cus-bear", "watch": "orange", "muted": "cus-muted"}
+    parts = []
+    for key, label in (("short", "短线5M-30M"), ("medium", "中线1H-4H"), ("long", "长线1D-3D")):
+        item = outlook[key]
+        parts.append(f"{label} <font color='{colors[item['tone']]}'>{item['bias']}</font>")
+    conflicts = {outlook[key]["bias"] for key in ("short", "medium", "long")} >= {"偏多", "偏空"}
+    suffix = "｜周期方向相反，禁止用短线结论代替长线" if conflicts else ""
+    return "周期观点：" + "｜".join(parts) + suffix
+
+
 def t_micro_line(micro, label, key):
     item = (micro or {}).get(key) or {}
     return (
@@ -4455,6 +4542,7 @@ def thought_lark_t_message(analysis, direction):
         title,
         f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
         f"价格：{lark_price_value(last)}｜BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}｜BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        thought_horizon_line(analysis),
         t_micro_line(micro, "5MIN", "5m"),
         t_micro_line(micro, "15MIN", "15m"),
         t_micro_line(micro, "30MIN", "30m"),
@@ -4487,6 +4575,7 @@ def thought_lark_era_message(analysis, direction):
         header, title,
         f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
         f"价格：{lark_price_value(analysis.get('last'))}｜BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}｜BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        thought_horizon_line(analysis),
         t_micro_line(micro, "5MIN", "5m"),
         t_micro_line(micro, "15MIN", "15m"),
         t_micro_line(micro, "30MIN", "30m"),
@@ -4511,6 +4600,7 @@ def thought_lark_turnover_body(analysis, header, title, judgement, key_note):
         title,
         f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
         f"价格：{lark_price_value(analysis.get('last'))}｜BN当前基差：{lark_plain_value(basis, 4, '%')}｜本轮捕捉基差：{lark_plain_value(observed_basis, 4, '%')}｜BN资费：{lark_plain_value(funding, 4, '%')}",
+        thought_horizon_line(analysis),
         t_micro_line(micro, "5MIN", "5m"),
         t_micro_line(micro, "15MIN", "15m"),
         thought_window_line(validation, "30MIN", "30m"),
@@ -4654,6 +4744,7 @@ def thought_lark_ake_wall_message(analysis, direction):
         title,
         f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
         f"价格：{lark_price_value(analysis.get('last'))}，BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}，BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        thought_horizon_line(analysis),
         ake_wall_bucket_line(wall),
         f"卖墙合计：{lark_compact_number(effective_wall_qty)} AKE，约 {lark_compact_number(effective_wall_notional)} USDT；0.0018-0.0020 买盘约 {lark_compact_number(wall.get('near_bid_qty'))} AKE",
         thought_window_line(validation, "30MIN", "30m"),
@@ -4909,6 +5000,7 @@ def thought_lark_db_fallback_message(analysis, direction):
         f"{symbol.split('/')[0]}思路盯盘：结构观察",
         f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
         f"价格：{lark_price_value(analysis.get('last'))}，BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}，BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        thought_horizon_line(analysis),
         f"合约持仓：{lark_compact_number(analysis.get('oi_value'))}，合约成交额：{lark_compact_number(analysis.get('futures_volume'))}，现货成交额：{lark_compact_number(analysis.get('spot_volume'))}",
         f"合约/现货量比：{lark_plain_value(analysis.get('futures_spot_volume_ratio'), 2, 'x')}，开差：{lark_plain_value(analysis.get('open_spread'), 4, '%')}，平差：{lark_plain_value(analysis.get('close_spread'), 4, '%')}",
         f"判断：{judgement}",
@@ -4990,6 +5082,7 @@ def thought_lark_ake_structure_message(analysis, direction):
         title,
         f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
         f"{price_line}，BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}，BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        thought_horizon_line(analysis),
         f"{oi_line}，合约成交额：{lark_compact_number(analysis.get('futures_volume'))}，现货成交额：{lark_compact_number(analysis.get('spot_volume'))}",
         f"开差：{lark_plain_value(analysis.get('open_spread'), 4, '%')}，平差：{lark_plain_value(analysis.get('close_spread'), 4, '%')}",
         thought_window_line(validation, "30MIN", "30m"),
@@ -5031,6 +5124,7 @@ def thought_lark_message(analysis, direction):
         f"{symbol.split('/')[0]}思路盯盘：{title_map.get(direction, '结构观察')}",
         f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
         f"价格：{lark_price_value(analysis.get('last'))}，BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}，BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        thought_horizon_line(analysis),
         thought_window_line(validation, "30MIN", "30m"),
         thought_window_line(validation, "1H", "1h"),
         thought_window_line(validation, "2H", "2h"),

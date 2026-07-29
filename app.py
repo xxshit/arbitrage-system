@@ -308,6 +308,14 @@ class ThoughtPushSnapshot(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
+class ThoughtLiveSnapshot(db.Model):
+    """盯盘最新快照；每次扫描覆盖，不与推送去重状态混用。"""
+    id = db.Column(db.Integer, primary_key=True)
+    symbol = db.Column(db.String(30), nullable=False, unique=True, index=True)
+    payload_json = db.Column(db.Text, nullable=False)
+    captured_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+
+
 class ThoughtPushEvent(db.Model):
     """不可覆盖的思路推送审计记录，同时用于重启/并发场景的发送预占位。"""
     id = db.Column(db.Integer, primary_key=True)
@@ -3833,13 +3841,24 @@ def thought_snapshot(symbol):
     }
     fallback.update(fallback_overrides)
     try:
-        live_timeout = 2
-        ticker = get_json("https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({"symbol": raw_symbol}), timeout=live_timeout)
-        k30 = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "30m", "limit": 60}), timeout=live_timeout)
-        k4h = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "4h", "limit": 30}), timeout=live_timeout)
-        premium = get_json("https://fapi.binance.com/fapi/v1/premiumIndex?" + urlencode({"symbol": raw_symbol}), timeout=live_timeout)
-        oi = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 50}), timeout=live_timeout)
-        ratios = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 50}), timeout=live_timeout)
+        urls = {
+            "ticker": "https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({"symbol": raw_symbol}),
+            "k30": "https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "30m", "limit": 60}),
+            "k4h": "https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "4h", "limit": 30}),
+            "premium": "https://fapi.binance.com/fapi/v1/premiumIndex?" + urlencode({"symbol": raw_symbol}),
+            "oi": "https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 50}),
+            "ratios": "https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 50}),
+        }
+        payloads, errors = fetch_market_payloads(
+            urls,
+            cache_seconds={name: 20 for name in urls},
+            live_timeout=5,
+        )
+        missing = [name for name in urls if name not in payloads]
+        if missing:
+            raise RuntimeError(f"thought snapshot missing {','.join(missing)}: {errors}")
+        ticker, k30, k4h = payloads["ticker"], payloads["k30"], payloads["k4h"]
+        premium, oi, ratios = payloads["premium"], payloads["oi"], payloads["ratios"]
         last = float(ticker.get("lastPrice", 0) or 0)
         support = min(float(row[3]) for row in k30[-12:])
         resistance = max(float(row[2]) for row in k30[-20:])
@@ -3953,6 +3972,16 @@ def thought_fast_snapshot(symbol):
         "source": "db_fallback",
     }
     fallback.update(config.get("fallback") or {})
+    latest = ThoughtLiveSnapshot.query.filter_by(symbol=symbol).first()
+    if latest and latest.payload_json:
+        try:
+            payload = json.loads(latest.payload_json)
+            if isinstance(payload, dict):
+                payload["updated_at"] = latest.captured_at.strftime("%Y-%m-%d %H:%M:%S")
+                payload["source"] = "thought_live_db"
+                return {**fallback, **payload}
+        except (TypeError, ValueError):
+            pass
     return thought_snapshot_from_db(symbol, fallback)
 
 
@@ -4018,6 +4047,21 @@ def thought_watch_snapshots(only_symbols=None):
         for future in as_completed(futures):
             symbol, snapshot = future.result()
             results[symbol] = snapshot
+    # 最新盯盘状态每轮覆盖写库。页面只读这张表，不在打开页面时重新请求交易所，
+    # 推送去重仍使用 ThoughtPushSnapshot，避免“保存最新数据”破坏重复抑制。
+    captured_at = datetime.now()
+    for symbol, snapshot in results.items():
+        row = ThoughtLiveSnapshot.query.filter_by(symbol=symbol).first()
+        # 上游偶发超时会返回旧市场库兜底值；已有实时快照时绝不能让旧兜底覆盖它。
+        if row is not None and snapshot.get("source") != "live":
+            continue
+        if row is None:
+            row = ThoughtLiveSnapshot(symbol=symbol, payload_json="{}")
+            db.session.add(row)
+        row.payload_json = json.dumps(snapshot, ensure_ascii=False, default=str)
+        row.captured_at = captured_at
+    if results:
+        db.session.commit()
     return [results[symbol] for symbol in symbols if symbol in results]
 
 
@@ -6019,8 +6063,8 @@ def thought_coti_item(coti):
     current_funding = coti.get("funding_rate")
     return {
         "symbol": coti["symbol"],
-        "trade_side": "中长线看空 / 短线待确认",
-        "trade_status": "短线犄角转强 / 中长线偏空待证",
+        "trade_side": "短线看多 / 中长线看空待证",
+        "trade_status": "原短线看跌判负 / 当前犄角延续",
         "entry": None,
         "entry_time": "2026-07-29 00:44",
         "exit": None,
@@ -6042,25 +6086,26 @@ def thought_coti_item(coti):
         "validation": coti.get("validation") or {},
         "source": coti.get("source"),
         "screenshot_url": None,
-        "thought_summary": "COTI 的短线已由不确定升级为偏多犄角：30MIN价格、持仓与CVD同步上升，多空人数比明显下降；冲高0.017192后当前属于高波动回踩。中长线换手后偏空假设继续保留，但尚未进入执行阶段，不能在犄角完整且负资费拥挤时追空。",
+        "thought_summary": "COTI 从盯盘价0.012705继续上涨，原先把极负基差、极负资费和1H结算理解为短期转跌前兆，与实际走势相反，这一段短线看跌明确判负。当前30MIN至4H仍是价格涨、持仓涨、人数比跌、近期CVD涨的偏多犄角；负基差和负资费更像拥挤空头燃料。中长线出货后看空只保留为待验证假设，不能拿它指导当前追空。",
         "user_mistakes": [
             "需要防止把‘资费周期从4H缩短为1H’直接等同于主力已经完成换手。它能确认合约端失衡和风险升高，但不能单独确认随后必跌。",
             "CVD持续下跌而价格抗跌时，不只代表卖压，也可能代表主动卖单被被动买盘吸收；若持仓继续增加、人数比继续下降，短线仍可能逼空。",
         ],
         "assistant_mistakes": [
-            "我不能把极负基差、极负资费机械翻译成做空信号；空头越拥挤，价格越抗跌，反向逼空风险反而越高。",
+            "这次短线判断错误的核心，是把极负基差、极负资费机械翻译成做空信号，却没有给予‘价格抗跌、持仓增加、人数比下降’足够高的否决权；空头越拥挤而价格越强，反向逼空风险反而越高。",
+            "我还混用了不同时间窗：长窗口CVD仍为负，但最近30MIN至4H的CVD已经转正。判断短线方向时，近期增量必须优先于更长历史累计值。",
             "后续必须分别统计短线、波段和中长线判断，不能用一个方向覆盖所有周期，也不能在短线犄角仍完整时提前宣布中长线剧本已经开始。",
         ],
-        "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "COTI 为新增长周期假设，尚未完成验证；短线和中长线分开记分。"},
+        "thesis_win_rate": {"wins": 0, "losses": 1, "pending": 1, "rate": 0.0, "note": "短线看跌与实际上涨相反，已记1次失败；中长线出货后看空仍待验证，不用未完成剧本掩盖短线错误。"},
         "my_thesis": "你的判断：COTI 中长线偏空、短线暂不确定。7月28日约05:00-08:00出现极负基差，结算前资费顶到负向上限，结算周期随后由4H缩短为1H，你把它理解为主力换手信号；同时CVD持续走低，说明主动卖出强于主动买入。你预计主力换手接近完成后，价格转跌，持仓和多空人数比会逐步出现与偏多犄角相反的结构。当前持仓上升、人数比下降的犄角仍在，因此不把短线直接判空。",
-        "assistant_thesis": "我的判断：你的中长线偏空假设有逻辑基础，但证据目前只够定义为‘高风险换手期’，还不够定义为‘出货完成’。2026-07-29 17:45的实时复核显示，30MIN价格约+14.30%、持仓约+11.81%、人数比约-19.82%、CVD约+2.42M，已经构成偏多犄角共振；1H/2H/4H也维持价格涨、持仓涨、人数比跌、CVD涨。短线应升级为偏多，但刚经历0.017192冲高，现价回到0.0144附近，不适合追涨。中线转空要等偏多犄角破坏；长线看空还需价格结构、持续派发和官方供给/解锁证据补全。",
+        "assistant_thesis": f"我的修正：当前短线看多但不追高。现价约{coti.get('last') or 0:.6f}，相对盯盘价0.012705约上涨{((coti.get('last') or 0) / 0.012705 - 1) * 100:+.2f}%；最近30MIN价格约{coti.get('change_30m') or 0:+.2f}%，持仓窗口约{coti.get('oi_change_pct') or 0:+.2f}%，人数比约{coti.get('ratio_change_pct') or 0:+.2f}%。1H至4H若继续维持价格涨、持仓涨、人数比跌、近期CVD为正，属于逼空犄角延续。中线转空必须等价格失守放量承接区、反抽失败，并伴随近期CVD转负和犄角破坏；长线看空还需持续派发及官方供给/解锁证据补全。",
         "challenge_points": [
-            "短线（5MIN-4H）：偏多但不追涨。30MIN至4H已形成价格涨、持仓涨、人数比跌、CVD涨的共振；5MIN回踩时CVD转负但量能仅约0.18倍，更像缩量回踩，需观察0.0142-0.0146能否重新站稳。",
+            "短线（30MIN-4H）：当前偏多但不追涨。价格涨、持仓涨、人数比跌、近期CVD涨仍在共振；只有回踩放量失守结构支撑并反抽失败，才从延续降级为反转观察。",
             "波段（1D-3D）：偏空观察。若价格跌破换手区低点后反抽失败，CVD继续下降，且偏多犄角同步破坏，才升级为可执行的空头窗口。",
             "中长线（1W+）：看空假设。需要看到派发/平多或新空建立的连续结构，不能只用一次极端结算事件定论。",
             "两条看空路径要区分：价格跌、持仓跌、人数比回升更像多头撤退；价格跌、持仓增、人数比回升且CVD跌更像新空建立。两者都偏空，但速度与反抽风险不同。",
         ],
-        "validation_view": "当前短线偏多确认，接下来不追涨而看回踩：重新站稳0.0146并放量，可再次测试0.0153及0.0172；跌破0.0142后反抽失败，再看0.0127-0.0131结构支撑。只有价格失守、犄角破坏、CVD转弱三层依次成立，才把中长线看空转成实际做空信号。",
+        "validation_view": f"当前短线偏多确认。动态支撑约{coti.get('support') or 0:.6f}，动态压力约{coti.get('resistance') or 0:.6f}；不在压力附近追涨。价格放量失守支撑并反抽失败、近期CVD转负、持仓与人数比犄角破坏三项共振后，才把中长线看空转成实际做空信号。",
         "take_profit": [
             "当前没有空单，不设置机械止盈。出现做空确认后，第一目标应放在换手区低点或放量支撑，而不是凭固定百分比猜目标。",
             "若未来价格下跌但持仓快速坍塌、负基差迅速收敛，可能只是集中平仓或爆仓，应先锁定利润，防止剧烈反抽。",
@@ -6070,6 +6115,7 @@ def thought_coti_item(coti):
             "若放量突破换手区高点且回踩不破，同时CVD由负转正，说明主动买入接管，短中线看空均暂时失效。",
         ],
         "review_notes": [
+            f"2026-07-29最新纠错：COTI现价约{coti.get('last') or 0:.6f}，相对0.012705盯盘起点约{((coti.get('last') or 0) / 0.012705 - 1) * 100:+.2f}%。原短线看跌与实际上涨相反，已明确记为失败；错因是把极端负资金面当成转跌确认，忽略了价格抗跌、持仓扩张、人数比下降和近期CVD转正共同构成的逼空结构。",
             "2026-07-29 17:45实时复核：现价约0.014443，BN基差约-0.9211%，BN资费约-0.0176%；30MIN价格+14.30%、持仓+11.81%、人数比-19.82%、CVD+2.42M，短线偏多犄角已确认。5MIN价格回落约3.53%、CVD转负，但量能仅约0.18倍，暂按冲高后的缩量回踩，不按趋势反转。",
             "2026-07-29：用户加入COTI盯盘，提出中长线看空、短线待确认的分周期假设。",
             "数据库核验：2026-07-28 08:00结算资费为-2.0000%，随后09:00至次日00:00连续按1小时结算，确认极端失衡后结算周期由原8小时记录切为1小时；用户观察的4H→1H变化以盘面记录为准。",

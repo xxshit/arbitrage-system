@@ -495,7 +495,7 @@ PRICE_HISTORY_RETENTION_SECONDS = 8 * 24 * 60 * 60
 TRADE_VALIDATION_CANDLE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 TRADE_VALIDATION_CHART_SECONDS = 3 * 24 * 60 * 60
 TRADE_VALIDATION_INTERVAL = "5m"
-TRADE_VALIDATION_AUTO_SYMBOLS = {"MIRA/USDT"}
+TRADE_VALIDATION_AUTO_SYMBOLS = {"COTI/USDT"}
 TREND_WINDOWS = {
     "change_5m": 5 * 60,
     "change_15m": 15 * 60,
@@ -6900,7 +6900,7 @@ def latest_validation_price(symbol):
 
 
 def validation_pnl(plan, price):
-    if price is None or plan.status == "planned":
+    if price is None or plan.status in {"planned", "cancelled"}:
         return 0.0
     ref_price = plan.exit_price if plan.status == "closed" and plan.exit_price else price
     if plan.direction == "long":
@@ -6934,7 +6934,11 @@ def refresh_validation_plan(plan, price):
 def replay_validation_plan(plan, candles):
     """按K线时间顺序回放趋势验证，避免先止损后又显示止盈的假剧情。"""
     if not candles:
-        refresh_validation_plan(plan, latest_validation_price(plan.symbol))
+        # A pending plan must never bypass candle-close confirmation just
+        # because the exchange temporarily failed to return klines. Existing
+        # open trades may still be risk-managed with the latest cached price.
+        if plan.status == "open":
+            refresh_validation_plan(plan, latest_validation_price(plan.symbol))
         return []
     is_short = plan.direction == "short"
     entry_idx = None
@@ -6956,7 +6960,9 @@ def replay_validation_plan(plan, candles):
         if replay_from and bucket_time < replay_from - timedelta(seconds=PRICE_HISTORY_BUCKET_SECONDS):
             continue
         if entry_idx is None:
-            entered = low <= plan.entry_price if is_short else high >= plan.entry_price
+            # 计划单必须由5分钟收盘确认突破/跌破；盘中影线触价不再算入场，
+            # 避免COTI 2026-07-30式假突破刚触发便反向止损。
+            entered = float(candle.close) <= plan.entry_price if is_short else float(candle.close) >= plan.entry_price
             if not entered:
                 continue
             entry_idx = idx
@@ -7227,7 +7233,7 @@ def trade_validation():
     plans = TradeValidation.query.order_by(TradeValidation.created_at.desc()).all()
     replay_events = {}
     for plan in plans:
-        if plan.status == "closed":
+        if plan.status not in {"planned", "open"}:
             continue
         sync_trade_validation_candles(plan.symbol)
         cutoff = int(time.time()) - TRADE_VALIDATION_CHART_SECONDS
@@ -7281,13 +7287,13 @@ def trade_validation():
 @app.get("/api/trade-validation/<int:plan_id>/detail")
 def trade_validation_detail(plan_id):
     plan = db.get_or_404(TradeValidation, plan_id)
-    if plan.status != "closed":
+    if plan.status in {"planned", "open"}:
         sync_trade_validation_candles(plan.symbol)
     cutoff = int(time.time()) - TRADE_VALIDATION_CHART_SECONDS
     candles = TradeValidationCandle.query.filter_by(
         symbol=plan.symbol, interval=TRADE_VALIDATION_INTERVAL
     ).filter(TradeValidationCandle.bucket_at >= cutoff).order_by(TradeValidationCandle.bucket_at).all()
-    events = replay_validation_plan(plan, candles)
+    events = [] if plan.status == "cancelled" else replay_validation_plan(plan, candles)
     db.session.commit()
     price = latest_validation_price(plan.symbol)
     return jsonify({
@@ -7309,7 +7315,7 @@ def trade_validation_detail(plan_id):
         "exit_price": plan.exit_price,
         "exit_reason": plan.exit_reason,
         "events": events,
-        "candles": validation_candles(plan.symbol, limit=None, sync=plan.status != "closed"),
+        "candles": validation_candles(plan.symbol, limit=None, sync=plan.status in {"planned", "open"}),
     })
 
 

@@ -18,7 +18,7 @@
       <p class="eyebrow">{{ 'WELCOME BACK' if mode == 'login' else 'INVITATION ONLY' }}</p>
       <h2>{{ '欢迎回来' if mode == 'login' else '创建查看账号' }}</h2>
       <p class="sub">{{ '登录后继续查看实时行情与分析。' if mode == 'login' else '普通账号必须使用管理员生成的一次性邀请码。' }}</p>
-      <label>账号<input id="authUsername" required minlength="3" maxlength="24" autocomplete="username" placeholder="小写字母、数字或下划线"></label>
+      <label>账号<input id="authUsername" required minlength="{{ 2 if mode == 'login' else 3 }}" maxlength="24" autocomplete="username" placeholder="小写字母、数字或下划线"></label>
       <label>密码<input id="authPassword" type="password" required minlength="10" autocomplete="{{ 'current-password' if mode == 'login' else 'new-password' }}" placeholder="至少 10 位"></label>
       {% if mode == 'register' %}<label>邀请码<input id="inviteCode" required autocomplete="off" placeholder="ARBI-XXXXXXXXXX"></label>{% endif %}
       <p id="authError" class="auth-error"></p>

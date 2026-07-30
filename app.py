@@ -7135,8 +7135,8 @@ def validation_auto_metrics(symbol):
     }
 
 
-def validation_signal_plan(symbol):
-    metrics = validation_auto_metrics(symbol)
+def validation_signal_plan(symbol, metrics=None):
+    metrics = metrics or validation_auto_metrics(symbol)
     if not metrics:
         return None
     price = metrics["price"]
@@ -7173,6 +7173,13 @@ def validation_signal_plan(symbol):
         tp1 = entry - risk * 0.9
         tp2 = entry - risk * 1.7
         thesis = f"{symbol} 自动续盯做空：30M/1H 价格走弱，CVD 同步为负，多空人数比回升或持仓未明显塌陷，按反弹转弱/诱多失败验证。等待跌破 {entry:.6g} 后才触发，站回 {stop:.6g} 说明空头验证失败。"
+    # Do not create a plan whose trigger already belongs to an old, distant
+    # structure. Keep scanning and create it only after price approaches a
+    # currently valid breakout/breakdown level.
+    entry_gap_pct = abs(entry - price) / price * 100 if price > 0 else 0.0
+    max_entry_gap_pct = max(2.5, atr / price * 200) if price > 0 else 2.5
+    if entry_gap_pct > max_entry_gap_pct:
+        return None
     return {
         "symbol": symbol,
         "direction": direction,
@@ -7184,16 +7191,83 @@ def validation_signal_plan(symbol):
     }
 
 
+def planned_validation_cancel_reason(plan, signal, metrics, now=None):
+    """Invalidate an unfilled plan when its original structure is no longer current."""
+    if plan.status != "planned":
+        return None
+    now = now or datetime.now()
+    age_minutes = max(0.0, (now - plan.created_at).total_seconds() / 60) if plan.created_at else 0.0
+    price = float(metrics.get("price") or 0) if metrics else 0.0
+    atr = float(metrics.get("atr") or 0) if metrics else 0.0
+    atr_pct = atr / price * 100 if price > 0 else 0.0
+
+    # A confirmed opposite signal means the old thesis has reversed. Requiring
+    # at least 15 minutes prevents a newly-created plan from being replaced by
+    # a single noisy refresh.
+    if age_minutes >= 15 and signal and signal["direction"] != plan.direction:
+        return "signal_reversed"
+
+    if price > 0 and plan.entry_price > 0:
+        # Distance is positive only when price has moved away from the trigger:
+        # below a long breakout entry or above a short breakdown entry.
+        if plan.direction == "long":
+            away_pct = (plan.entry_price - price) / plan.entry_price * 100
+        else:
+            away_pct = (price - plan.entry_price) / plan.entry_price * 100
+        drift_limit = max(2.5, atr_pct * 2.0)
+        if away_pct >= max(7.5, atr_pct * 3.0):
+            return "entry_out_of_range"
+        if age_minutes >= 60 and away_pct >= drift_limit:
+            return "entry_drifted"
+
+        # Even in the same direction, a materially repriced structure should
+        # get a fresh entry/stop instead of inheriting stale levels.
+        if age_minutes >= 45 and signal and signal["direction"] == plan.direction:
+            repriced_pct = abs(float(signal["entry_price"]) - plan.entry_price) / plan.entry_price * 100
+            if repriced_pct >= max(1.5, atr_pct * 1.5):
+                return "structure_repriced"
+
+    # 30M/1H evidence is no longer fresh after four hours. The plan can be
+    # recreated from current data if a valid signal still exists.
+    if age_minutes >= 240:
+        return "plan_expired"
+    return None
+
+
+def cancel_validation_plan(plan, reason, metrics=None):
+    reason_labels = {
+        "signal_reversed": "新结构已反向",
+        "entry_drifted": "价格已明显背离原入场位",
+        "entry_out_of_range": "入场位已脱离当前结构",
+        "structure_repriced": "同向结构已重新定价",
+        "plan_expired": "原30M/1H结构已过期",
+    }
+    price = float(metrics.get("price") or 0) if metrics else 0.0
+    detail = reason_labels.get(reason, reason)
+    price_text = f"，撤销时价格 {price:.8g}" if price > 0 else ""
+    plan.status = "cancelled"
+    plan.closed_at = datetime.now()
+    plan.exit_price = None
+    plan.exit_reason = reason
+    plan.thesis = f"{plan.thesis or ''} | 等待入场期间动态复核：{detail}{price_text}，旧计划作废并等待最新结构。"[-1000:]
+
+
 def ensure_trade_validation_auto_plans():
     for symbol in TRADE_VALIDATION_AUTO_SYMBOLS:
         active = TradeValidation.query.filter(
             TradeValidation.symbol == symbol,
             TradeValidation.status.in_(["planned", "open"]),
         ).first()
-        if active:
+        if active and active.status == "open":
             continue
         sync_trade_validation_candles(symbol)
-        signal = validation_signal_plan(symbol)
+        metrics = validation_auto_metrics(symbol)
+        signal = validation_signal_plan(symbol, metrics) if metrics else None
+        if active:
+            cancel_reason = planned_validation_cancel_reason(active, signal, metrics)
+            if not cancel_reason:
+                continue
+            cancel_validation_plan(active, cancel_reason, metrics)
         if not signal:
             continue
         db.session.add(TradeValidation(
@@ -7265,6 +7339,7 @@ def trade_validation():
             "thesis": plan.thesis,
             "current_price": price,
             "pnl": validation_pnl(plan, price),
+            "created_at": plan.created_at.strftime("%m-%d %H:%M:%S") if plan.created_at else None,
             "opened_at": plan.opened_at.strftime("%m-%d %H:%M:%S") if plan.opened_at else None,
             "closed_at": plan.closed_at.strftime("%m-%d %H:%M:%S") if plan.closed_at else None,
             "exit_price": plan.exit_price,
@@ -7310,6 +7385,7 @@ def trade_validation_detail(plan_id):
         "thesis": plan.thesis,
         "current_price": price,
         "pnl": validation_pnl(plan, price),
+        "created_at": plan.created_at.strftime("%m-%d %H:%M:%S") if plan.created_at else None,
         "opened_at": plan.opened_at.strftime("%m-%d %H:%M:%S") if plan.opened_at else None,
         "closed_at": plan.closed_at.strftime("%m-%d %H:%M:%S") if plan.closed_at else None,
         "exit_price": plan.exit_price,

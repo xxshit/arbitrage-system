@@ -118,6 +118,7 @@ class TradeValidationCandle(db.Model):
     close = db.Column(db.Float, nullable=False)
     volume = db.Column(db.Float)
     quote_volume = db.Column(db.Float)
+    taker_buy_quote_volume = db.Column(db.Float)
     captured_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
     __table_args__ = (db.UniqueConstraint("symbol", "interval", "bucket_at", name="uq_trade_validation_candle_symbol_interval_bucket"),)
 
@@ -6969,6 +6970,10 @@ def replay_validation_plan(plan, candles):
             opened_at = bucket_time
             final_status = "open"
             events.append({"type": "entry", "idx": idx, "price": plan.entry_price, "label": "买入" if not is_short else "开空"})
+            # The entry is confirmed by this candle's close. Its earlier high
+            # and low happened before the confirmed entry and must not be used
+            # to manufacture a same-candle stop or take-profit.
+            continue
 
         # 同一根K线内无法知道先后，趋势验证采用保守规则：止损优先于止盈。
         stop_hit = high >= plan.stop_price if is_short else low <= plan.stop_price
@@ -7004,8 +7009,13 @@ def sync_trade_validation_candles(symbol):
     """趋势验证专用K线缓存：只补缺口和最新K线，绘图从 MySQL 读取。"""
     raw_symbol = symbol.replace("/", "")
     now_bucket = int(time.time()) // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
-    latest = TradeValidationCandle.query.filter_by(symbol=symbol, interval=TRADE_VALIDATION_INTERVAL).order_by(TradeValidationCandle.bucket_at.desc()).first()
-    start_bucket = (latest.bucket_at + PRICE_HISTORY_BUCKET_SECONDS) if latest else now_bucket - TRADE_VALIDATION_CHART_SECONDS
+    candle_query = TradeValidationCandle.query.filter_by(symbol=symbol, interval=TRADE_VALIDATION_INTERVAL)
+    latest = candle_query.order_by(TradeValidationCandle.bucket_at.desc()).first()
+    missing_taker = candle_query.filter(TradeValidationCandle.taker_buy_quote_volume.is_(None)).order_by(TradeValidationCandle.bucket_at).first()
+    if missing_taker:
+        start_bucket = max(missing_taker.bucket_at, now_bucket - TRADE_VALIDATION_CANDLE_RETENTION_SECONDS)
+    else:
+        start_bucket = (latest.bucket_at + PRICE_HISTORY_BUCKET_SECONDS) if latest else now_bucket - TRADE_VALIDATION_CHART_SECONDS
     if start_bucket >= now_bucket:
         return
     start_ms, end_ms = start_bucket * 1000, now_bucket * 1000
@@ -7033,6 +7043,7 @@ def sync_trade_validation_candles(symbol):
                     "close": float(item[4]),
                     "volume": float(item[5]),
                     "quote_volume": float(item[7]),
+                    "taker_buy_quote_volume": float(item[10]) if len(item) > 10 else None,
                 })
         next_start = int(payload[-1][0]) + PRICE_HISTORY_BUCKET_SECONDS * 1000
         if next_start <= start_ms:
@@ -7040,12 +7051,21 @@ def sync_trade_validation_candles(symbol):
         start_ms = next_start
     if rows:
         existing = {
-            item.bucket_at for item in TradeValidationCandle.query.filter_by(
+            item.bucket_at: item for item in TradeValidationCandle.query.filter_by(
                 symbol=symbol, interval=TRADE_VALIDATION_INTERVAL
             ).filter(TradeValidationCandle.bucket_at.in_([row["bucket_at"] for row in rows])).all()
         }
         for row in rows:
-            if row["bucket_at"] not in existing:
+            current = existing.get(row["bucket_at"])
+            if current:
+                current.open = row["open"]
+                current.high = row["high"]
+                current.low = row["low"]
+                current.close = row["close"]
+                current.volume = row["volume"]
+                current.quote_volume = row["quote_volume"]
+                current.taker_buy_quote_volume = row["taker_buy_quote_volume"]
+            else:
                 db.session.add(TradeValidationCandle(**row))
     cutoff = now_bucket - TRADE_VALIDATION_CANDLE_RETENTION_SECONDS
     TradeValidationCandle.query.filter(
@@ -7096,8 +7116,17 @@ def validation_auto_metrics(symbol):
     highs = [row.high for row in rows]
     lows = [row.low for row in rows]
     volumes = [row.quote_volume or 0 for row in rows]
-    cvd_1h = sum(((row.close - row.open) / max(row.high - row.low, row.close * 0.001)) * (row.quote_volume or 0) for row in rows[-12:])
-    cvd_30m = sum(((row.close - row.open) / max(row.high - row.low, row.close * 0.001)) * (row.quote_volume or 0) for row in rows[-6:])
+    def true_cvd(items):
+        if not items or any(row.taker_buy_quote_volume is None for row in items):
+            return None
+        return sum(2 * float(row.taker_buy_quote_volume or 0) - float(row.quote_volume or 0) for row in items)
+
+    cvd_1h = true_cvd(rows[-12:])
+    cvd_30m = true_cvd(rows[-6:])
+    recent_30m_volume = sum(volumes[-6:])
+    prior_30m_volume = sum(volumes[-12:-6])
+    recent_1h_volume = sum(volumes[-12:])
+    prior_1h_volume = sum(volumes[-24:-12])
     price = closes[-1]
     atr = sum(high - low for high, low in zip(highs[-14:], lows[-14:])) / 14
     raw_symbol = symbol.replace("/", "")
@@ -7126,7 +7155,9 @@ def validation_auto_metrics(symbol):
         "price_4h": percent_delta(closes[-1], closes[-49]) if len(closes) >= 49 else 0,
         "cvd_30m": cvd_30m,
         "cvd_1h": cvd_1h,
-        "volume_1h": sum(volumes[-12:]),
+        "volume_1h": recent_1h_volume,
+        "volume_ratio_30m": recent_30m_volume / prior_30m_volume if prior_30m_volume > 0 else None,
+        "volume_ratio_1h": recent_1h_volume / prior_1h_volume if prior_1h_volume > 0 else None,
         "atr": atr,
         "oi_1h": oi_1h,
         "oi_4h": oi_4h,
@@ -7143,19 +7174,26 @@ def validation_signal_plan(symbol, metrics=None):
     atr = max(metrics["atr"], price * 0.012)
     oi_1h = metrics["oi_1h"] if metrics["oi_1h"] is not None else 0
     ratio_1h = metrics["ratio_1h"] if metrics["ratio_1h"] is not None else 0
+    cvd_30m = metrics.get("cvd_30m")
+    cvd_1h = metrics.get("cvd_1h")
+    volume_confirmed = (metrics.get("volume_ratio_30m") or 0) >= 1.15 or (metrics.get("volume_ratio_1h") or 0) >= 1.15
     long_score = 0
     long_score += 18 if metrics["price_30m"] > 0.35 and metrics["price_1h"] > 0.2 else 0
-    long_score += 18 if metrics["cvd_30m"] > 0 and metrics["cvd_1h"] > 0 else 0
+    long_score += 18 if cvd_30m is not None and cvd_1h is not None and cvd_30m > 0 and cvd_1h > 0 else 0
     long_score += 16 if oi_1h > 0.4 else 0
     long_score += 16 if ratio_1h < -0.8 else 0
     long_score += 10 if price >= metrics["high_30m"] * 0.995 else 0
+    long_score += 10 if volume_confirmed else 0
+    long_score += 8 if metrics["price_4h"] >= -1.0 else 0
     short_score = 0
     short_score += 18 if metrics["price_30m"] < -0.35 and metrics["price_1h"] < -0.2 else 0
-    short_score += 18 if metrics["cvd_30m"] < 0 and metrics["cvd_1h"] < 0 else 0
-    short_score += 16 if oi_1h > -0.5 else 0
+    short_score += 18 if cvd_30m is not None and cvd_1h is not None and cvd_30m < 0 and cvd_1h < 0 else 0
+    short_score += 16 if oi_1h > 0.4 else 0
     short_score += 16 if ratio_1h > 0.8 else 0
     short_score += 10 if price <= metrics["low_30m"] * 1.005 else 0
-    if max(long_score, short_score) < 52:
+    short_score += 10 if volume_confirmed else 0
+    short_score += 8 if metrics["price_4h"] <= 1.0 else 0
+    if max(long_score, short_score) < 68 or abs(long_score - short_score) < 12:
         return None
     if long_score >= short_score:
         entry = max(price * 1.001, metrics["high_30m"] * 1.0005)
@@ -7260,6 +7298,10 @@ def ensure_trade_validation_auto_plans():
         ).first()
         if active and active.status == "open":
             continue
+        if not active:
+            last_closed = TradeValidation.query.filter_by(symbol=symbol, status="closed").order_by(TradeValidation.closed_at.desc()).first()
+            if last_closed and last_closed.closed_at and datetime.now() - last_closed.closed_at < timedelta(minutes=30):
+                continue
         sync_trade_validation_candles(symbol)
         metrics = validation_auto_metrics(symbol)
         signal = validation_signal_plan(symbol, metrics) if metrics else None
@@ -7397,6 +7439,10 @@ def trade_validation_detail(plan_id):
 
 with app.app_context():
     db.create_all()
+    validation_candle_columns = {column["name"] for column in inspect(db.engine).get_columns("trade_validation_candle")}
+    if "taker_buy_quote_volume" not in validation_candle_columns:
+        db.session.execute(text("ALTER TABLE trade_validation_candle ADD COLUMN taker_buy_quote_volume FLOAT"))
+        db.session.commit()
     seed_runtime_rules()
     seed_symbol_aliases()
     seed_trade_validation()

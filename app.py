@@ -99,6 +99,8 @@ class TradeValidation(db.Model):
     stake_usdt = db.Column(db.Float, nullable=False, default=100.0)
     leverage = db.Column(db.Float, nullable=False, default=1.0)
     status = db.Column(db.String(20), nullable=False, default="planned", index=True)
+    horizon = db.Column(db.String(20), nullable=False, default="legacy", index=True)
+    max_hold_minutes = db.Column(db.Integer)
     thesis = db.Column(db.String(1000))
     opened_at = db.Column(db.DateTime)
     closed_at = db.Column(db.DateTime)
@@ -6976,15 +6978,17 @@ def replay_validation_plan(plan, candles):
             continue
 
         # 同一根K线内无法知道先后，趋势验证采用保守规则：止损优先于止盈。
-        stop_hit = high >= plan.stop_price if is_short else low <= plan.stop_price
+        short_term = getattr(plan, "horizon", None) == "short"
+        protected_stop = plan.entry_price if short_term and tp1_recorded else plan.stop_price
+        stop_hit = high >= protected_stop if is_short else low <= protected_stop
         tp2_hit = low <= plan.take_profit_2 if is_short else high >= plan.take_profit_2
         tp1_hit = low <= plan.take_profit_1 if is_short else high >= plan.take_profit_1
         if stop_hit:
             final_status = "closed"
             closed_at = bucket_time
-            exit_price = plan.stop_price
-            exit_reason = "stop"
-            events.append({"type": "stop", "idx": idx, "price": plan.stop_price, "label": "止损"})
+            exit_price = protected_stop
+            exit_reason = "breakeven_after_tp1" if short_term and tp1_recorded else "stop"
+            events.append({"type": "stop", "idx": idx, "price": protected_stop, "label": "保本退出" if exit_reason == "breakeven_after_tp1" else "止损"})
             break
         if tp1_hit and not tp1_recorded:
             tp1_recorded = True
@@ -6996,6 +7000,25 @@ def replay_validation_plan(plan, candles):
             exit_reason = "take_profit"
             events.append({"type": "tp2", "idx": idx, "price": plan.take_profit_2, "label": "止盈2"})
             break
+        if short_term and opened_at:
+            held_minutes = max(0.0, (bucket_time - opened_at).total_seconds() / 60)
+            close_price = float(candle.close)
+            momentum_failed = held_minutes >= 60 and not tp1_recorded and (
+                close_price >= plan.entry_price if is_short else close_price <= plan.entry_price
+            )
+            max_hold_reached = plan.max_hold_minutes and held_minutes >= plan.max_hold_minutes
+            if momentum_failed or max_hold_reached:
+                final_status = "closed"
+                closed_at = bucket_time
+                exit_price = close_price
+                exit_reason = "momentum_failed" if momentum_failed else "time_exit"
+                events.append({
+                    "type": "time_exit",
+                    "idx": idx,
+                    "price": close_price,
+                    "label": "动能失效退出" if momentum_failed else "时间退出",
+                })
+                break
 
     plan.status = final_status
     plan.opened_at = opened_at
@@ -7202,7 +7225,7 @@ def validation_signal_plan(symbol, metrics=None):
         stop = entry - risk
         tp1 = entry + risk * 0.9
         tp2 = entry + risk * 1.7
-        thesis = f"{symbol} 自动续盯做多：30M/1H 价格转强，CVD 同步为正，持仓与多空人数比条件给到趋势验证。等待突破 {entry:.6g} 后才触发，跌回 {stop:.6g} 说明多头验证失败。"
+        thesis = f"{symbol} 自动短线续盯做多：30M/1H 价格转强，真实CVD同步为正，持仓与多空人数比条件给到短线趋势验证。等待突破 {entry:.6g} 后才触发，跌回 {stop:.6g} 说明多头验证失败；不延伸解释成中长线。"
     else:
         entry = min(price * 0.999, metrics["low_30m"] * 0.9995)
         risk = max(atr * 1.8, entry * 0.03)
@@ -7210,7 +7233,7 @@ def validation_signal_plan(symbol, metrics=None):
         stop = entry + risk
         tp1 = entry - risk * 0.9
         tp2 = entry - risk * 1.7
-        thesis = f"{symbol} 自动续盯做空：30M/1H 价格走弱，CVD 同步为负，多空人数比回升或持仓未明显塌陷，按反弹转弱/诱多失败验证。等待跌破 {entry:.6g} 后才触发，站回 {stop:.6g} 说明空头验证失败。"
+        thesis = f"{symbol} 自动短线续盯做空：30M/1H 价格走弱，真实CVD同步为负，持仓明确增长且人数比结构支持，按反弹转弱/诱多失败做短线验证。等待跌破 {entry:.6g} 后才触发，站回 {stop:.6g} 说明空头验证失败；不延伸解释成中长线。"
     # Do not create a plan whose trigger already belongs to an old, distant
     # structure. Keep scanning and create it only after price approaches a
     # currently valid breakout/breakdown level.
@@ -7322,6 +7345,8 @@ def ensure_trade_validation_auto_plans():
             stake_usdt=100,
             leverage=1,
             status="planned",
+            horizon="short",
+            max_hold_minutes=180,
             thesis=signal["thesis"],
             created_at=datetime.now(),
         ))
@@ -7378,6 +7403,8 @@ def trade_validation():
             "stake_usdt": plan.stake_usdt,
             "leverage": plan.leverage,
             "status": plan.status,
+            "horizon": plan.horizon,
+            "max_hold_minutes": plan.max_hold_minutes,
             "thesis": plan.thesis,
             "current_price": price,
             "pnl": validation_pnl(plan, price),
@@ -7424,6 +7451,8 @@ def trade_validation_detail(plan_id):
         "stake_usdt": plan.stake_usdt,
         "leverage": plan.leverage,
         "status": plan.status,
+        "horizon": plan.horizon,
+        "max_hold_minutes": plan.max_hold_minutes,
         "thesis": plan.thesis,
         "current_price": price,
         "pnl": validation_pnl(plan, price),
@@ -7439,6 +7468,12 @@ def trade_validation_detail(plan_id):
 
 with app.app_context():
     db.create_all()
+    validation_columns = {column["name"] for column in inspect(db.engine).get_columns("trade_validation")}
+    if "horizon" not in validation_columns:
+        db.session.execute(text("ALTER TABLE trade_validation ADD COLUMN horizon VARCHAR(20) NOT NULL DEFAULT 'legacy'"))
+    if "max_hold_minutes" not in validation_columns:
+        db.session.execute(text("ALTER TABLE trade_validation ADD COLUMN max_hold_minutes INTEGER"))
+    db.session.commit()
     validation_candle_columns = {column["name"] for column in inspect(db.engine).get_columns("trade_validation_candle")}
     if "taker_buy_quote_volume" not in validation_candle_columns:
         db.session.execute(text("ALTER TABLE trade_validation_candle ADD COLUMN taker_buy_quote_volume FLOAT"))

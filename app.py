@@ -404,6 +404,31 @@ class UserAccount(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
+class ChatMessage(db.Model):
+    """Direct account-to-account messages; visibility is managed per user."""
+    id = db.Column(db.Integer, primary_key=True)
+    sender_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    recipient_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    body = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+    __table_args__ = (
+        db.Index("ix_chat_message_pair_id", "sender_id", "recipient_id", "id"),
+    )
+
+
+class ChatViewState(db.Model):
+    """Per-user conversation state so clearing never removes the peer's copy."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    peer_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    cleared_through_id = db.Column(db.Integer, nullable=False, default=0)
+    last_read_message_id = db.Column(db.Integer, nullable=False, default=0)
+    updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False, onupdate=datetime.now)
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "peer_id", name="uq_chat_view_state_user_peer"),
+    )
+
+
 class InviteCode(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     code_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
@@ -2385,7 +2410,7 @@ def logout_api():
 def auth_me():
     user = current_user()
     return jsonify({
-        "ok": True, "username": user.username, "role": user.role,
+        "ok": True, "user_id": user.id, "username": user.username, "role": user.role,
         "is_admin": user.role == "admin", "csrf_token": session.get("csrf_token"),
     })
 
@@ -2518,6 +2543,135 @@ def list_users():
         "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
         "last_seen_at": row.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_seen_at else None,
     } for row in UserAccount.query.order_by(UserAccount.created_at).all()]})
+
+
+def chat_state(user_id, peer_id, create=False):
+    row = ChatViewState.query.filter_by(user_id=user_id, peer_id=peer_id).first()
+    if row is None and create:
+        row = ChatViewState(user_id=user_id, peer_id=peer_id)
+        db.session.add(row)
+        db.session.flush()
+    return row
+
+
+def chat_message_payload(row, usernames=None):
+    usernames = usernames or {}
+    return {
+        "id": row.id,
+        "sender_id": row.sender_id,
+        "recipient_id": row.recipient_id,
+        "sender": usernames.get(row.sender_id),
+        "body": row.body,
+        "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+@app.get("/api/chat/users")
+def chat_users_api():
+    user = current_user()
+    peers = UserAccount.query.filter(UserAccount.id != user.id, UserAccount.active.is_(True)).order_by(UserAccount.username).all()
+    items = []
+    for peer in peers:
+        state = chat_state(user.id, peer.id)
+        cleared_id = state.cleared_through_id if state else 0
+        last_read_id = state.last_read_message_id if state else 0
+        pair_filter = or_(
+            and_(ChatMessage.sender_id == user.id, ChatMessage.recipient_id == peer.id),
+            and_(ChatMessage.sender_id == peer.id, ChatMessage.recipient_id == user.id),
+        )
+        latest = ChatMessage.query.filter(pair_filter, ChatMessage.id > cleared_id).order_by(ChatMessage.id.desc()).first()
+        unread = ChatMessage.query.filter(
+            ChatMessage.sender_id == peer.id,
+            ChatMessage.recipient_id == user.id,
+            ChatMessage.id > max(cleared_id, last_read_id),
+        ).count()
+        items.append({
+            "id": peer.id,
+            "username": peer.username,
+            "role": peer.role,
+            "online": bool(peer.last_seen_at and datetime.now() - peer.last_seen_at < timedelta(minutes=10)),
+            "last_message": latest.body[:80] if latest else None,
+            "last_message_at": latest.created_at.strftime("%m-%d %H:%M") if latest else None,
+            "last_message_id": latest.id if latest else 0,
+            "unread": unread,
+        })
+    items.sort(key=lambda item: (item["last_message_id"], item["username"]), reverse=True)
+    return jsonify({"items": items, "unread_total": sum(item["unread"] for item in items)})
+
+
+@app.get("/api/chat/messages/<int:peer_id>")
+def chat_messages_api(peer_id):
+    user = current_user()
+    peer = db.session.get(UserAccount, peer_id)
+    if not peer or not peer.active or peer.id == user.id:
+        return jsonify({"ok": False, "error": "聊天对象不存在。"}), 404
+    after_id = max(0, request.args.get("after_id", 0, type=int) or 0)
+    state = chat_state(user.id, peer.id, create=True)
+    visible_after = max(after_id, state.cleared_through_id or 0)
+    pair_filter = or_(
+        and_(ChatMessage.sender_id == user.id, ChatMessage.recipient_id == peer.id),
+        and_(ChatMessage.sender_id == peer.id, ChatMessage.recipient_id == user.id),
+    )
+    query = ChatMessage.query.filter(pair_filter, ChatMessage.id > visible_after)
+    if after_id:
+        rows = query.order_by(ChatMessage.id.asc()).limit(200).all()
+    else:
+        rows = list(reversed(query.order_by(ChatMessage.id.desc()).limit(200).all()))
+    if rows:
+        state.last_read_message_id = max(state.last_read_message_id or 0, rows[-1].id)
+        state.updated_at = datetime.now()
+    db.session.commit()
+    return jsonify({
+        "peer": {"id": peer.id, "username": peer.username, "role": peer.role},
+        "items": [chat_message_payload(row, {user.id: user.username, peer.id: peer.username}) for row in rows],
+        "cleared_through_id": state.cleared_through_id or 0,
+    })
+
+
+@app.post("/api/chat/messages")
+def send_chat_message_api():
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    user = current_user()
+    body = request.get_json(silent=True) or {}
+    recipient_id = body.get("recipient_id")
+    message = str(body.get("body", "")).strip()
+    try:
+        recipient_id = int(recipient_id)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "请选择聊天对象。"}), 400
+    peer = db.session.get(UserAccount, recipient_id)
+    if not peer or not peer.active or peer.id == user.id:
+        return jsonify({"ok": False, "error": "聊天对象不存在。"}), 404
+    if not message:
+        return jsonify({"ok": False, "error": "消息不能为空。"}), 400
+    if len(message) > 2000:
+        return jsonify({"ok": False, "error": "单条消息最多 2000 个字符。"}), 400
+    row = ChatMessage(sender_id=user.id, recipient_id=peer.id, body=message)
+    db.session.add(row)
+    db.session.commit()
+    return jsonify({"ok": True, "item": chat_message_payload(row, {user.id: user.username})})
+
+
+@app.post("/api/chat/conversations/<int:peer_id>/clear")
+def clear_chat_conversation_api(peer_id):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    user = current_user()
+    peer = db.session.get(UserAccount, peer_id)
+    if not peer or peer.id == user.id:
+        return jsonify({"ok": False, "error": "聊天对象不存在。"}), 404
+    pair_filter = or_(
+        and_(ChatMessage.sender_id == user.id, ChatMessage.recipient_id == peer.id),
+        and_(ChatMessage.sender_id == peer.id, ChatMessage.recipient_id == user.id),
+    )
+    latest_id = db.session.query(func.max(ChatMessage.id)).filter(pair_filter).scalar() or 0
+    state = chat_state(user.id, peer.id, create=True)
+    state.cleared_through_id = max(state.cleared_through_id or 0, latest_id)
+    state.last_read_message_id = max(state.last_read_message_id or 0, latest_id)
+    state.updated_at = datetime.now()
+    db.session.commit()
+    return jsonify({"ok": True, "cleared_through_id": state.cleared_through_id})
 
 
 @app.get("/daily-trends")

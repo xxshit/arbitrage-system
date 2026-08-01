@@ -2,3 +2,5 @@
 *.ps1 text eol=crlf
 *.py text eol=lf
 *.md text eol=lf
+*.vbs text eol=crlf
+*.url text eol=crlf

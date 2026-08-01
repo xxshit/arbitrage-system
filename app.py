@@ -19,22 +19,31 @@ from flask import Flask, g, has_app_context, jsonify, redirect, render_template,
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import and_, case, func, inspect, or_, text, tuple_
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 load_dotenv()
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "local-development-key")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///arbitrage_hub.db")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
+app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes", "on"}
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
 
 
 @app.after_request
 def disable_local_static_cache(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if app.config["SESSION_COOKIE_SECURE"]:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     if request.path.startswith("/static/"):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
@@ -5682,7 +5691,10 @@ def send_thought_analysis_push_locked(only_symbols=None):
 
 
 @app.post("/api/daily-report/thoughts/test-push")
+@admin_required
 def test_thought_analysis_push():
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
     webhook = os.getenv("LARK_THOUGHT_ANALYSIS_WEBHOOK", "").strip()
     if not webhook:
         return jsonify({"ok": False, "error": "LARK_THOUGHT_ANALYSIS_WEBHOOK 未配置"}), 400
@@ -6237,7 +6249,10 @@ def normalize_thought_watch_symbol(value):
 
 
 @app.post("/api/thought-watchlist")
+@admin_required
 def add_thought_watch():
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
     body = request.get_json(silent=True) or {}
     canonical = normalize_thought_watch_symbol(body.get("symbol"))
     if not canonical:
@@ -6282,7 +6297,10 @@ def add_thought_watch():
 
 
 @app.post("/api/thought-watchlist/<symbol>/state")
+@admin_required
 def update_thought_watch_state(symbol):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
     canonical = normalize_thought_watch_symbol(symbol)
     row = ThoughtWatch.query.filter_by(symbol=canonical).first()
     if not row:
@@ -6865,7 +6883,10 @@ def list_strategies():
 
 
 @app.post("/api/strategies")
+@admin_required
 def create_strategy():
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
     data = request.get_json(silent=True) or {}
     name = str(data.get("name", "")).strip()
     mode = str(data.get("mode", "")).strip()
@@ -6879,7 +6900,10 @@ def create_strategy():
 
 
 @app.patch("/api/strategies/<int:strategy_id>")
+@admin_required
 def toggle_strategy(strategy_id):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
     item = db.get_or_404(Strategy, strategy_id)
     item.enabled = not item.enabled
     db.session.commit()

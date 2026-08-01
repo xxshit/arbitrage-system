@@ -1,0 +1,9 @@
+{
+  "serverHost": "your-private-server.example",
+  "sshPort": 22,
+  "sshUser": "arbtunnel",
+  "keyPath": "C:\\Users\\YOUR_NAME\\.ssh\\arbitrage_hub_DEVICE",
+  "localPort": 5000,
+  "remoteHost": "127.0.0.1",
+  "remotePort": 15831
+}

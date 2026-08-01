@@ -1,5 +1,6 @@
 .env
 cloud-backup.local.json
+cloud-access.local.json
 .venv/
 __pycache__/
 instance/

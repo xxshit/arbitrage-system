@@ -7,8 +7,9 @@ APP_ROOT="${ARBITRAGE_APP_ROOT:-/opt/arbitrage-hub}"
 
 install -m 640 -o arbhub -g arbhub /tmp/arbitrage-app.py "${APP_ROOT}/app.py"
 install -m 640 -o arbhub -g arbhub /tmp/arbitrage-app.js "${APP_ROOT}/static/app.js"
+install -m 640 -o arbhub -g arbhub /tmp/arbitrage-style.css "${APP_ROOT}/static/style.css"
 install -m 640 -o arbhub -g arbhub /tmp/arbitrage-index.html "${APP_ROOT}/templates/index.html"
-rm -f /tmp/arbitrage-app.py /tmp/arbitrage-app.js /tmp/arbitrage-index.html
+rm -f /tmp/arbitrage-app.py /tmp/arbitrage-app.js /tmp/arbitrage-style.css /tmp/arbitrage-index.html
 
 if grep -q '^SESSION_COOKIE_SECURE=' "${APP_ROOT}/.env"; then
   sed -i 's/^SESSION_COOKIE_SECURE=.*/SESSION_COOKIE_SECURE=1/' "${APP_ROOT}/.env"

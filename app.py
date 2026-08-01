@@ -38,6 +38,13 @@ db = SQLAlchemy(app)
 
 @app.after_request
 def disable_local_static_cache(response):
+    # Windows' MIME registry can report .js as text/plain. With nosniff enabled
+    # browsers then reject the entire application script, so normalize the two
+    # static types used by the dashboard explicitly.
+    if request.path.startswith("/static/") and request.path.endswith(".js"):
+        response.mimetype = "application/javascript"
+    elif request.path.startswith("/static/") and request.path.endswith(".css"):
+        response.mimetype = "text/css"
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
@@ -401,6 +408,9 @@ class InviteCode(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     code_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
     code_prefix = db.Column(db.String(12), nullable=False)
+    # Only unused invitations keep their full value so the administrator can
+    # copy them again. It is cleared immediately after successful registration.
+    code_value = db.Column(db.String(32))
     created_by = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False)
     used_by = db.Column(db.Integer, db.ForeignKey("user_account.id"))
     expires_at = db.Column(db.DateTime)
@@ -2342,8 +2352,19 @@ def register_api():
     user = UserAccount(username=username, password_hash=generate_password_hash(password), role="viewer")
     db.session.add(user)
     db.session.flush()
-    invite.used_by = user.id
-    invite.used_at = datetime.now()
+    used_at = datetime.now()
+    claimed = InviteCode.query.filter(
+        InviteCode.id == invite.id,
+        InviteCode.used_at.is_(None),
+        db.or_(InviteCode.expires_at.is_(None), InviteCode.expires_at >= used_at),
+    ).update({
+        InviteCode.used_by: user.id,
+        InviteCode.used_at: used_at,
+        InviteCode.code_value: None,
+    }, synchronize_session=False)
+    if claimed != 1:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": "邀请码已被使用或已经过期。"}), 409
     db.session.commit()
     return jsonify({"ok": True, "redirect": "/login"})
 
@@ -2457,8 +2478,17 @@ def update_runtime_rule(rule_key):
 @admin_required
 def list_invites():
     rows = InviteCode.query.order_by(InviteCode.created_at.desc()).limit(50).all()
+    user_ids = {row.used_by for row in rows if row.used_by}
+    usernames = {
+        row.id: row.username for row in UserAccount.query.filter(UserAccount.id.in_(user_ids)).all()
+    } if user_ids else {}
+    now = datetime.now()
     return jsonify({"items": [{
         "id": row.id, "prefix": row.code_prefix, "used": bool(row.used_at),
+        "code": row.code_value if not row.used_at and (not row.expires_at or row.expires_at >= now) else None,
+        "status": "used" if row.used_at else ("expired" if row.expires_at and row.expires_at < now else "available"),
+        "used_by": usernames.get(row.used_by),
+        "used_at": row.used_at.strftime("%Y-%m-%d %H:%M:%S") if row.used_at else None,
         "expires_at": row.expires_at.strftime("%Y-%m-%d %H:%M") if row.expires_at else None,
         "created_at": row.created_at.strftime("%Y-%m-%d %H:%M"),
     } for row in rows]})
@@ -2471,7 +2501,10 @@ def create_invite():
         return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
     code = "ARBI-" + secrets.token_hex(5).upper()
     expires_at = datetime.now() + timedelta(days=7)
-    db.session.add(InviteCode(code_hash=session_digest(code), code_prefix=code[:10], created_by=current_user().id, expires_at=expires_at))
+    db.session.add(InviteCode(
+        code_hash=session_digest(code), code_prefix=code[:10], code_value=code,
+        created_by=current_user().id, expires_at=expires_at,
+    ))
     db.session.commit()
     return jsonify({"ok": True, "code": code, "expires_at": expires_at.strftime("%Y-%m-%d %H:%M")})
 
@@ -2480,8 +2513,10 @@ def create_invite():
 @admin_required
 def list_users():
     return jsonify({"items": [{
-        "username": row.username, "role": row.role, "active": row.active,
+        "id": row.id, "username": row.username, "role": row.role, "active": row.active,
+        "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
         "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
+        "last_seen_at": row.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_seen_at else None,
     } for row in UserAccount.query.order_by(UserAccount.created_at).all()]})
 
 
@@ -7492,6 +7527,10 @@ def trade_validation_detail(plan_id):
 
 with app.app_context():
     db.create_all()
+    invite_columns = {column["name"] for column in inspect(db.engine).get_columns("invite_code")}
+    if "code_value" not in invite_columns:
+        db.session.execute(text("ALTER TABLE invite_code ADD COLUMN code_value VARCHAR(32)"))
+        db.session.commit()
     validation_columns = {column["name"] for column in inspect(db.engine).get_columns("trade_validation")}
     if "horizon" not in validation_columns:
         db.session.execute(text("ALTER TABLE trade_validation ADD COLUMN horizon VARCHAR(20) NOT NULL DEFAULT 'legacy'"))

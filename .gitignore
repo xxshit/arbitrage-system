@@ -1,8 +1,12 @@
 .env
+cloud-backup.local.json
 .venv/
 __pycache__/
 instance/
 backups/
+*.sql
+*.sql.gz
+*.sql.gz.sha256
 logs/
 server.out.log
 server.err.log

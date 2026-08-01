@@ -1,0 +1,6 @@
+{
+  "serverHost": "your-private-server.example",
+  "port": 22,
+  "user": "root",
+  "keyPath": "C:\\Users\\YOUR_NAME\\.ssh\\your_deploy_key"
+}

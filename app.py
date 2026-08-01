@@ -8,6 +8,7 @@ import html
 import hashlib
 import secrets
 import click
+import math
 from functools import wraps
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -4061,14 +4062,18 @@ def thought_snapshot(symbol):
         ticker, k30, k4h = payloads["ticker"], payloads["k30"], payloads["k4h"]
         premium, oi, ratios = payloads["premium"], payloads["oi"], payloads["ratios"]
         last = float(ticker.get("lastPrice", 0) or 0)
-        support = min(float(row[3]) for row in k30[-12:])
-        resistance = max(float(row[2]) for row in k30[-20:])
         oi_first = float(oi[0].get("sumOpenInterestValue", 0) or 0)
         oi_last = float(oi[-1].get("sumOpenInterestValue", 0) or 0)
         ratio_first = float(ratios[0].get("longShortRatio", 0) or 0)
         ratio_last = float(ratios[-1].get("longShortRatio", 0) or 0)
         closed30 = k30[:-1] if len(k30) > 2 else k30
         closed4h = k4h[:-1] if len(k4h) > 2 else k4h
+        # 推送关键位采用最近 3-4 小时结构。更久的高低点仍可用于复盘，
+        # 但在快速拉升币种上不能继续充当实时支撑/压力。
+        support_rows = closed30[-6:] if len(closed30) >= 6 else closed30
+        resistance_rows = closed30[-8:] if len(closed30) >= 8 else closed30
+        support = min(float(row[3]) for row in support_rows)
+        resistance = max(float(row[2]) for row in resistance_rows)
         cvd = sum((2 * float(row[10]) - float(row[7])) for row in closed30)
         def window_metrics(candle_count):
             window_rows = closed30[-candle_count:]
@@ -4489,10 +4494,17 @@ def ake_orderbook_wall_direction(analysis):
     if not last:
         return None
 
+    # 0.0020-0.0023 是一次历史盘口观察，不是永久有效的价格锚。
+    # 当价格已经明显离开该区域时，旧墙只保留为复盘背景，不能再驱动实时方向。
+    wall_high = wall.get("wall_high") or 0.0023
+    wall_low = wall.get("wall_low") or 0.0020
+    if last > wall_high * 1.15 or last < wall_low * 0.85:
+        return None
+
     wall_qty = wall.get("wall_qty") or 0
     wall_notional = wall.get("wall_notional") or 0
-    reference_qty = sum((item.get("qty") or 0) for item in (wall.get("reference_buckets") or []))
-    wall_exists = wall_qty >= 2_000_000 or wall_notional >= 3_000 or reference_qty >= 2_000_000
+    # 用户截图中的参考挂单不能被当成永远存在的实时卖墙。
+    wall_exists = wall_qty >= 2_000_000 or wall_notional >= 3_000
     if not wall_exists:
         return None
 
@@ -4565,7 +4577,9 @@ def ake_structure_direction(analysis):
         and broad_oi_change <= -5 and broad_ratio_change >= 3
     )
 
-    if last >= 0.0022:
+    # 离开历史卖墙后只看当前资金结构；0.002x 不再充当实时阈值。
+    old_wall_stale = last > 0.0023 * 1.15 or last < 0.0020 * 0.85
+    if old_wall_stale or last >= 0.0022:
         # 高位币最容易误判的一种结构：CVD 仍可能上涨，但持仓下降 + 多空人数比上升，
         # 对资金面解释是散户平空、主力平多，不能继续按单纯逼空看涨处理。
         if main_long_unwind:
@@ -4737,22 +4751,21 @@ def thought_signal_key(analysis, direction):
             price_zone = "below-1850"
         return f"{direction}-{price_zone}"
     if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection", "ake_main_long_unwind_watch", "ake_above_wall_distribution_watch", "ake_above_wall_bull_weakening", "ake_above_wall_bull_continue", "ake_above_wall_new_range", "ake_wall_zone_weakening", "ake_wall_failed_watch"}:
-        if last >= 0.0028:
-            price_zone = "above-2800"
-        elif last >= 0.0024:
-            price_zone = "above-2400"
-        elif last >= 0.0022:
-            price_zone = "break-2200"
-        elif last >= 0.0021:
-            price_zone = "wall-2100-2200"
-        elif last >= 0.0020:
-            price_zone = "wall-2000-2100"
-        elif last >= 0.00195:
-            price_zone = "test-1950-2000"
-        elif last >= 0.00190:
-            price_zone = "retest-1900-1950"
+        # 信号键跟随最近结构重新分区，避免价格已经翻倍却仍停留在旧墙状态。
+        if support and last < support:
+            price_zone = "below-current-support"
+        elif support and last <= support * 1.025:
+            price_zone = "current-support-band"
+        elif resistance and last >= resistance * 1.005:
+            price_zone = "current-breakout"
+        elif resistance and last >= resistance * 0.975:
+            price_zone = "current-resistance-band"
+        elif support and resistance:
+            midpoint = (support + resistance) / 2
+            price_zone = "current-range-upper" if last >= midpoint else "current-range-lower"
         else:
-            price_zone = "below-1900"
+            # 2% 对数价格桶只用于去重，不作为技术位结论。
+            price_zone = f"live-{int(math.log(max(last, 1e-12), 1.02))}"
         return f"{direction}-{price_zone}"
     if direction == "bullish" and resistance and last >= resistance * 0.995:
         return "bullish-near-breakout"
@@ -4830,13 +4843,25 @@ def thought_hours_since_push(previous):
     return max(delta.total_seconds() / 3600, 0)
 
 
+def thought_signal_zone_shift_is_material(previous, metrics):
+    """动态区间会随K线移动；只有价格也真实迁移时，区间变化才算新叙事。"""
+    if previous is None or previous.signal_key == metrics.get("signal_key"):
+        return False
+    current_price = metrics.get("last_price")
+    previous_price = previous.last_price
+    new_key = metrics.get("signal_key") or ""
+    decisive_zone = any(token in new_key for token in ("current-breakout", "below-current-support", "near-breakout", "near-breakdown"))
+    threshold = 0.015 if decisive_zone else 0.03
+    return metric_changed(current_price, previous_price, pct_threshold=threshold)
+
+
 def thought_major_narrative_shift(previous, metrics):
     """Only return True for changes worth waking the user inside the 4H window."""
     if previous is None:
         return True
     if previous.direction != metrics["direction"]:
         return True
-    if previous.signal_key != metrics["signal_key"]:
+    if thought_signal_zone_shift_is_material(previous, metrics):
         return True
 
     previous_funding = previous.funding_rate
@@ -4990,9 +5015,6 @@ def thought_push_has_new_information(previous, metrics):
         return thought_turnover_has_new_information(previous, metrics)
     if previous.direction != metrics["direction"]:
         return True
-    if previous.signal_key != metrics["signal_key"]:
-        return True
-
     hours_since_push = thought_hours_since_push(previous)
     if hours_since_push is not None and hours_since_push < THOUGHT_REPEAT_COOLDOWN_HOURS:
         return thought_major_narrative_shift(previous, metrics)
@@ -5582,21 +5604,28 @@ def thought_key_zone(analysis):
     support = analysis.get("support")
     resistance = analysis.get("resistance")
     last = analysis.get("last")
-    if support and resistance:
+    # 只接受仍靠近现价的近期结构位。剧烈拉升后，过远的旧高低点自动失效。
+    support_relevant = bool(last and support and last * 0.85 <= support <= last)
+    resistance_relevant = bool(last and resistance and last * 0.98 <= resistance <= last * 1.20)
+    if support_relevant and resistance_relevant and support < resistance:
         defend_low = support
         defend_high = support * 1.018
         attack_low = resistance * 0.985
         attack_high = resistance * 1.018
         return (
-            f"关键区间：防守带 {lark_price_value(defend_low)}-{lark_price_value(defend_high)}；"
-            f"突破观察带 {lark_price_value(attack_low)}-{lark_price_value(attack_high)}。"
+            f"实时K线关键位：近期防守带 {lark_price_value(defend_low)}-{lark_price_value(defend_high)}；"
+            f"近期突破观察带 {lark_price_value(attack_low)}-{lark_price_value(attack_high)}。"
             "防守带放量跌破，结构降级；突破带放量站稳，才算继续转强。"
         )
     if last:
+        defend_low = support if support_relevant else last * 0.97
+        defend_high = min(last * 0.99, defend_low * 1.018)
+        attack_low = resistance * 0.985 if resistance_relevant else last * 1.018
+        attack_high = resistance * 1.018 if resistance_relevant else last * 1.04
         return (
-            f"关键区间：现价 {lark_price_value(last)} 附近先看承接；"
-            f"短线防守带 {lark_price_value(last * 0.97)}-{lark_price_value(last * 0.985)}，"
-            f"突破观察带 {lark_price_value(last * 1.018)}-{lark_price_value(last * 1.04)}。"
+            f"实时K线关键位：现价 {lark_price_value(last)} 附近先看承接；"
+            f"短线防守带 {lark_price_value(defend_low)}-{lark_price_value(defend_high)}，"
+            f"突破观察带 {lark_price_value(attack_low)}-{lark_price_value(attack_high)}。"
         )
     return "关键区间：等待下一轮价格快照更新后确认。"
 
@@ -5675,6 +5704,7 @@ def thought_lark_ake_structure_message(analysis, direction):
     previous = ThoughtPushSnapshot.query.filter_by(symbol=symbol).first()
     previous_oi = previous.oi_value if previous else None
     previous_price = previous.last_price if previous else None
+    live_key_zone = thought_key_zone(analysis)
 
     if direction == "ake_main_long_unwind_watch":
         header = "方向：<font color='cus-bear'>● 🔵↘️ 看涨明显减弱 / 主力平多观察</font>"
@@ -5684,22 +5714,22 @@ def thought_lark_ake_structure_message(analysis, direction):
             "按照你的资金面框架，这更像“散户平空、主力平多”，即使 CVD 还在上涨，也可能只是高位主动买入承接或换手，不能把它简单解释成主力继续扫货。"
             "如果负资费、负基差继续存在，说明多头剧本正在从“拉高逼空”转向“高位换手/出货风险”。"
         )
-        key_zone = "新区间：旧墙区 0.0020-0.0022 已经变成回踩区；现在重点看 0.00225-0.00245。若持仓继续降、人数比继续升，即使价格横住，也按看涨减弱处理；只有持仓重新增加、人数比回落、资费/基差修复，才恢复看涨。"
+        key_zone = live_key_zone + " 若持仓继续降、人数比继续升，即使价格横住，也按看涨减弱处理；只有持仓重新增加、人数比回落、资费/基差修复，才恢复看涨。"
     elif direction == "ake_above_wall_distribution_watch":
         header = "方向：<font color='cus-bear'>● 🔵↘️ 看涨减弱 / 高位换手观察</font>"
-        title = "AKE思路盯盘：已经脱离旧卖墙区，不能继续只看 0.002-0.0022"
-        judgement = "判断：AKE 已经站到旧墙区上方，但现在 BN资费转负、BN基差也转负，说明之前“正资费+正基差拉合约”的多头支撑在减弱。这不等于立刻看空，但更像进入高位换手/派发观察阶段；如果持仓继续下降，就不能再按单纯逼空剧本处理。"
-        key_zone = "新区间：旧墙区 0.0020-0.0022 变成下方回踩区；当前重点看 0.00225-0.00245 能否守住。若跌回 0.0022 下方且资费/基差继续为负，看涨剧本降级。"
+        title = "AKE思路盯盘：按当前价格结构观察高位换手"
+        judgement = "判断：BN资费转负、BN基差也转负，说明此前“正资费+正基差拉合约”的多头支撑在减弱。这不等于立刻看空，但更像进入当前高位区的换手/派发观察阶段；如果持仓继续下降，就不能再按单纯逼空剧本处理。"
+        key_zone = live_key_zone + " 若近期防守带失守且资费/基差继续为负，看涨剧本降级。"
     elif direction == "ake_above_wall_bull_weakening":
         header = "方向：<font color='cus-bear'>● 🔵↘️ 看涨减弱 / 持仓结构走弱</font>"
         title = "AKE思路盯盘：价格还在高位，但持仓或主动性开始减弱"
-        judgement = "判断：价格虽然还在 0.0022 上方，但持仓下降、CVD走弱、负资费或负基差中出现至少一项。这里不能继续用同一句“吸空后继续拉”解释所有波动，应该观察是否进入换手区。"
-        key_zone = "新区间：0.0022 是多头结构的第一道防线；0.0024 附近是新高位压力/换手区。若重新放量站稳 0.0024 且持仓不再下降，才恢复偏强。"
+        judgement = "判断：价格仍处于近期高位，但持仓下降、CVD走弱、负资费或负基差中出现至少一项。这里不能继续用同一句“吸空后继续拉”解释所有波动，应该按当前价格区间观察是否进入换手。"
+        key_zone = live_key_zone + " 只有重新放量站稳近期突破带且持仓不再下降，才恢复偏强。"
     elif direction == "ake_above_wall_bull_continue":
-        header = "方向：<font color='cus-bull'>● 🔵⬆️ 看涨增强 / 墙上延续</font>"
-        title = "AKE思路盯盘：旧卖墙被消化后，多头结构仍在"
-        judgement = "判断：价格在 0.0022 上方，且资费/基差仍支持合约多头，持仓或CVD没有明显破坏。这种才属于真正的墙上延续，后续重点看是否放量继续抬高底部，而不是只看一根插针。"
-        key_zone = "新区间：0.0022-0.0024 是新的回踩确认区；站稳 0.0024 后，上方再看 0.0026/0.0028。跌回 0.0022 下方则降级观察。"
+        header = "方向：<font color='cus-bull'>● 🔵⬆️ 看涨增强 / 当前区间延续</font>"
+        title = "AKE思路盯盘：当前高位区的多头结构仍在"
+        judgement = "判断：资费/基差仍支持合约多头，持仓或CVD没有明显破坏。这属于当前价格结构中的延续观察，后续重点看是否放量继续抬高近期低点，而不是拿早期卖墙或单根插针反复解释。"
+        key_zone = live_key_zone
     elif direction == "ake_wall_zone_weakening":
         header = "方向：<font color='cus-bear'>● 🔵↘️ 墙区减弱 / 防止假突破</font>"
         title = "AKE思路盯盘：还在旧墙区，但资金结构已经变差"
@@ -5712,9 +5742,9 @@ def thought_lark_ake_structure_message(analysis, direction):
         key_zone = "关键区间：重新站上 0.0020 才恢复墙区观察；站不上则看 0.0019/0.00185 的承接。"
     else:
         header = "方向：<font color='cus-watch'>● 🔵↔️ 新区间观察 / 等待确认</font>"
-        title = "AKE思路盯盘：离开旧卖墙区后，进入新价格区间"
-        judgement = "判断：价格已经离开最初的 0.0020-0.0022 剧本区间，但资金结构没有给出单边确认。现在要重新定义区间，而不是继续重复旧判断。"
-        key_zone = "新区间：下方看 0.0022 是否从压力变支撑；上方看 0.0024-0.0026 是否形成新压力。"
+        title = "AKE思路盯盘：价格已重新定价，等待当前区间确认"
+        judgement = "判断：资金结构还没有给出单边确认。当前必须根据最近K线和量能重新定义区间，不能继续沿用早期价格剧本。"
+        key_zone = live_key_zone
 
     oi_line = f"持仓：{lark_compact_number(analysis.get('oi_value'))}"
     if previous_oi and analysis.get("oi_value"):

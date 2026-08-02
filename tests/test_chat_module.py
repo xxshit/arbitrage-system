@@ -113,6 +113,11 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn(b'class="chat-nav-entry hidden"', self.alice.get("/").data)
         self.assertFalse(self.bob.get("/api/auth/me").get_json()["chat_nav_hidden"])
 
+    def test_collaboration_entry_uses_new_badge_without_explanatory_copy(self):
+        page = self.alice.get("/").get_data(as_text=True)
+        self.assertIn('class="nav-unread chat-new hidden">NEW</span>', page)
+        self.assertNotIn("账号之间的一对一协作留言", page)
+
 
 if __name__ == "__main__":
     unittest.main()

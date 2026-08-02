@@ -2591,6 +2591,7 @@ def chat_users_api():
             "username": peer.username,
             "role": peer.role,
             "online": bool(peer.last_seen_at and datetime.now() - peer.last_seen_at < timedelta(minutes=10)),
+            "last_seen_at": peer.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if peer.last_seen_at else None,
             "last_message": latest.body[:80] if latest else None,
             "last_message_at": latest.created_at.strftime("%m-%d %H:%M") if latest else None,
             "last_message_id": latest.id if latest else 0,
@@ -2607,25 +2608,56 @@ def chat_messages_api(peer_id):
     if not peer or not peer.active or peer.id == user.id:
         return jsonify({"ok": False, "error": "聊天对象不存在。"}), 404
     after_id = max(0, request.args.get("after_id", 0, type=int) or 0)
+    before_id = max(0, request.args.get("before_id", 0, type=int) or 0)
+    if after_id and before_id:
+        return jsonify({"ok": False, "error": "消息游标不能同时向前和向后读取。"}), 400
     state = chat_state(user.id, peer.id, create=True)
-    visible_after = max(after_id, state.cleared_through_id or 0)
+    cleared_through_id = state.cleared_through_id or 0
+    visible_after = max(after_id, cleared_through_id)
     pair_filter = or_(
         and_(ChatMessage.sender_id == user.id, ChatMessage.recipient_id == peer.id),
         and_(ChatMessage.sender_id == peer.id, ChatMessage.recipient_id == user.id),
     )
+    page_size = 100
     query = ChatMessage.query.filter(pair_filter, ChatMessage.id > visible_after)
-    if after_id:
-        rows = query.order_by(ChatMessage.id.asc()).limit(200).all()
+    if before_id:
+        rows = list(reversed(
+            ChatMessage.query.filter(
+                pair_filter,
+                ChatMessage.id > cleared_through_id,
+                ChatMessage.id < before_id,
+            ).order_by(ChatMessage.id.desc()).limit(page_size).all()
+        ))
+    elif after_id:
+        rows = query.order_by(ChatMessage.id.asc()).limit(page_size).all()
     else:
-        rows = list(reversed(query.order_by(ChatMessage.id.desc()).limit(200).all()))
-    if rows:
-        state.last_read_message_id = max(state.last_read_message_id or 0, rows[-1].id)
+        rows = list(reversed(query.order_by(ChatMessage.id.desc()).limit(page_size).all()))
+    incoming_ids = [row.id for row in rows if row.recipient_id == user.id]
+    if incoming_ids:
+        state.last_read_message_id = max(state.last_read_message_id or 0, max(incoming_ids))
         state.updated_at = datetime.now()
+    oldest_id = rows[0].id if rows else (before_id or 0)
+    has_more_before = False
+    if oldest_id:
+        has_more_before = ChatMessage.query.filter(
+            pair_filter,
+            ChatMessage.id > cleared_through_id,
+            ChatMessage.id < oldest_id,
+        ).first() is not None
     db.session.commit()
     return jsonify({
-        "peer": {"id": peer.id, "username": peer.username, "role": peer.role},
+        "peer": {
+            "id": peer.id,
+            "username": peer.username,
+            "role": peer.role,
+            "online": bool(peer.last_seen_at and datetime.now() - peer.last_seen_at < timedelta(minutes=10)),
+            "last_seen_at": peer.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if peer.last_seen_at else None,
+        },
         "items": [chat_message_payload(row, {user.id: user.username, peer.id: peer.username}) for row in rows],
-        "cleared_through_id": state.cleared_through_id or 0,
+        "cleared_through_id": cleared_through_id,
+        "oldest_id": rows[0].id if rows else None,
+        "latest_id": rows[-1].id if rows else None,
+        "has_more_before": has_more_before,
     })
 
 

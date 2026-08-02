@@ -8274,8 +8274,23 @@ def trade_validation_detail(plan_id):
     })
 
 
+def create_database_schema():
+    """Serialize MySQL schema initialization across concurrent WSGI workers."""
+    if db.engine.dialect.name != "mysql":
+        db.create_all()
+        return
+    with db.engine.connect() as connection:
+        acquired = connection.execute(text("SELECT GET_LOCK('arbitrage_hub_schema_init', 30)")).scalar()
+        if acquired != 1:
+            raise RuntimeError("数据库结构初始化锁获取失败")
+        try:
+            db.metadata.create_all(bind=connection)
+        finally:
+            connection.execute(text("SELECT RELEASE_LOCK('arbitrage_hub_schema_init')"))
+
+
 with app.app_context():
-    db.create_all()
+    create_database_schema()
     user_columns = {column["name"] for column in inspect(db.engine).get_columns("user_account")}
     if "chat_nav_hidden" not in user_columns:
         db.session.execute(text("ALTER TABLE user_account ADD COLUMN chat_nav_hidden BOOLEAN NOT NULL DEFAULT 0"))

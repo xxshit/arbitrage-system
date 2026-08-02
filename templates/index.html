@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ArbiScope | 套利监控中心</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260802-chat-history">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260803-private-collab">
 </head>
 <body>
   <aside>
@@ -19,12 +19,12 @@
       <a data-view="daily-trends" data-subnav="daily-nav" href="#daily-trends">◆ &nbsp;日报</a>
       <div class="daily-nav nav-sub hidden"><a data-view="daily-trends" href="#daily-trends">趋势推送</a><a data-view="daily-thoughts" href="#daily-thoughts">思路分析</a><a data-view="daily-listings" href="#daily-listings">上下架信息</a></div>
       <a data-view="alerts" href="#alerts">◉ &nbsp;报警中心</a>
-      <a data-view="chat" href="#chat">● &nbsp;聊天 <span id="chatNavUnread" class="nav-unread hidden">0</span></a>
       <a data-view="token-hedge" href="#token-hedge">◎ &nbsp;官方动态研究</a>
       <a data-view="strategies" href="#strategies">◌ &nbsp;策略管理</a>
       <a data-view="runtime-rules" href="#runtime-rules">⚙ &nbsp;运行规则</a>
       {% if current_user.role == 'admin' %}<a data-view="account-management" href="#account-management">♙ &nbsp;账号管理</a>{% endif %}
       <a data-view="risk" href="#risk">◇ &nbsp;风险提示</a>
+      <a class="chat-nav-entry{% if current_user.chat_nav_hidden %} hidden{% endif %}" data-view="chat" href="#chat">▤ &nbsp;协作记录 <span id="chatNavUnread" class="nav-unread hidden">0</span></a>
     </nav>
     <div class="aside-foot"><span class="dot"></span> 云端服务运行中<br><small>行情来源：交易所公开 API</small></div>
   </aside>
@@ -44,7 +44,7 @@
     <section id="daily-listings" class="view"><div class="panel-title"><div><p class="eyebrow">DAILY REPORT</p><h2>上下架信息</h2><p class="sub">每日北京时间 08:00 汇总 Binance、Bybit、OKX、Gate、Bitget 官方公告；下架公告币种会在套利看板标红。</p></div><button onclick="loadDailyListings()">↻ 刷新信息</button></div><div class="panel"><div id="dailyListings" class="daily-list"><p class="loading">正在读取上下架记录…</p></div></div></section>
     <section id="alerts" class="view"><div class="panel-title alert-heading"><div><p class="eyebrow">ALERT CENTER</p><h2>报警中心</h2><p class="sub">左侧快速浏览最近报警币种；选中后在右侧查看完整时间线</p></div><button onclick="loadAlerts()">↻ 刷新报警</button></div><div class="alert-summary"><article><p>确认后报警</p><strong>币种时间线</strong><small>同一币种只占一条列表项</small></article><article><p>基差轨迹</p><strong>±1% 起</strong><small>每扩大 0.2% 记录</small></article></div><div class="alert-layout"><div class="panel alert-timeline-panel"><p class="eyebrow">SYMBOL ALERT HISTORY</p><h3>币种报警时间线</h3><div id="alertEvents" class="alert-master-detail"><p class="loading">正在读取报警记录…</p></div></div><div class="panel"><div class="basis-side-grid"><section><p class="eyebrow">ACTIVE BASIS TRACKING</p><h3>基差扩展追踪</h3><div id="basisTracking" class="alert-list"><p class="loading">正在读取基差记录…</p></div></section><section><p class="eyebrow">MUTED SYMBOLS</p><h3>静音列表</h3><div id="alertMuteList" class="alert-mute-list"><p class="empty-alert">暂无静音币种。</p></div></section></div></div></div></section>
 
-    <section id="chat" class="view"><div class="panel-title"><div><p class="eyebrow">PRIVATE DIRECT CHAT</p><h2>聊天</h2><p class="sub">账号之间的一对一消息。清空只隐藏你自己的历史，不会删除对方看到的记录。</p></div><button onclick="loadChat(true)">↻ 刷新聊天</button></div><div class="chat-shell panel"><div class="chat-peers"><div class="chat-peers-title"><b>联系人</b><span id="chatUnreadSummary">0 条未读</span></div><label class="chat-peer-search"><span>⌕</span><input id="chatPeerSearch" type="search" placeholder="搜索账号" autocomplete="off"></label><div id="chatPeerList"><p class="loading">正在读取联系人…</p></div></div><section class="chat-conversation"><header id="chatConversationHeader" class="chat-conversation-header"><div><b>请选择联系人</b><small>消息会保存在独立聊天表中</small></div></header><div id="chatHistoryBar" class="chat-history-bar hidden"><button type="button" onclick="loadOlderChatMessages()">加载更早消息</button></div><div id="chatMessages" class="chat-messages"><p class="chat-empty">从左侧选择一个账号开始聊天。</p></div><form id="chatComposer" class="chat-composer" onsubmit="sendChatMessage(event)"><div class="chat-input-wrap"><textarea id="chatInput" maxlength="2000" rows="2" placeholder="输入消息，Enter 发送，Shift + Enter 换行" disabled></textarea><small><span id="chatSendStatus">消息仅在登录账号间可见</span><b id="chatCharCount">0 / 2000</b></small></div><button class="primary" type="submit" disabled>发送</button></form></section></div></section>
+    <section id="chat" class="view"><div class="panel-title"><div><p class="eyebrow">PRIVATE COLLABORATION LOG</p><h2>协作记录</h2><p class="sub">账号之间的一对一协作留言。清空只隐藏你自己的历史，不会删除对方看到的记录。</p></div><button onclick="loadChat(true)">↻ 刷新记录</button></div><div class="chat-shell panel"><div class="chat-peers"><div class="chat-peers-title"><b>协作者</b><span id="chatUnreadSummary">0 条未读</span></div><label class="chat-peer-search"><span>⌕</span><input id="chatPeerSearch" type="search" placeholder="搜索账号" autocomplete="off"></label><div id="chatPeerList"><p class="loading">正在读取协作者…</p></div></div><section class="chat-conversation"><header id="chatConversationHeader" class="chat-conversation-header"><div><b>请选择协作者</b><small>记录保存在独立数据表中</small></div></header><div id="chatHistoryBar" class="chat-history-bar hidden"><button type="button" onclick="loadOlderChatMessages()">加载更早记录</button></div><div id="chatMessages" class="chat-messages"><p class="chat-empty">从左侧选择一个账号查看协作记录。</p></div><form id="chatComposer" class="chat-composer" onsubmit="sendChatMessage(event)"><div class="chat-input-wrap"><textarea id="chatInput" maxlength="2000" rows="2" placeholder="填写记录，Enter 发送，Shift + Enter 换行" disabled></textarea><small><span id="chatSendStatus">内容仅在登录账号间可见</span><b id="chatCharCount">0 / 2000</b></small></div><button class="primary" type="submit" disabled>发送</button></form></section></div></section>
 
     <section id="token-hedge" class="view"><div class="panel-title"><div><p class="eyebrow">OFFICIAL RESEARCH / TOKEN UNLOCK</p><h2>官方动态与解锁套保研究</h2><p class="sub">专门记录项目官方动态、解锁、质押/活动、上线公告、合约套保和主力拉砸路径；事实归事实，推演归推演。</p></div><button onclick="loadTokenHedgeProfiles()">↻ 刷新档案</button></div><div id="tokenHedgeProfiles" class="token-hedge-grid"><p class="loading">正在读取代币档案…</p></div></section>
 
@@ -56,5 +56,5 @@
   </main>
   <section id="tipsPanel" class="tips-panel collapsed"><button class="tips-toggle" onclick="toggleTips()"><span class="tips-dot"></span><b>TIPS</b><span id="tipsCount">0</span><span id="tipsChevron">⌃</span></button><div class="tips-body"><div class="tips-title"><span>实时报警</span><button onclick="loadAlerts()">↻</button></div><div id="tipsItems" class="tips-items"><p>正在检查报警…</p></div><button class="tips-collapse" onclick="toggleTips()">收起</button></div></section>
   <div id="modal" class="modal hidden"><form class="dialog" onsubmit="saveStrategy(event)"><button type="button" class="close" onclick="closeModal()">×</button><p class="eyebrow">NEW STRATEGY</p><h2>创建监控策略</h2><label>策略名称<input id="name" required placeholder="例如：BTC 跨所价差"></label><label>套利类型<select id="strategyMode"><option>跨所合约套利</option><option>现货多/合约空</option><option>资金费率套利</option></select></label><label>交易对<select id="symbol"><option>BTC/USDT</option><option>ETH/USDT</option><option>SOL/USDT</option></select></label><button class="primary submit">创建策略</button></form></div>
-  <script src="{{ url_for('static', filename='app.js') }}?v=20260802-chat-history"></script>
+  <script src="{{ url_for('static', filename='app.js') }}?v=20260803-private-collab"></script>
 </body></html>

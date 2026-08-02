@@ -402,6 +402,7 @@ class UserAccount(db.Model):
     active_session_hash = db.Column(db.String(64))
     last_login_at = db.Column(db.DateTime)
     last_seen_at = db.Column(db.DateTime)
+    chat_nav_hidden = db.Column(db.Boolean, nullable=False, default=False)
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
@@ -2413,6 +2414,7 @@ def auth_me():
     return jsonify({
         "ok": True, "user_id": user.id, "username": user.username, "role": user.role,
         "is_admin": user.role == "admin", "csrf_token": session.get("csrf_token"),
+        "chat_nav_hidden": bool(user.chat_nav_hidden),
     })
 
 
@@ -2464,11 +2466,31 @@ def runtime_rule_payload(row):
     }
 
 
+def account_chat_nav_rule_payload(user):
+    return {
+        "key": "chat_nav_hidden",
+        "category": "界面显示",
+        "label": "本账号隐藏协作入口",
+        "schedule_type": "toggle",
+        "value": "1" if user.chat_nav_hidden else "0",
+        "unit": "账号偏好",
+        "min_value": None,
+        "max_value": None,
+        "editable": user.role == "admin",
+        "enabled": True,
+        "description": "只影响当前登录账号的左侧入口；隐藏后仍可从本条规则打开协作记录。普通账号只能查看状态。",
+        "updated_at": None,
+        "automation": None,
+        "account_scoped": True,
+    }
+
+
 @app.get("/api/runtime-rules")
 def runtime_rules_api():
     rows = RuntimeRule.query.order_by(RuntimeRule.category, RuntimeRule.id).all()
     user = current_user()
-    return jsonify({"items": [runtime_rule_payload(row) for row in rows], "is_admin": user.role == "admin"})
+    items = [account_chat_nav_rule_payload(user), *[runtime_rule_payload(row) for row in rows]]
+    return jsonify({"items": items, "is_admin": user.role == "admin"})
 
 
 @app.patch("/api/runtime-rules/<rule_key>")
@@ -2476,6 +2498,15 @@ def runtime_rules_api():
 def update_runtime_rule(rule_key):
     if not valid_admin_csrf():
         return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    if rule_key == "chat_nav_hidden":
+        body = request.get_json(silent=True) or {}
+        value = str(body.get("value", "0")).strip().lower()
+        if value not in {"0", "1", "false", "true"}:
+            return jsonify({"ok": False, "error": "隐藏状态只能设置为开启或关闭。"}), 400
+        user = current_user()
+        user.chat_nav_hidden = value in {"1", "true"}
+        db.session.commit()
+        return jsonify({"ok": True, "item": account_chat_nav_rule_payload(user)})
     row = RuntimeRule.query.filter_by(rule_key=rule_key).first_or_404()
     if not row.editable:
         return jsonify({"ok": False, "error": "这条规则是知识规则，只能查看，不能在这里修改。"}), 400
@@ -7912,6 +7943,10 @@ def trade_validation_detail(plan_id):
 
 with app.app_context():
     db.create_all()
+    user_columns = {column["name"] for column in inspect(db.engine).get_columns("user_account")}
+    if "chat_nav_hidden" not in user_columns:
+        db.session.execute(text("ALTER TABLE user_account ADD COLUMN chat_nav_hidden BOOLEAN NOT NULL DEFAULT 0"))
+        db.session.commit()
     invite_columns = {column["name"] for column in inspect(db.engine).get_columns("invite_code")}
     if "code_value" not in invite_columns:
         db.session.execute(text("ALTER TABLE invite_code ADD COLUMN code_value VARCHAR(32)"))

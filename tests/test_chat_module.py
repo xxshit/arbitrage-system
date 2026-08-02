@@ -90,6 +90,29 @@ class ChatModuleTests(unittest.TestCase):
         self.assertFalse(older["has_more_before"])
         self.assertGreater(older["items"][0]["id"], 5)
 
+    def test_chat_navigation_concealment_is_account_scoped_and_admin_only(self):
+        viewer_rules = self.bob.get("/api/runtime-rules").get_json()["items"]
+        viewer_rule = next(item for item in viewer_rules if item["key"] == "chat_nav_hidden")
+        self.assertEqual(viewer_rule["value"], "0")
+        self.assertFalse(viewer_rule["editable"])
+
+        denied = self.bob.patch(
+            "/api/runtime-rules/chat_nav_hidden",
+            json={"value": "1"},
+            headers={"X-CSRF-Token": "bob-csrf"},
+        )
+        self.assertEqual(denied.status_code, 403)
+
+        updated = self.alice.patch(
+            "/api/runtime-rules/chat_nav_hidden",
+            json={"value": "1"},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertTrue(self.alice.get("/api/auth/me").get_json()["chat_nav_hidden"])
+        self.assertIn(b'class="chat-nav-entry hidden"', self.alice.get("/").data)
+        self.assertFalse(self.bob.get("/api/auth/me").get_json()["chat_nav_hidden"])
+
 
 if __name__ == "__main__":
     unittest.main()

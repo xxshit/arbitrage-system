@@ -7783,10 +7783,10 @@ def refresh_trend_horizon_validations(symbol=None, sync=True):
     if sync:
         for item_symbol in symbols:
             sync_trade_validation_candles(item_symbol)
-    now = datetime.now()
+    now = datetime.now(SHANGHAI_TZ).replace(tzinfo=None)
     for plan in plans:
         start_at = plan.latest_at or (plan.anchor_at - timedelta(seconds=1))
-        start_bucket = int(start_at.timestamp())
+        start_bucket = int(start_at.replace(tzinfo=SHANGHAI_TZ).timestamp())
         candles = TradeValidationCandle.query.filter(
             TradeValidationCandle.symbol == plan.symbol,
             TradeValidationCandle.interval == TRADE_VALIDATION_INTERVAL,
@@ -7797,7 +7797,7 @@ def refresh_trend_horizon_validations(symbol=None, sync=True):
         }
         target_distance = abs(plan.take_profit_price - plan.anchor_price)
         for candle in candles:
-            observed_at = datetime.fromtimestamp(candle.bucket_at)
+            observed_at = datetime.fromtimestamp(candle.bucket_at, tz=SHANGHAI_TZ).replace(tzinfo=None)
             favorable_price = candle.high if plan.direction == "long" else candle.low
             adverse_price = candle.low if plan.direction == "long" else candle.high
             favorable_pct = max(0.0, horizon_move_pct(plan.direction, favorable_price, plan.anchor_price))
@@ -7867,7 +7867,7 @@ def create_ake_horizon_template(force=False):
     active = TrendHorizonValidation.query.filter_by(symbol="AKE/USDT", status="active").all()
     if active and not force:
         return active[0].batch_key
-    now = datetime.now()
+    now = datetime.now(SHANGHAI_TZ).replace(tzinfo=None)
     if force:
         for row in active:
             row.status = "replaced"
@@ -7958,7 +7958,7 @@ def trend_horizon_payload(symbol):
         for event in TrendHorizonEvent.query.filter(TrendHorizonEvent.validation_id.in_(plan_ids)).order_by(TrendHorizonEvent.observed_at.desc()).all():
             events_by_plan.setdefault(event.validation_id, []).append(event)
     result = []
-    now = datetime.now()
+    now = datetime.now(SHANGHAI_TZ).replace(tzinfo=None)
     for row in rows:
         result.append({
             "id": row.id,

@@ -9,6 +9,7 @@ from app import (
     ake_structure_direction,
     app,
     classify_early_trend_stage,
+    send_early_trend_stage_push,
     thought_lark_ake_structure_message,
     thought_push_direction,
     thought_push_has_new_information,
@@ -99,6 +100,14 @@ class ThoughtRepricingTests(unittest.TestCase):
         self.assertIsNotNone(signal)
         self.assertEqual(signal["stage_key"], "prelaunch")
         self.assertLess(signal["cvd_change_5"], 0)
+
+    def test_loose_prelaunch_candidate_never_sends_lark(self):
+        with patch("app.urlopen") as mocked_urlopen:
+            self.assertFalse(send_early_trend_stage_push([{
+                "symbol": "TEST/USDT", "signal_type": "prelaunch",
+                "stage_key": "prelaunch", "stage_number": 0,
+            }]))
+        mocked_urlopen.assert_not_called()
 
     def test_signal_key_uses_current_structure(self):
         key = thought_signal_key(self.analysis, "ake_above_wall_bull_continue")

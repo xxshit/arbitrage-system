@@ -3561,7 +3561,6 @@ def scan_intraday_early_trends():
         previous = {row.symbol: row for row in EarlyTrendSignal.query.filter_by(report_date=report_date).all()}
         EarlyTrendSignal.query.filter_by(report_date=report_date).delete(synchronize_session=False)
         DailyHornSignal.query.filter_by(report_date=report_date, timeframe="focus").delete(synchronize_session=False)
-        newly_added = set()
         newly_staged = []
         for item in sorted(early_signals, key=lambda value: (value["signal_type"] == "strong_focus", value["price_change_5"]), reverse=True)[:50]:
             db.session.add(EarlyTrendSignal(report_date=report_date, **item))
@@ -3572,25 +3571,14 @@ def scan_intraday_early_trends():
                 cvd_confirmed=item["cvd_change_5"] > 0,
                 score=100.0 if item["signal_type"] == "strong_focus" else 68.0,
             ))
-            # 第0阶段才是用户真正想抢先看到的对象。强启动和启动前候选都加入盯盘，
-            # 但后续推送仍需经过各币自己的结构确认与重复抑制，不能每半小时机械播报。
-            watch = ThoughtWatch.query.filter_by(symbol=item["symbol"]).first()
-            if not watch:
-                db.session.add(ThoughtWatch(
-                    symbol=item["symbol"], active=True, started_at=datetime.now(),
-                    start_price=item.get("last_price"), note=f"30MIN阶段扫描自动加入 · {item['stage_label']}",
-                ))
+            # 普通候选只进日报趋势网页，不得擅自加入用户盯盘名单。
+            # 只有用户原先定义的“5根30MIN强结构”首次出现或升级时，才允许独立提醒一次。
             old = previous.get(item["symbol"])
-            if not old or old.stage_key != item["stage_key"]:
-                newly_added.add(item["symbol"])
+            if item["signal_type"] == "strong_focus" and (not old or old.stage_key != item["stage_key"]):
                 newly_staged.append(item)
         db.session.commit()
         if newly_staged:
             send_early_trend_stage_push(newly_staged)
-        # 强启动进入常规盯盘后，再由币种模型判断是否已有足够证据形成方向推送。
-        strong_symbols = {item["symbol"] for item in newly_staged if item["signal_type"] == "strong_focus"}
-        if strong_symbols:
-            send_thought_analysis_push(only_symbols=strong_symbols)
         return len(early_signals)
     finally:
         EARLY_TREND_SCAN_LOCK.release()
@@ -3776,7 +3764,7 @@ def lark_trend_card(markdowns):
 
 
 def send_early_trend_stage_push(items):
-    """推送真正的形成前候选；明确标成候选，不冒充已经确认的买入信号。"""
+    """只推送用户定义的5根30MIN强犄角；普通候选只保留在网页。"""
     webhook = os.getenv("LARK_THOUGHT_ANALYSIS_WEBHOOK", "").strip()
     if not webhook or not items:
         return False
@@ -3784,6 +3772,8 @@ def send_early_trend_stage_push(items):
     sections = []
     reserved = []
     for item in items:
+        if item.get("signal_type") != "strong_focus":
+            continue
         signal_key = f"{report_date}:{item['stage_key']}"
         if LarkPushState.query.filter_by(
             channel="early_trend_stage", symbol=item["symbol"], signal_key=signal_key
@@ -3793,13 +3783,13 @@ def send_early_trend_stage_push(items):
         stage_color = "cus-bull" if item["stage_number"] >= 1 else "cus-bull-soft"
         confidence = "较高" if cvd_up else "观察"
         sections.append("\n".join([
-            lark_dot_label(f"↑ 形成前捕捉 / {confidence}", stage_color),
+            lark_dot_label(f"↑ 5根30MIN犄角 / {confidence}", stage_color),
             f"**{item['symbol']}　{item['stage_label']}**",
             f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
             f"价格：{lark_price_value(item.get('last_price'))}",
             f"近5根30MIN：价格 {lark_plain_value(item.get('price_change_5'), 2, '%')}｜持仓 {lark_plain_value(item.get('oi_change_5'), 2, '%')}｜多空人数比 {lark_plain_value(item.get('ratio_change_5'), 2, '%')}｜CVD {lark_cvd_label(item.get('cvd_change_5'))}｜量能 {lark_plain_value(item.get('volume_ratio'), 2, 'x')}",
             f"阶段判断：{item['stage_reason']}",
-            "执行含义：这是形成前候选，不追涨、不直接等同开仓；等待价格点火与量能承接确认。若持仓回落、人数比回升或价格跌破蓄势区，则候选失效。",
+            "执行含义：这是符合用户严格条件的重点结构，但仍不直接等同开仓；继续结合所处阶段、价格点火和量能承接确认。",
             f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{item['symbol'].replace('/', '')}",
         ]))
         reserved.append((item["symbol"], signal_key))

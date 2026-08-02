@@ -3303,15 +3303,18 @@ def classify_early_trend_stage(closed, oi_rows, ratio_rows):
             "volume_ratio": volume_ratio, "last_price": last_close,
         }
 
-    # 真正的启动前观察：价格尚未大涨，但合约仓位与人数结构已经先形成犄角，CVD 开始积累。
+    # 真正的启动前观察：价格尚未大涨，但合约仓位与人数结构已经先形成犄角。
+    # CVD 上涨只提高确定性，不再是硬门槛；启动前主动买盘尚未出现时，CVD 完全可能仍偏弱。
+    # 成交量也只要求没有完全枯竭，避免等到明显放量、价格已经启动后才发现趋势。
     if (
-        -5 <= price_change <= 15 and oi_change >= 5 and ratio_change <= -5 and cvd_up
-        and (prior_range or 999) <= 25 and (volume_ratio or 0) >= 1.15
+        -6 <= price_change <= 18 and oi_change >= 2 and ratio_change <= -2
+        and (prior_range or 999) <= 30 and (volume_ratio or 0) >= 0.70
     ):
+        cvd_note = "CVD已先行积累" if cvd_up else "CVD尚未确认，属于更早但确定性较低的候选"
         return {
             "signal_type": "prelaunch", "stage_key": "prelaunch",
             "stage_label": "启动前蓄势 · 第0阶段", "stage_number": 0,
-            "stage_reason": "价格仍在压缩区，持仓先增、人数比先降、CVD先累积；这是前置观察，不等于已经确认拉升。",
+            "stage_reason": f"价格仍在压缩区，持仓先增、人数比先降；{cvd_note}。这是前置观察，不等于已经确认拉升。",
             "price_change_5": price_change, "cvd_change_5": cvd_change,
             "oi_change_5": oi_change, "ratio_change_5": ratio_change,
             "prior_price_change": prior_change, "prior_range": prior_range,
@@ -3559,6 +3562,7 @@ def scan_intraday_early_trends():
         EarlyTrendSignal.query.filter_by(report_date=report_date).delete(synchronize_session=False)
         DailyHornSignal.query.filter_by(report_date=report_date, timeframe="focus").delete(synchronize_session=False)
         newly_added = set()
+        newly_staged = []
         for item in sorted(early_signals, key=lambda value: (value["signal_type"] == "strong_focus", value["price_change_5"]), reverse=True)[:50]:
             db.session.add(EarlyTrendSignal(report_date=report_date, **item))
             db.session.add(DailyHornSignal(
@@ -3568,20 +3572,25 @@ def scan_intraday_early_trends():
                 cvd_confirmed=item["cvd_change_5"] > 0,
                 score=100.0 if item["signal_type"] == "strong_focus" else 68.0,
             ))
-            if item["signal_type"] == "strong_focus":
-                watch = ThoughtWatch.query.filter_by(symbol=item["symbol"]).first()
-                if not watch:
-                    db.session.add(ThoughtWatch(
-                        symbol=item["symbol"], active=True, started_at=datetime.now(),
-                        start_price=item.get("last_price"), note=f"五根30MIN强启动自动加入 · {item['stage_label']}",
-                    ))
-                    newly_added.add(item["symbol"])
-                old = previous.get(item["symbol"])
-                if not old or old.stage_key != item["stage_key"]:
-                    newly_added.add(item["symbol"])
+            # 第0阶段才是用户真正想抢先看到的对象。强启动和启动前候选都加入盯盘，
+            # 但后续推送仍需经过各币自己的结构确认与重复抑制，不能每半小时机械播报。
+            watch = ThoughtWatch.query.filter_by(symbol=item["symbol"]).first()
+            if not watch:
+                db.session.add(ThoughtWatch(
+                    symbol=item["symbol"], active=True, started_at=datetime.now(),
+                    start_price=item.get("last_price"), note=f"30MIN阶段扫描自动加入 · {item['stage_label']}",
+                ))
+            old = previous.get(item["symbol"])
+            if not old or old.stage_key != item["stage_key"]:
+                newly_added.add(item["symbol"])
+                newly_staged.append(item)
         db.session.commit()
-        if newly_added:
-            send_thought_analysis_push(only_symbols=newly_added)
+        if newly_staged:
+            send_early_trend_stage_push(newly_staged)
+        # 强启动进入常规盯盘后，再由币种模型判断是否已有足够证据形成方向推送。
+        strong_symbols = {item["symbol"] for item in newly_staged if item["signal_type"] == "strong_focus"}
+        if strong_symbols:
+            send_thought_analysis_push(only_symbols=strong_symbols)
         return len(early_signals)
     finally:
         EARLY_TREND_SCAN_LOCK.release()
@@ -3764,6 +3773,57 @@ def lark_trend_card(markdowns):
             },
         },
     }
+
+
+def send_early_trend_stage_push(items):
+    """推送真正的形成前候选；明确标成候选，不冒充已经确认的买入信号。"""
+    webhook = os.getenv("LARK_THOUGHT_ANALYSIS_WEBHOOK", "").strip()
+    if not webhook or not items:
+        return False
+    report_date = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
+    sections = []
+    reserved = []
+    for item in items:
+        signal_key = f"{report_date}:{item['stage_key']}"
+        if LarkPushState.query.filter_by(
+            channel="early_trend_stage", symbol=item["symbol"], signal_key=signal_key
+        ).first():
+            continue
+        cvd_up = (item.get("cvd_change_5") or 0) > 0
+        stage_color = "cus-bull" if item["stage_number"] >= 1 else "cus-bull-soft"
+        confidence = "较高" if cvd_up else "观察"
+        sections.append("\n".join([
+            lark_dot_label(f"↑ 形成前捕捉 / {confidence}", stage_color),
+            f"**{item['symbol']}　{item['stage_label']}**",
+            f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
+            f"价格：{lark_price_value(item.get('last_price'))}",
+            f"近5根30MIN：价格 {lark_plain_value(item.get('price_change_5'), 2, '%')}｜持仓 {lark_plain_value(item.get('oi_change_5'), 2, '%')}｜多空人数比 {lark_plain_value(item.get('ratio_change_5'), 2, '%')}｜CVD {lark_cvd_label(item.get('cvd_change_5'))}｜量能 {lark_plain_value(item.get('volume_ratio'), 2, 'x')}",
+            f"阶段判断：{item['stage_reason']}",
+            "执行含义：这是形成前候选，不追涨、不直接等同开仓；等待价格点火与量能承接确认。若持仓回落、人数比回升或价格跌破蓄势区，则候选失效。",
+            f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{item['symbol'].replace('/', '')}",
+        ]))
+        reserved.append((item["symbol"], signal_key))
+    if not sections:
+        return False
+    # 先占位再发送，避免服务重叠或响应丢失造成同一形成阶段重复推送。
+    now = datetime.now()
+    for symbol, signal_key in reserved:
+        db.session.add(LarkPushState(
+            channel="early_trend_stage", symbol=symbol, signal_key=signal_key, pushed_at=now
+        ))
+    db.session.commit()
+    try:
+        request_obj = Request(
+            webhook,
+            data=json.dumps(lark_trend_card(sections), ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": "ArbiScope/1.0"},
+        )
+        with urlopen(request_obj, timeout=10) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        return result.get("code", 0) == 0 or result.get("StatusCode", 0) == 0
+    except Exception:
+        # 不自动重发；形成前提示宁可少一条，也不能在网络响应不确定时重复轰炸。
+        return False
 
 
 def send_daily_lark_trend_report():
@@ -4573,12 +4633,24 @@ def ake_structure_direction(analysis):
     price_down_votes = sum(value(item, "price_change") < -0.4 for item in windows)
     broad_oi_change = analysis.get("oi_change_pct")
     broad_ratio_change = analysis.get("ratio_change_pct")
-    funding_negative = funding is not None and funding < 0
-    basis_negative = basis is not None and basis < 0
-    funding_positive = funding is not None and funding > 0
-    basis_positive = basis is not None and basis > 0
+    # 零轴附近属于噪声区，不能用 +0.004% / -0.099% 这种轻微摆动反复翻转叙事。
+    funding_negative = funding is not None and funding <= -0.005
+    basis_negative = basis is not None and basis <= -0.10
+    funding_positive = funding is not None and funding >= 0.005
+    basis_positive = basis is not None and basis >= 0.10
+    funding_not_bearish = funding is None or funding > -0.005
+    basis_not_bearish = basis is None or basis > -0.10
+    bullish_horn_votes = sum(
+        value(item, "oi_change") >= 0.8 and value(item, "ratio_change") <= -0.3
+        for item in windows
+    )
+    bullish_flow_votes = sum(
+        value(item, "price_change") > 0.4 and value(item, "cvd") > 0
+        for item in windows
+    )
     main_long_unwind = (
-        oi_down_votes >= 1 and ratio_up_votes >= 1
+        # 一根短周期线的仓位下降/人数比回升只记为候选，至少两个中短周期共振才确认。
+        oi_down_votes >= 2 and ratio_up_votes >= 2
     ) or (
         broad_oi_change is not None and broad_ratio_change is not None
         and broad_oi_change <= -5 and broad_ratio_change >= 3
@@ -4593,9 +4665,12 @@ def ake_structure_direction(analysis):
             return "ake_main_long_unwind_watch"
         if funding_negative and basis_negative:
             return "ake_above_wall_distribution_watch"
-        if oi_down_votes >= 1 and (cvd_down_votes >= 1 or basis_negative or funding_negative):
+        if oi_down_votes >= 2 and (cvd_down_votes >= 2 or basis_negative or funding_negative):
             return "ake_above_wall_bull_weakening"
-        if funding_positive and basis_positive and (oi_up_votes >= 1 or ratio_down_votes >= 1 or cvd_up_votes >= 1 or not windows):
+        if funding_not_bearish and basis_not_bearish and (
+            bullish_horn_votes >= 1 or bullish_flow_votes >= 2
+            or (funding_positive and basis_positive and (oi_up_votes >= 1 or ratio_down_votes >= 1))
+        ):
             return "ake_above_wall_bull_continue"
         return "ake_above_wall_new_range"
     if 0.0020 <= last < 0.0022:
@@ -4643,7 +4718,8 @@ def thought_push_direction(analysis):
     if ake_direction:
         return ake_direction
     ake_structure = ake_structure_direction(analysis)
-    if ake_structure:
+    # “新区间/证据不足”不是一个方向，更不能用它打断已确认趋势并制造反向推送。
+    if ake_structure and ake_structure != "ake_above_wall_new_range":
         return ake_structure
     validation = analysis.get("validation") or {}
     checks = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
@@ -4835,6 +4911,7 @@ def thought_cvd_profile(metrics):
 
 
 THOUGHT_REPEAT_COOLDOWN_HOURS = 4
+AKE_DIRECTION_CANDIDATES = {}
 
 TURNOVER_THOUGHT_DIRECTIONS = {
     "soon_basis_negative_watch", "soon_funding_follow_watch", "soon_turnover_short_ready",
@@ -4993,7 +5070,22 @@ def thought_ake_has_new_information(previous, metrics):
     if previous is None:
         return True
     if previous.direction != metrics["direction"]:
+        # AKE 的看涨/转弱切换必须经过持续确认。未收盘短周期线与零轴附近资金面
+        # 都只能形成候选，至少三次观察且持续十分钟后，才允许改变正式叙事。
+        now = time.monotonic()
+        symbol = metrics.get("symbol")
+        candidate = AKE_DIRECTION_CANDIDATES.get(symbol)
+        if not candidate or candidate.get("direction") != metrics["direction"]:
+            AKE_DIRECTION_CANDIDATES[symbol] = {
+                "direction": metrics["direction"], "first_seen": now, "count": 1,
+            }
+            return False
+        candidate["count"] += 1
+        if candidate["count"] < 3 or now - candidate["first_seen"] < 10 * 60:
+            return False
+        AKE_DIRECTION_CANDIDATES.pop(symbol, None)
         return True
+    AKE_DIRECTION_CANDIDATES.pop(metrics.get("symbol"), None)
     if previous.signal_key != metrics["signal_key"]:
         return True
     previous_funding = previous.funding_rate
@@ -5021,6 +5113,8 @@ def thought_push_has_new_information(previous, metrics):
     if metrics.get("direction") in TURNOVER_THOUGHT_DIRECTIONS:
         return thought_turnover_has_new_information(previous, metrics)
     if previous.direction != metrics["direction"]:
+        if metrics.get("symbol") == "AKE/USDT":
+            return thought_ake_has_new_information(previous, metrics)
         return True
     hours_since_push = thought_hours_since_push(previous)
     if hours_since_push is not None and hours_since_push < THOUGHT_REPEAT_COOLDOWN_HOURS:

@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 from app import (
@@ -8,6 +8,8 @@ from app import (
     thought_lark_ake_structure_message,
     thought_push_has_new_information,
     thought_signal_key,
+    thought_horizon_outlook,
+    stabilize_thought_horizon,
 )
 
 
@@ -51,6 +53,7 @@ class ThoughtRepricingTests(unittest.TestCase):
             )
         self.assertIn("0.00402000", message)
         self.assertIn("0.00439487", message)
+        self.assertTrue(message.startswith("短线方向："))
         self.assertNotIn("0.0022 上沿", message)
         self.assertNotIn("0.0022-0.0024", message)
         self.assertNotIn("0.0026/0.0028", message)
@@ -83,6 +86,51 @@ class ThoughtRepricingTests(unittest.TestCase):
             "cvd_2h": 1,
         }
         self.assertFalse(thought_push_has_new_information(previous, metrics))
+
+    @staticmethod
+    def horizon_analysis(sign):
+        return {
+            "source": "live",
+            "validation": {
+                key: {
+                    "price_change": 2 * sign,
+                    "cvd": 100 * sign,
+                    "oi_change": 2,
+                    "ratio_change": -2 * sign,
+                }
+                for key in ("1h", "2h", "4h")
+            },
+        }
+
+    def test_medium_outlook_does_not_flip_within_ten_minutes(self):
+        started = datetime(2026, 8, 2, 14, 20)
+        previous = self.horizon_analysis(1)
+        stabilize_thought_horizon(previous, {}, started)
+        for minutes in (5, 10):
+            current = self.horizon_analysis(-1)
+            stabilize_thought_horizon(current, previous, started + timedelta(minutes=minutes))
+            self.assertEqual(current["_horizon_outlook"]["medium"]["bias"], "偏多")
+            self.assertEqual(current["_horizon_outlook"]["medium"]["candidate_bias"], "偏空")
+            previous = current
+
+    def test_medium_opposite_direction_requires_thirty_minutes(self):
+        started = datetime(2026, 8, 2, 14, 20)
+        previous = self.horizon_analysis(1)
+        stabilize_thought_horizon(previous, {}, started)
+        for minutes in (5, 15, 25, 36):
+            current = self.horizon_analysis(-1)
+            stabilize_thought_horizon(current, previous, started + timedelta(minutes=minutes))
+            previous = current
+        self.assertEqual(previous["_horizon_outlook"]["medium"]["bias"], "偏空")
+
+    def test_price_oi_and_account_ratio_rising_is_not_clean_medium_bull(self):
+        crowded_long = {
+            "validation": {
+                key: {"price_change": 3, "cvd": 100, "oi_change": 2, "ratio_change": 2}
+                for key in ("1h", "2h", "4h")
+            }
+        }
+        self.assertEqual(thought_horizon_outlook(crowded_long)["medium"]["bias"], "震荡/分歧")
 
 
 if __name__ == "__main__":

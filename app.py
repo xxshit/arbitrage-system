@@ -4258,6 +4258,13 @@ def thought_watch_snapshots(only_symbols=None):
     captured_at = datetime.now()
     for symbol, snapshot in results.items():
         row = ThoughtLiveSnapshot.query.filter_by(symbol=symbol).first()
+        previous_payload = {}
+        if row is not None:
+            try:
+                previous_payload = json.loads(row.payload_json or "{}")
+            except (TypeError, ValueError):
+                previous_payload = {}
+        stabilize_thought_horizon(snapshot, previous_payload, captured_at)
         # 上游偶发超时会返回旧市场库兜底值；已有实时快照时绝不能让旧兜底覆盖它。
         if row is not None and snapshot.get("source") != "live":
             continue
@@ -5099,6 +5106,9 @@ def upsert_thought_push_snapshot(symbol, metrics):
 
 def thought_horizon_outlook(analysis):
     """Separate short, medium and multi-day direction instead of flattening them into one call."""
+    stabilized = analysis.get("_horizon_outlook")
+    if stabilized:
+        return stabilized
     validation = analysis.get("validation") or {}
     micro = analysis.get("micro_validation") or {}
 
@@ -5121,6 +5131,10 @@ def thought_horizon_outlook(analysis):
             if oi is not None and ratio is not None:
                 if price > 0 and oi > 0 and ratio < 0:
                     score += 0.8
+                elif price > 0 and oi > 0 and ratio > 0:
+                    # 价格、持仓、人数比一起上升更像追多拥挤或主力借势布空，
+                    # 不能仅凭价格与CVD上涨就给出干净的中线偏多。
+                    score -= 1.15
                 elif price < 0 and oi > 0 and ratio > 0:
                     score -= 0.65
                 elif price > 0 and oi < 0:
@@ -5162,6 +5176,70 @@ def thought_horizon_outlook(analysis):
     }
 
 
+def stabilize_thought_horizon(analysis, previous_payload=None, observed_at=None):
+    """中线观点使用持久化迟滞，禁止一根新30M线在十分钟内把1H-4H结论翻向。"""
+    observed_at = observed_at or datetime.now()
+    previous_payload = previous_payload or {}
+    previous_state = previous_payload.get("_horizon_state") or {}
+    raw_outlook = thought_horizon_outlook({key: value for key, value in analysis.items() if key != "_horizon_outlook"})
+    raw_bias = raw_outlook["medium"]["bias"]
+    stable_bias = previous_state.get("stable_bias") or raw_bias
+    stable_since = previous_state.get("stable_since") or observed_at.isoformat()
+    candidate_bias = previous_state.get("candidate_bias")
+    candidate_since = previous_state.get("candidate_since")
+    candidate_count = int(previous_state.get("candidate_count") or 0)
+
+    # 数据回退时沿用上次中线结论，不让旧快照推动候选状态。
+    if analysis.get("source") == "live" and raw_bias != stable_bias:
+        if candidate_bias == raw_bias:
+            candidate_count += 1
+        else:
+            candidate_bias = raw_bias
+            candidate_since = observed_at.isoformat()
+            candidate_count = 1
+        try:
+            candidate_started = datetime.fromisoformat(candidate_since)
+            elapsed_seconds = max((observed_at - candidate_started).total_seconds(), 0)
+        except (TypeError, ValueError):
+            candidate_since = observed_at.isoformat()
+            elapsed_seconds = 0
+        opposite_flip = {stable_bias, raw_bias} == {"偏多", "偏空"}
+        required_seconds = 30 * 60 if opposite_flip else 15 * 60
+        required_count = 4
+        if candidate_count >= required_count and elapsed_seconds >= required_seconds:
+            stable_bias = raw_bias
+            stable_since = observed_at.isoformat()
+            candidate_bias = None
+            candidate_since = None
+            candidate_count = 0
+    elif raw_bias == stable_bias:
+        candidate_bias = None
+        candidate_since = None
+        candidate_count = 0
+
+    tones = {"偏多": "bull", "偏空": "bear", "震荡/分歧": "watch", "未确认": "muted"}
+    stable_outlook = {key: dict(value) for key, value in raw_outlook.items()}
+    stable_outlook["medium"] = {
+        **stable_outlook["medium"],
+        "bias": stable_bias,
+        "tone": tones.get(stable_bias, "muted"),
+        "raw_bias": raw_bias,
+        "candidate_bias": candidate_bias,
+    }
+    state = {
+        "stable_bias": stable_bias,
+        "stable_since": stable_since,
+        "candidate_bias": candidate_bias,
+        "candidate_since": candidate_since,
+        "candidate_count": candidate_count,
+        "raw_bias": raw_bias,
+        "updated_at": observed_at.isoformat(),
+    }
+    analysis["_horizon_outlook"] = stable_outlook
+    analysis["_horizon_state"] = state
+    return stable_outlook
+
+
 def thought_horizon_line(analysis):
     outlook = thought_horizon_outlook(analysis)
     colors = {"bull": "cus-bull", "bear": "cus-bear", "watch": "orange", "muted": "cus-muted"}
@@ -5170,7 +5248,10 @@ def thought_horizon_line(analysis):
         item = outlook[key]
         parts.append(f"{label} <font color='{colors[item['tone']]}'>{item['bias']}</font>")
     conflicts = {outlook[key]["bias"] for key in ("short", "medium", "long")} >= {"偏多", "偏空"}
-    suffix = "｜周期方向相反，禁止用短线结论代替长线" if conflicts else ""
+    medium = outlook["medium"]
+    candidate = medium.get("candidate_bias")
+    candidate_note = f"｜中线{candidate}仅为候选，尚未完成30分钟确认" if candidate and candidate != medium["bias"] else ""
+    suffix = ("｜周期方向相反，禁止用短线结论代替长线" if conflicts else "") + candidate_note
     return "周期观点：" + "｜".join(parts) + suffix
 
 
@@ -5409,6 +5490,8 @@ def thought_lark_ake_wall_message(analysis, direction):
         key_zone = "关键位：重新站上 0.0020，才恢复卖墙区观察；站不上且继续走弱，下方先看 0.0019/0.00185。"
     effective_wall_qty = wall.get("wall_qty") or sum((item.get("qty") or 0) for item in (wall.get("reference_buckets") or []))
     effective_wall_notional = wall.get("wall_notional") or sum((item.get("notional") or 0) for item in (wall.get("reference_buckets") or []))
+    if header.startswith("方向："):
+        header = "短线" + header
     return "\n".join([
         header,
         title,
@@ -5755,6 +5838,8 @@ def thought_lark_ake_structure_message(analysis, direction):
         price_change = (last - previous_price) / previous_price * 100
         price_line += f"（较上次推送 {lark_plain_value(price_change, 2, '%')}）"
 
+    if header.startswith("方向："):
+        header = "短线" + header
     return "\n".join([
         header,
         title,

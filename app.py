@@ -142,6 +142,50 @@ class TradeValidationCandle(db.Model):
     __table_args__ = (db.UniqueConstraint("symbol", "interval", "bucket_at", name="uq_trade_validation_candle_symbol_interval_bucket"),)
 
 
+class TrendHorizonValidation(db.Model):
+    """同一观察时点的短/中/长周期假设与全过程验证。"""
+    id = db.Column(db.Integer, primary_key=True)
+    batch_key = db.Column(db.String(64), nullable=False, index=True)
+    symbol = db.Column(db.String(30), nullable=False, index=True)
+    horizon = db.Column(db.String(20), nullable=False, index=True)
+    direction = db.Column(db.String(12), nullable=False)
+    confidence = db.Column(db.Float, nullable=False, default=50.0)
+    anchor_price = db.Column(db.Float, nullable=False)
+    anchor_at = db.Column(db.DateTime, nullable=False, default=datetime.now)
+    review_after_at = db.Column(db.DateTime, nullable=False)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    take_profit_price = db.Column(db.Float, nullable=False)
+    soft_stop_price = db.Column(db.Float, nullable=False)
+    hard_stop_price = db.Column(db.Float, nullable=False)
+    hypothesis = db.Column(db.Text, nullable=False)
+    evidence_json = db.Column(db.Text)
+    invalidation_rule = db.Column(db.Text)
+    status = db.Column(db.String(24), nullable=False, default="active", index=True)
+    first_hit = db.Column(db.String(32))
+    first_hit_at = db.Column(db.DateTime)
+    first_hit_price = db.Column(db.Float)
+    max_favorable_pct = db.Column(db.Float, nullable=False, default=0.0)
+    max_adverse_pct = db.Column(db.Float, nullable=False, default=0.0)
+    max_favorable_price = db.Column(db.Float)
+    max_adverse_price = db.Column(db.Float)
+    latest_price = db.Column(db.Float)
+    latest_at = db.Column(db.DateTime)
+    path_state = db.Column(db.String(40), nullable=False, default="observing")
+    interim_review = db.Column(db.Text)
+    final_review = db.Column(db.Text)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+    __table_args__ = (db.UniqueConstraint("batch_key", "horizon", name="uq_trend_horizon_batch_horizon"),)
+
+
+class TrendHorizonEvent(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    validation_id = db.Column(db.Integer, db.ForeignKey("trend_horizon_validation.id"), nullable=False, index=True)
+    event_type = db.Column(db.String(40), nullable=False, index=True)
+    observed_at = db.Column(db.DateTime, nullable=False, default=datetime.now, index=True)
+    price = db.Column(db.Float)
+    detail_json = db.Column(db.Text)
+
+
 class LatestMarketSnapshot(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     symbol = db.Column(db.String(30), nullable=False)
@@ -6878,6 +6922,17 @@ def daily_report_thoughts():
             item["watch_active"] = watch_states[item["symbol"]]
             if not watch_states[item["symbol"]]:
                 item["trade_status"] = "已停止盯盘 / 历史复盘"
+        if item["symbol"] == "AKE/USDT":
+            item["horizon_validations"] = trend_horizon_payload("AKE/USDT")
+            if item["horizon_validations"]:
+                current_plan = item["horizon_validations"]
+                anchor = current_plan[0]["anchor_price"]
+                outlook = "；".join(
+                    f"{row['label']}{'偏多' if row['direction'] == 'long' else '偏空'}({row['confidence']:.0f}%)"
+                    for row in current_plan
+                )
+                item["thought_summary"] = f"AKE 已在 {anchor:.8f} 建立同一时点多周期验证：{outlook}。三个周期独立判定，不用短线波动直接推翻中长线。"
+                item["validation_view"] = "持续记录先到止盈还是止损、止损后是否反转、接近止盈后是否掉头，以及震荡路径；触发第一目标后仍观察到周期结束，再按真实路径校准止盈止损和结构失效条件。"
     return jsonify(payload)
 
 
@@ -7664,6 +7719,284 @@ def validation_auto_metrics(symbol):
     }
 
 
+TREND_HORIZON_META = {
+    "short": {"label": "短线", "window": "30MIN-3H", "review_minutes": 30, "expire_minutes": 180},
+    "medium": {"label": "中线", "window": "4H-24H", "review_minutes": 240, "expire_minutes": 1440},
+    "long": {"label": "长线", "window": "1D-3D", "review_minutes": 1440, "expire_minutes": 4320},
+}
+
+
+def horizon_move_pct(direction, price, anchor):
+    if not price or not anchor:
+        return 0.0
+    raw = percent_delta(price, anchor) or 0.0
+    return raw if direction == "long" else -raw
+
+
+def trend_horizon_event(plan, event_type, observed_at, price=None, detail=None):
+    existing = TrendHorizonEvent.query.filter_by(validation_id=plan.id, event_type=event_type).first()
+    if existing:
+        return existing
+    row = TrendHorizonEvent(
+        validation_id=plan.id,
+        event_type=event_type,
+        observed_at=observed_at,
+        price=price,
+        detail_json=json.dumps(detail or {}, ensure_ascii=False),
+    )
+    db.session.add(row)
+    return row
+
+
+def trend_horizon_review_text(plan, final=False):
+    hit_labels = {
+        None: "尚未触及止盈或硬止损",
+        "take_profit": "先触及虚拟止盈",
+        "hard_stop": "先触及结构硬止损",
+        "ambiguous_same_candle": "同一根5分钟K线同时覆盖止盈与止损，先后顺序无法确认",
+    }
+    prefix = "到期复盘" if final else "阶段复核"
+    path = hit_labels.get(plan.first_hit, plan.first_hit or "继续观察")
+    extra = ""
+    if plan.path_state == "stop_then_recovery":
+        extra = "；止损后价格重新回到有利方向，需检讨止损是否过紧，并核对当时量能/OI/CVD是否只是洗盘"
+    elif plan.path_state == "stop_then_target":
+        extra = "；止损后又到止盈，属于典型先扫损后反转，必须复盘软警戒与硬失效的距离"
+    elif plan.path_state == "target_then_reversal":
+        extra = "；先按预期运行后又反转，需检讨止盈是否过远或是否错过数据先行转弱"
+    elif plan.path_state == "near_target_then_reversal":
+        extra = "；曾接近目标但未到达便反转，需检查目标设置和移动保护规则"
+    return (
+        f"{prefix}：{path}；最大有利 {plan.max_favorable_pct:+.2f}%，"
+        f"最大不利 {plan.max_adverse_pct:+.2f}%{extra}。"
+    )
+
+
+def refresh_trend_horizon_validations(symbol=None, sync=True):
+    query = TrendHorizonValidation.query.filter_by(status="active")
+    if symbol:
+        query = query.filter_by(symbol=symbol)
+    plans = query.order_by(TrendHorizonValidation.anchor_at).all()
+    if not plans:
+        return 0
+    symbols = sorted({plan.symbol for plan in plans})
+    if sync:
+        for item_symbol in symbols:
+            sync_trade_validation_candles(item_symbol)
+    now = datetime.now()
+    for plan in plans:
+        start_at = plan.latest_at or (plan.anchor_at - timedelta(seconds=1))
+        start_bucket = int(start_at.timestamp())
+        candles = TradeValidationCandle.query.filter(
+            TradeValidationCandle.symbol == plan.symbol,
+            TradeValidationCandle.interval == TRADE_VALIDATION_INTERVAL,
+            TradeValidationCandle.bucket_at > start_bucket,
+        ).order_by(TradeValidationCandle.bucket_at).all()
+        seen_types = {
+            event.event_type for event in TrendHorizonEvent.query.filter_by(validation_id=plan.id).all()
+        }
+        target_distance = abs(plan.take_profit_price - plan.anchor_price)
+        for candle in candles:
+            observed_at = datetime.fromtimestamp(candle.bucket_at)
+            favorable_price = candle.high if plan.direction == "long" else candle.low
+            adverse_price = candle.low if plan.direction == "long" else candle.high
+            favorable_pct = max(0.0, horizon_move_pct(plan.direction, favorable_price, plan.anchor_price))
+            adverse_pct = min(0.0, horizon_move_pct(plan.direction, adverse_price, plan.anchor_price))
+            if favorable_pct > plan.max_favorable_pct:
+                plan.max_favorable_pct = favorable_pct
+                plan.max_favorable_price = favorable_price
+            if adverse_pct < plan.max_adverse_pct:
+                plan.max_adverse_pct = adverse_pct
+                plan.max_adverse_price = adverse_price
+            target_hit = candle.high >= plan.take_profit_price if plan.direction == "long" else candle.low <= plan.take_profit_price
+            soft_hit = candle.low <= plan.soft_stop_price if plan.direction == "long" else candle.high >= plan.soft_stop_price
+            hard_hit = candle.low <= plan.hard_stop_price if plan.direction == "long" else candle.high >= plan.hard_stop_price
+            if target_hit and hard_hit and plan.first_hit is None:
+                plan.first_hit = "ambiguous_same_candle"
+                plan.first_hit_at = observed_at
+                plan.first_hit_price = candle.close
+                trend_horizon_event(plan, "ambiguous_same_candle", observed_at, candle.close)
+                seen_types.add("ambiguous_same_candle")
+            else:
+                if target_hit and "take_profit" not in seen_types:
+                    trend_horizon_event(plan, "take_profit", observed_at, plan.take_profit_price)
+                    seen_types.add("take_profit")
+                    if plan.first_hit is None:
+                        plan.first_hit, plan.first_hit_at, plan.first_hit_price = "take_profit", observed_at, plan.take_profit_price
+                if hard_hit and "hard_stop" not in seen_types:
+                    trend_horizon_event(plan, "hard_stop", observed_at, plan.hard_stop_price)
+                    seen_types.add("hard_stop")
+                    if plan.first_hit is None:
+                        plan.first_hit, plan.first_hit_at, plan.first_hit_price = "hard_stop", observed_at, plan.hard_stop_price
+            if soft_hit and "soft_stop" not in seen_types:
+                trend_horizon_event(plan, "soft_stop", observed_at, plan.soft_stop_price)
+                seen_types.add("soft_stop")
+            if plan.first_hit == "hard_stop":
+                recovered = candle.close >= plan.anchor_price if plan.direction == "long" else candle.close <= plan.anchor_price
+                if target_hit:
+                    plan.path_state = "stop_then_target"
+                elif recovered:
+                    plan.path_state = "stop_then_recovery"
+            elif plan.first_hit == "take_profit" and hard_hit:
+                plan.path_state = "target_then_reversal"
+            elif plan.first_hit is None and target_distance > 0:
+                favorable_distance = abs((plan.max_favorable_price or plan.anchor_price) - plan.anchor_price)
+                reversed_past_anchor = candle.close < plan.anchor_price if plan.direction == "long" else candle.close > plan.anchor_price
+                if favorable_distance >= target_distance * 0.70 and reversed_past_anchor:
+                    plan.path_state = "near_target_then_reversal"
+                    if "near_target_then_reversal" not in seen_types:
+                        trend_horizon_event(plan, "near_target_then_reversal", observed_at, candle.close)
+                        seen_types.add("near_target_then_reversal")
+            plan.latest_price = candle.close
+            plan.latest_at = observed_at
+        latest_price = latest_validation_price(plan.symbol)
+        if latest_price:
+            plan.latest_price = latest_price
+        if now >= plan.review_after_at and not plan.interim_review:
+            plan.interim_review = trend_horizon_review_text(plan)
+            trend_horizon_event(plan, "interim_review", now, plan.latest_price, {"review": plan.interim_review})
+        if now >= plan.expires_at:
+            plan.status = "completed"
+            plan.final_review = trend_horizon_review_text(plan, final=True)
+            trend_horizon_event(plan, "final_review", now, plan.latest_price, {"review": plan.final_review})
+    db.session.commit()
+    return len(plans)
+
+
+def create_ake_horizon_template(force=False):
+    active = TrendHorizonValidation.query.filter_by(symbol="AKE/USDT", status="active").all()
+    if active and not force:
+        return active[0].batch_key
+    now = datetime.now()
+    if force:
+        for row in active:
+            row.status = "replaced"
+            row.final_review = "由更新后的当前结构重新定价，旧批次停止继续验证。"
+    sync_trade_validation_candles("AKE/USDT")
+    metrics = validation_auto_metrics("AKE/USDT") or {}
+    snapshot = thought_snapshot("AKE/USDT")
+    price = float(snapshot.get("last") or metrics.get("price") or 0)
+    if price <= 0:
+        raise RuntimeError("AKE 当前价格不可用，无法建立验证模板")
+    atr = max(float(metrics.get("atr") or 0), price * 0.025)
+    support = float(snapshot.get("support") or metrics.get("low_1h") or price * 0.94)
+    resistance = float(snapshot.get("resistance") or metrics.get("high_1h") or price * 1.08)
+    evidence = {
+        "anchor_price": price,
+        "support": support,
+        "resistance": resistance,
+        "funding_rate": snapshot.get("funding_rate"),
+        "basis": snapshot.get("basis"),
+        "validation": snapshot.get("validation") or {},
+        "metrics": metrics,
+        "captured_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    batch_key = f"AKE-{now.strftime('%Y%m%d%H%M%S')}"
+    definitions = {
+        "short": {
+            "direction": "short", "confidence": 68,
+            "tp": min(support * 0.992, price - atr * 0.85),
+            "soft": max(float(metrics.get("high_30m") or 0), price + atr * 1.25),
+            "hard": max(float(metrics.get("high_1h") or 0), price + atr * 2.15),
+            "hypothesis": "30MIN/1H 价格与主动成交同步转弱，持仓回落且人数比回升，短线先按反弹后的弱势延续验证；但5MIN仍可能反抽，因此只把收回近30MIN高点视作软警戒。",
+            "invalid": "连续5分钟收盘站稳硬止损上方，并伴随CVD转正、持仓恢复，才确认短线看空失效。",
+        },
+        "medium": {
+            "direction": "short", "confidence": 58,
+            "tp": min(price * 0.90, support - atr * 1.25),
+            "soft": max(resistance * 0.985, price + atr * 2.6),
+            "hard": max(resistance * 1.02, price + atr * 4.0),
+            "hypothesis": "2H/4H仍保留正CVD和此前涨幅，不能把一小时回落机械外推；但OI退潮、人数比结构走坏，暂按高位换手后的中线震荡偏空验证，置信度低于短线。",
+            "invalid": "4H价格重新放量创新高，且OI与CVD同步恢复，说明去杠杆后重新吸筹，中线偏空假设被推翻。",
+        },
+        "long": {
+            "direction": "short", "confidence": 52,
+            "tp": min(price * 0.78, support - atr * 3.2),
+            "soft": max(resistance, price + atr * 4.8),
+            "hard": max(resistance * 1.10, price + atr * 7.0),
+            "hypothesis": "1D-3D仍是大涨后的高位结构，长期趋势尚未确认反转；仅以OI明显退潮和高位换手作为低置信度派发假设，验证未来1-3天是否逐步回吐，而不是现在就认定必跌。",
+            "invalid": "日内放量突破当前结构高点，随后回踩缩量且OI/CVD重新共振上行，则派发假设失效，改按新一轮主升评估。",
+        },
+    }
+    for horizon, item in definitions.items():
+        meta = TREND_HORIZON_META[horizon]
+        row = TrendHorizonValidation(
+            batch_key=batch_key,
+            symbol="AKE/USDT",
+            horizon=horizon,
+            direction=item["direction"],
+            confidence=item["confidence"],
+            anchor_price=price,
+            anchor_at=now,
+            review_after_at=now + timedelta(minutes=meta["review_minutes"]),
+            expires_at=now + timedelta(minutes=meta["expire_minutes"]),
+            take_profit_price=max(float(item["tp"]), price * 0.25),
+            soft_stop_price=float(item["soft"]),
+            hard_stop_price=float(item["hard"]),
+            hypothesis=item["hypothesis"],
+            evidence_json=json.dumps(evidence, ensure_ascii=False),
+            invalidation_rule=item["invalid"],
+            latest_price=price,
+            latest_at=now,
+        )
+        db.session.add(row)
+    db.session.commit()
+    return batch_key
+
+
+def trend_horizon_payload(symbol):
+    rows = TrendHorizonValidation.query.filter_by(symbol=symbol).order_by(
+        TrendHorizonValidation.anchor_at.desc(), TrendHorizonValidation.id
+    ).all()
+    if not rows:
+        return []
+    latest_batch = rows[0].batch_key
+    rows = [row for row in rows if row.batch_key == latest_batch]
+    events_by_plan = {}
+    plan_ids = [row.id for row in rows]
+    if plan_ids:
+        for event in TrendHorizonEvent.query.filter(TrendHorizonEvent.validation_id.in_(plan_ids)).order_by(TrendHorizonEvent.observed_at.desc()).all():
+            events_by_plan.setdefault(event.validation_id, []).append(event)
+    result = []
+    now = datetime.now()
+    for row in rows:
+        result.append({
+            "id": row.id,
+            "batch_key": row.batch_key,
+            "horizon": row.horizon,
+            "label": TREND_HORIZON_META.get(row.horizon, {}).get("label", row.horizon),
+            "window": TREND_HORIZON_META.get(row.horizon, {}).get("window", ""),
+            "direction": row.direction,
+            "confidence": row.confidence,
+            "anchor_price": row.anchor_price,
+            "anchor_at": row.anchor_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "review_after_at": row.review_after_at.strftime("%m-%d %H:%M"),
+            "expires_at": row.expires_at.strftime("%m-%d %H:%M"),
+            "remaining_seconds": max(0, int((row.expires_at - now).total_seconds())),
+            "take_profit_price": row.take_profit_price,
+            "soft_stop_price": row.soft_stop_price,
+            "hard_stop_price": row.hard_stop_price,
+            "hypothesis": row.hypothesis,
+            "invalidation_rule": row.invalidation_rule,
+            "status": row.status,
+            "first_hit": row.first_hit,
+            "first_hit_at": row.first_hit_at.strftime("%m-%d %H:%M") if row.first_hit_at else None,
+            "first_hit_price": row.first_hit_price,
+            "max_favorable_pct": row.max_favorable_pct,
+            "max_adverse_pct": row.max_adverse_pct,
+            "latest_price": row.latest_price,
+            "path_state": row.path_state,
+            "interim_review": row.interim_review,
+            "final_review": row.final_review,
+            "events": [{
+                "type": event.event_type,
+                "at": event.observed_at.strftime("%m-%d %H:%M"),
+                "price": event.price,
+            } for event in events_by_plan.get(row.id, [])[:12]],
+        })
+    return result
+
+
 def validation_signal_plan(symbol, metrics=None):
     metrics = metrics or validation_auto_metrics(symbol)
     if not metrics:
@@ -8190,6 +8523,22 @@ def background_thought_analysis_push():
         time.sleep(runtime_interval("thought_watch_scan", 300))
 
 
+def background_trend_horizon_validation():
+    """价格路径每分钟检查；K线只在出现新5分钟收盘时增量写入 MySQL。"""
+    time.sleep(35)
+    while True:
+        try:
+            with app.app_context():
+                mark_automation_status("trend_horizon_validation", "started")
+                refresh_trend_horizon_validations()
+                mark_automation_status("trend_horizon_validation", "success")
+        except Exception as exc:
+            with app.app_context():
+                db.session.rollback()
+                mark_automation_status("trend_horizon_validation", "error", exc)
+        time.sleep(60)
+
+
 def persist_thought_watch_basis(symbol, basis, funding):
     """将思路盯盘里的深基差按 1% 打开、每扩大 0.2% 留痕，不产生通用报警噪声。"""
     strategy = "thought_watch"
@@ -8302,6 +8651,7 @@ def start_background_workers():
     threading.Thread(target=background_intraday_early_trend_scan, daemon=True, name="intraday-early-trend-scan").start()
     threading.Thread(target=background_transfer_network_sync, daemon=True, name="transfer-network-sync").start()
     threading.Thread(target=background_thought_analysis_push, daemon=True, name="thought-analysis-push").start()
+    threading.Thread(target=background_trend_horizon_validation, daemon=True, name="trend-horizon-validation").start()
     threading.Thread(target=background_turnover_basis_watch, daemon=True, name="turnover-basis-watch").start()
 
 

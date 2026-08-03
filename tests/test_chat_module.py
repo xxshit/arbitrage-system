@@ -1,10 +1,21 @@
 import os
+import io
 import unittest
+from datetime import datetime, timedelta
 
 os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["SECRET_KEY"] = "chat-test-secret"
 
-from app import ChatMessage, ChatViewState, UserAccount, app, db, session_digest
+from app import (
+    ChatAttachment,
+    ChatMessage,
+    ChatViewState,
+    UserAccount,
+    app,
+    cleanup_expired_chat_history,
+    db,
+    session_digest,
+)
 
 
 class ChatModuleTests(unittest.TestCase):
@@ -117,6 +128,70 @@ class ChatModuleTests(unittest.TestCase):
         page = self.alice.get("/").get_data(as_text=True)
         self.assertIn('class="nav-unread chat-new hidden">NEW</span>', page)
         self.assertNotIn("账号之间的一对一协作留言", page)
+
+    def test_image_message_is_private_and_has_mysql_metadata(self):
+        image_bytes = b"\x89PNG\r\n\x1a\n" + b"chat-image-test"
+        response = self.alice.post(
+            "/api/chat/messages",
+            data={
+                "recipient_id": str(self.bob_id),
+                "body": "图片说明 😊",
+                "image": (io.BytesIO(image_bytes), "截图.png"),
+            },
+            headers={"X-CSRF-Token": "alice-csrf"},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 200)
+        item = response.get_json()["item"]
+        self.assertEqual(item["body"], "图片说明 😊")
+        self.assertEqual(item["image"]["mime_type"], "image/png")
+
+        with app.app_context():
+            attachment = db.session.get(ChatAttachment, item["image"]["id"])
+            self.assertIsNotNone(attachment)
+            self.assertEqual(attachment.data, image_bytes)
+
+        image_response = self.bob.get(item["image"]["url"])
+        self.assertEqual(image_response.status_code, 200)
+        self.assertEqual(image_response.mimetype, "image/png")
+        image_response.close()
+        self.assertEqual(app.test_client().get(item["image"]["url"]).status_code, 401)
+
+    def test_chat_retention_removes_message_metadata_and_file_after_30_days(self):
+        now = datetime(2026, 8, 3, 12, 0, 0)
+        with app.app_context():
+            old = ChatMessage(
+                sender_id=self.alice_id,
+                recipient_id=self.bob_id,
+                body="过期图片",
+                created_at=now - timedelta(days=31),
+            )
+            fresh = ChatMessage(
+                sender_id=self.alice_id,
+                recipient_id=self.bob_id,
+                body="仍在保留期",
+                created_at=now - timedelta(days=29),
+            )
+            db.session.add_all([old, fresh])
+            db.session.flush()
+            image_bytes = b"\x89PNG\r\n\x1a\nexpired"
+            db.session.add(ChatAttachment(
+                message_id=old.id,
+                original_name="expired.png",
+                mime_type="image/png",
+                file_size=len(image_bytes),
+                data=image_bytes,
+                created_at=old.created_at,
+            ))
+            db.session.commit()
+            old_id = old.id
+            fresh_id = fresh.id
+
+            result = cleanup_expired_chat_history(now=now)
+            self.assertEqual(result["messages"], 1)
+            self.assertEqual(result["images"], 1)
+            self.assertIsNone(db.session.get(ChatMessage, old_id))
+            self.assertIsNotNone(db.session.get(ChatMessage, fresh_id))
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ import hashlib
 import secrets
 import click
 import math
+import io
 from functools import wraps
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,11 +17,13 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
-from flask import Flask, g, has_app_context, jsonify, redirect, render_template, request, session, url_for
+from flask import Flask, g, has_app_context, jsonify, redirect, render_template, request, send_file, session, url_for
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import and_, case, func, inspect, or_, text, tuple_
+from sqlalchemy.orm import deferred
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.utils import secure_filename
 
 load_dotenv()
 
@@ -35,6 +38,15 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes", "on"}
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
+
+CHAT_RETENTION_DAYS = 30
+CHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+CHAT_IMAGE_SIGNATURES = (
+    (b"\x89PNG\r\n\x1a\n", "png", "image/png"),
+    (b"\xff\xd8\xff", "jpg", "image/jpeg"),
+    (b"GIF87a", "gif", "image/gif"),
+    (b"GIF89a", "gif", "image/gif"),
+)
 
 
 @app.after_request
@@ -457,9 +469,27 @@ class ChatMessage(db.Model):
     recipient_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
     body = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+    attachment = db.relationship(
+        "ChatAttachment",
+        back_populates="message",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
     __table_args__ = (
         db.Index("ix_chat_message_pair_id", "sender_id", "recipient_id", "id"),
     )
+
+
+class ChatAttachment(db.Model):
+    """Private image metadata and bytes, isolated from the text-message table."""
+    id = db.Column(db.Integer, primary_key=True)
+    message_id = db.Column(db.Integer, db.ForeignKey("chat_message.id"), nullable=False, unique=True, index=True)
+    original_name = db.Column(db.String(255), nullable=False)
+    mime_type = db.Column(db.String(80), nullable=False)
+    file_size = db.Column(db.Integer, nullable=False)
+    data = deferred(db.Column(db.LargeBinary(length=CHAT_IMAGE_MAX_BYTES), nullable=False))
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+    message = db.relationship("ChatMessage", back_populates="attachment")
 
 
 class ChatViewState(db.Model):
@@ -618,6 +648,7 @@ RUNTIME_RULE_DEFAULTS = [
     {"rule_key": "rapid_move_threshold", "category": "报警规则", "label": "30秒速变报警", "schedule_type": "policy", "value": "30秒 / 0.5%", "unit": "规则", "editable": False, "description": "30秒内开差或基差绝对值明显扩大；同一30分钟窗口必须继续扩大才允许续报。"},
     {"rule_key": "funding_retention", "category": "数据保留", "label": "资费历史保留", "schedule_type": "retention", "value": "30", "unit": "天", "editable": False, "description": "最近一个月资金费率留库，超过一个月自动清理。"},
     {"rule_key": "price_retention", "category": "数据保留", "label": "价格快照保留", "schedule_type": "retention", "value": "8", "unit": "天", "editable": False, "description": "涨跌幅计算所需的 Binance 价格快照滚动保留 8 天。"},
+    {"rule_key": "chat_retention", "category": "数据保留", "label": "协作记录保留", "schedule_type": "retention", "value": "30", "unit": "天", "editable": False, "description": "文字消息、图片消息和私有图片文件仅保留最近一个月，过期后自动物理清理。"},
 ]
 MARKET_REFRESH_METRICS = {
     "network_seconds": 0.0,
@@ -888,6 +919,7 @@ AUTOMATION_LABELS = {
     "turnover_basis_watch": "SOON/ZAMA基差换手监控",
     "transfer_network_sync": "充提网络同步",
     "index_component_sync": "指数成分同步",
+    "chat_retention_cleanup": "协作记录过期清理",
 }
 
 
@@ -2630,14 +2662,64 @@ def chat_state(user_id, peer_id, create=False):
     return row
 
 
+def detect_chat_image(data):
+    """Return a trusted extension and MIME type based on file bytes, never the browser filename."""
+    for signature, extension, mime_type in CHAT_IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return extension, mime_type
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp", "image/webp"
+    return None, None
+
+
+def save_chat_image(upload):
+    data = upload.stream.read(CHAT_IMAGE_MAX_BYTES + 1)
+    if not data:
+        raise ValueError("请选择需要发送的图片。")
+    if len(data) > CHAT_IMAGE_MAX_BYTES:
+        raise ValueError("单张图片不能超过 5MB。")
+    extension, mime_type = detect_chat_image(data)
+    if not extension:
+        raise ValueError("只支持 JPG、PNG、GIF 或 WEBP 图片。")
+    original_name = secure_filename(upload.filename or "") or f"image.{extension}"
+    return {
+        "original_name": original_name[:255],
+        "mime_type": mime_type,
+        "file_size": len(data),
+        "data": data,
+    }
+
+
+def cleanup_expired_chat_history(now=None):
+    """Physically remove shared chat messages and private images after 30 days."""
+    cutoff = (now or datetime.now()) - timedelta(days=CHAT_RETENTION_DAYS)
+    expired_messages = ChatMessage.query.filter(ChatMessage.created_at < cutoff).all()
+    if not expired_messages:
+        return {"messages": 0, "images": 0, "cutoff": cutoff}
+    message_ids = [row.id for row in expired_messages]
+    image_count = ChatAttachment.query.filter(ChatAttachment.message_id.in_(message_ids)).count()
+    ChatAttachment.query.filter(ChatAttachment.message_id.in_(message_ids)).delete(synchronize_session=False)
+    ChatMessage.query.filter(ChatMessage.id.in_(message_ids)).delete(synchronize_session=False)
+    db.session.commit()
+    return {"messages": len(message_ids), "images": image_count, "cutoff": cutoff}
+
+
 def chat_message_payload(row, usernames=None):
     usernames = usernames or {}
+    attachment = row.attachment
     return {
         "id": row.id,
         "sender_id": row.sender_id,
         "recipient_id": row.recipient_id,
         "sender": usernames.get(row.sender_id),
         "body": row.body,
+        "image": ({
+            "id": attachment.id,
+            "url": url_for("chat_attachment_api", attachment_id=attachment.id),
+            "name": attachment.original_name,
+            "mime_type": attachment.mime_type,
+            "size": attachment.file_size,
+        } if attachment else None),
         "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -2645,6 +2727,7 @@ def chat_message_payload(row, usernames=None):
 @app.get("/api/chat/users")
 def chat_users_api():
     user = current_user()
+    retention_cutoff = datetime.now() - timedelta(days=CHAT_RETENTION_DAYS)
     peers = UserAccount.query.filter(UserAccount.id != user.id, UserAccount.active.is_(True)).order_by(UserAccount.username).all()
     items = []
     for peer in peers:
@@ -2655,11 +2738,16 @@ def chat_users_api():
             and_(ChatMessage.sender_id == user.id, ChatMessage.recipient_id == peer.id),
             and_(ChatMessage.sender_id == peer.id, ChatMessage.recipient_id == user.id),
         )
-        latest = ChatMessage.query.filter(pair_filter, ChatMessage.id > cleared_id).order_by(ChatMessage.id.desc()).first()
+        latest = ChatMessage.query.filter(
+            pair_filter,
+            ChatMessage.id > cleared_id,
+            ChatMessage.created_at >= retention_cutoff,
+        ).order_by(ChatMessage.id.desc()).first()
         unread = ChatMessage.query.filter(
             ChatMessage.sender_id == peer.id,
             ChatMessage.recipient_id == user.id,
             ChatMessage.id > max(cleared_id, last_read_id),
+            ChatMessage.created_at >= retention_cutoff,
         ).count()
         items.append({
             "id": peer.id,
@@ -2667,7 +2755,7 @@ def chat_users_api():
             "role": peer.role,
             "online": bool(peer.last_seen_at and datetime.now() - peer.last_seen_at < timedelta(minutes=10)),
             "last_seen_at": peer.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if peer.last_seen_at else None,
-            "last_message": latest.body[:80] if latest else None,
+            "last_message": (("[图片] " if latest.attachment else "") + latest.body)[:80] if latest else None,
             "last_message_at": latest.created_at.strftime("%m-%d %H:%M") if latest else None,
             "last_message_id": latest.id if latest else 0,
             "unread": unread,
@@ -2689,18 +2777,24 @@ def chat_messages_api(peer_id):
     state = chat_state(user.id, peer.id, create=True)
     cleared_through_id = state.cleared_through_id or 0
     visible_after = max(after_id, cleared_through_id)
+    retention_cutoff = datetime.now() - timedelta(days=CHAT_RETENTION_DAYS)
     pair_filter = or_(
         and_(ChatMessage.sender_id == user.id, ChatMessage.recipient_id == peer.id),
         and_(ChatMessage.sender_id == peer.id, ChatMessage.recipient_id == user.id),
     )
     page_size = 100
-    query = ChatMessage.query.filter(pair_filter, ChatMessage.id > visible_after)
+    query = ChatMessage.query.filter(
+        pair_filter,
+        ChatMessage.id > visible_after,
+        ChatMessage.created_at >= retention_cutoff,
+    )
     if before_id:
         rows = list(reversed(
             ChatMessage.query.filter(
                 pair_filter,
                 ChatMessage.id > cleared_through_id,
                 ChatMessage.id < before_id,
+                ChatMessage.created_at >= retention_cutoff,
             ).order_by(ChatMessage.id.desc()).limit(page_size).all()
         ))
     elif after_id:
@@ -2718,6 +2812,7 @@ def chat_messages_api(peer_id):
             pair_filter,
             ChatMessage.id > cleared_through_id,
             ChatMessage.id < oldest_id,
+            ChatMessage.created_at >= retention_cutoff,
         ).first() is not None
     db.session.commit()
     return jsonify({
@@ -2741,9 +2836,11 @@ def send_chat_message_api():
     if not valid_admin_csrf():
         return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
     user = current_user()
-    body = request.get_json(silent=True) or {}
+    is_multipart = request.mimetype == "multipart/form-data"
+    body = request.form if is_multipart else (request.get_json(silent=True) or {})
     recipient_id = body.get("recipient_id")
     message = str(body.get("body", "")).strip()
+    image_upload = request.files.get("image") if is_multipart else None
     try:
         recipient_id = int(recipient_id)
     except (TypeError, ValueError):
@@ -2751,14 +2848,50 @@ def send_chat_message_api():
     peer = db.session.get(UserAccount, recipient_id)
     if not peer or not peer.active or peer.id == user.id:
         return jsonify({"ok": False, "error": "聊天对象不存在。"}), 404
-    if not message:
-        return jsonify({"ok": False, "error": "消息不能为空。"}), 400
+    if not message and not image_upload:
+        return jsonify({"ok": False, "error": "请输入文字或选择一张图片。"}), 400
     if len(message) > 2000:
         return jsonify({"ok": False, "error": "单条消息最多 2000 个字符。"}), 400
-    row = ChatMessage(sender_id=user.id, recipient_id=peer.id, body=message)
-    db.session.add(row)
-    db.session.commit()
+    try:
+        stored_image = None
+        if image_upload:
+            stored_image = save_chat_image(image_upload)
+        row = ChatMessage(sender_id=user.id, recipient_id=peer.id, body=message)
+        db.session.add(row)
+        db.session.flush()
+        if stored_image:
+            db.session.add(ChatAttachment(
+                message_id=row.id,
+                original_name=stored_image["original_name"],
+                mime_type=stored_image["mime_type"],
+                file_size=stored_image["file_size"],
+                data=stored_image["data"],
+            ))
+        db.session.commit()
+    except ValueError as exc:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception:
+        db.session.rollback()
+        raise
     return jsonify({"ok": True, "item": chat_message_payload(row, {user.id: user.username})})
+
+
+@app.get("/api/chat/attachments/<int:attachment_id>")
+def chat_attachment_api(attachment_id):
+    user = current_user()
+    attachment = db.session.get(ChatAttachment, attachment_id)
+    if not attachment or user.id not in {attachment.message.sender_id, attachment.message.recipient_id}:
+        return jsonify({"ok": False, "error": "图片不存在或无权查看。"}), 404
+    response = send_file(
+        io.BytesIO(attachment.data),
+        mimetype=attachment.mime_type,
+        as_attachment=False,
+        download_name=attachment.original_name,
+        conditional=True,
+    )
+    response.headers["Cache-Control"] = "private, max-age=300"
+    return response
 
 
 @app.post("/api/chat/conversations/<int:peer_id>/clear")
@@ -2773,7 +2906,10 @@ def clear_chat_conversation_api(peer_id):
         and_(ChatMessage.sender_id == user.id, ChatMessage.recipient_id == peer.id),
         and_(ChatMessage.sender_id == peer.id, ChatMessage.recipient_id == user.id),
     )
-    latest_id = db.session.query(func.max(ChatMessage.id)).filter(pair_filter).scalar() or 0
+    latest_id = db.session.query(func.max(ChatMessage.id)).filter(
+        pair_filter,
+        ChatMessage.created_at >= datetime.now() - timedelta(days=CHAT_RETENTION_DAYS),
+    ).scalar() or 0
     state = chat_state(user.id, peer.id, create=True)
     state.cleared_through_id = max(state.cleared_through_id or 0, latest_id)
     state.last_read_message_id = max(state.last_read_message_id or 0, latest_id)
@@ -8554,6 +8690,22 @@ def background_trend_horizon_validation():
         time.sleep(60)
 
 
+def background_chat_retention_cleanup():
+    """Run lightweight chat retention every six hours; messages and images expire together."""
+    time.sleep(18)
+    while True:
+        try:
+            with app.app_context():
+                mark_automation_status("chat_retention_cleanup", "started")
+                cleanup_expired_chat_history()
+                mark_automation_status("chat_retention_cleanup", "success")
+        except Exception as exc:
+            with app.app_context():
+                db.session.rollback()
+                mark_automation_status("chat_retention_cleanup", "error", exc)
+        time.sleep(6 * 60 * 60)
+
+
 def persist_thought_watch_basis(symbol, basis, funding):
     """将思路盯盘里的深基差按 1% 打开、每扩大 0.2% 留痕，不产生通用报警噪声。"""
     strategy = "thought_watch"
@@ -8667,6 +8819,7 @@ def start_background_workers():
     threading.Thread(target=background_transfer_network_sync, daemon=True, name="transfer-network-sync").start()
     threading.Thread(target=background_thought_analysis_push, daemon=True, name="thought-analysis-push").start()
     threading.Thread(target=background_trend_horizon_validation, daemon=True, name="trend-horizon-validation").start()
+    threading.Thread(target=background_chat_retention_cleanup, daemon=True, name="chat-retention-cleanup").start()
     threading.Thread(target=background_turnover_basis_watch, daemon=True, name="turnover-basis-watch").start()
 
 

@@ -294,3 +294,5 @@ aside nav>a[data-view="token-hedge"]{order:11}aside nav>a[data-view="strategies"
 .chat-nav-entry.chat-attention{animation-duration:1.6s}
 .chat-message .chat-message-time{display:block;color:#68777c;font-size:10px;font-weight:600;line-height:16px;white-space:nowrap}
 @media(max-width:700px){.account-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.chat-emoji-picker{max-height:min(300px,45vh);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#9db8b1 #f3ead7}
+@media(max-width:600px){.chat-emoji-picker{max-height:min(250px,40vh)}}

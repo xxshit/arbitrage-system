@@ -320,6 +320,8 @@ function syncChatAfterWake(){if(!authState.user_id||document.visibilityState==='
 function updateChatComposer(){const input=byId('chatInput'),count=byId('chatCharCount');if(count)count.textContent=`${input?.value.length||0} / 2000`}
 function toggleChatEmojiPicker(event){event?.stopPropagation();byId('chatEmojiPicker')?.classList.toggle('hidden')}
 function insertChatEmoji(emoji){const input=byId('chatInput');if(!input||input.disabled)return;const start=input.selectionStart??input.value.length,end=input.selectionEnd??start;input.value=input.value.slice(0,start)+emoji+input.value.slice(end);input.selectionStart=input.selectionEnd=start+emoji.length;updateChatComposer();input.focus();byId('chatEmojiPicker')?.classList.add('hidden')}
+const extendedChatEmojis=['😀','😃','😄','😁','😆','😅','🤣','🙂','🙃','😇','🤫','🤐','🤭','🫢','🫣','🫠','😋','😜','🤪','🧐','🤓','🥳','😴','🤤','😪','😓','😰','😨','😱','🤯','😳','🥺','😞','😔','😩','😤','🤬','🙄','😏','😒','😬','😌','🤢','🤮','🤧','😷','🤒','🤕','🫡','👋','🙌','🤝','✌️','🤞','👌','👊','🤜','🤛','🫶','👀','💯','💡','✅','❌','🎯','💰','🌹','🎁','🍻','☕','🐂','🐻','⏰'];
+function extendChatEmojiPicker(){const picker=byId('chatEmojiPicker');if(!picker)return;const existing=new Set([...picker.querySelectorAll('[data-chat-emoji]')].map(button=>button.dataset.chatEmoji));extendedChatEmojis.forEach(emoji=>{if(existing.has(emoji))return;const button=document.createElement('button');button.type='button';button.dataset.chatEmoji=emoji;button.textContent=emoji;button.title=emoji;picker.appendChild(button)})}
 function chooseChatImage(){if(chatPeerId)byId('chatImageInput')?.click()}
 function setChatImage(file){if(!file)return;if(!['image/jpeg','image/png','image/gif','image/webp'].includes(file.type)){alert('只支持 JPG、PNG、GIF 或 WEBP 图片。');return}if(file.size>5*1024*1024){alert('单张图片不能超过 5MB。');return}clearChatImage();chatPendingImage=file;chatPendingImageUrl=URL.createObjectURL(file);byId('chatImagePreviewThumb').src=chatPendingImageUrl;byId('chatImagePreviewName').textContent=`${file.name} · ${chatFileSize(file.size)}`;byId('chatImagePreview').classList.remove('hidden')}
 function clearChatImage(){if(chatPendingImageUrl)URL.revokeObjectURL(chatPendingImageUrl);chatPendingImage=null;chatPendingImageUrl='';const input=byId('chatImageInput'),preview=byId('chatImagePreview'),thumb=byId('chatImagePreviewThumb');if(input)input.value='';if(preview)preview.classList.add('hidden');if(thumb)thumb.removeAttribute('src')}
@@ -329,6 +331,7 @@ byId('chatInput')?.addEventListener('keydown',event=>{if(event.key==='Enter'&&!e
 byId('chatInput')?.addEventListener('input',updateChatComposer);
 byId('chatInput')?.addEventListener('paste',event=>{const file=[...(event.clipboardData?.files||[])].find(item=>item.type.startsWith('image/'));if(file){event.preventDefault();setChatImage(file)}});
 byId('chatImageInput')?.addEventListener('change',event=>setChatImage(event.target.files?.[0]));
+extendChatEmojiPicker();
 document.querySelectorAll('[data-chat-emoji]').forEach(button=>button.addEventListener('click',()=>insertChatEmoji(button.dataset.chatEmoji)));
 document.addEventListener('click',event=>{if(!event.target.closest('.chat-compose-tools'))byId('chatEmojiPicker')?.classList.add('hidden')});
 byId('chatRemarkModal')?.addEventListener('click',event=>{if(event.target===event.currentTarget)closeChatRemarkEditor()});

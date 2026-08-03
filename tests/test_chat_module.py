@@ -108,6 +108,27 @@ class ChatModuleTests(unittest.TestCase):
         alice = next(item for item in contacts if item["id"] == self.alice_id)
         self.assertEqual(alice["last_message_at"], expected_short)
 
+    def test_sender_sees_unread_then_read_after_peer_opens_conversation(self):
+        sent = self.alice.post(
+            "/api/chat/messages",
+            json={"recipient_id": self.bob_id, "body": "已读状态验证"},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        )
+        self.assertEqual(sent.status_code, 200)
+        sent_item = sent.get_json()["item"]
+        self.assertFalse(sent_item["read_by_peer"])
+
+        before_read = self.alice.get(f"/api/chat/messages/{self.bob_id}").get_json()
+        self.assertFalse(before_read["items"][-1]["read_by_peer"])
+        self.assertEqual(before_read["peer_last_read_message_id"], 0)
+
+        received = self.bob.get(f"/api/chat/messages/{self.alice_id}").get_json()
+        self.assertEqual(received["items"][-1]["body"], "已读状态验证")
+
+        after_read = self.alice.get(f"/api/chat/messages/{self.bob_id}").get_json()
+        self.assertTrue(after_read["items"][-1]["read_by_peer"])
+        self.assertGreaterEqual(after_read["peer_last_read_message_id"], sent_item["id"])
+
     def test_history_can_page_backward_without_crossing_clear_cursor(self):
         with app.app_context():
             db.session.add(ChatViewState(user_id=self.alice_id, peer_id=self.bob_id, cleared_through_id=5))
@@ -152,9 +173,11 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn(b'class="chat-nav-entry hidden"', self.alice.get("/").data)
         self.assertFalse(self.bob.get("/api/auth/me").get_json()["chat_nav_hidden"])
 
-    def test_collaboration_entry_uses_new_badge_without_explanatory_copy(self):
+    def test_collaboration_entry_uses_motion_instead_of_visible_new_badge(self):
         page = self.alice.get("/").get_data(as_text=True)
-        self.assertIn('class="nav-unread chat-new hidden">NEW</span>', page)
+        self.assertIn('class="chat-nav-entry', page)
+        self.assertNotIn('id="chatNavUnread"', page)
+        self.assertNotIn('>NEW</span>', page)
         self.assertNotIn("账号之间的一对一协作留言", page)
 
     def test_admin_can_reset_forgotten_password_without_storing_plaintext(self):
@@ -309,6 +332,10 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn("chatFetch('/api/chat/users')", script)
         self.assertIn("网络短暂波动，正在自动恢复", script)
         self.assertIn("连接刚刚中断，正在核对发送结果", script)
+        self.assertIn("announceIncomingChatMessage", script)
+        self.assertIn("observeIncomingChatMessages", script)
+        self.assertIn("updateChatReadReceipts", script)
+        self.assertIn("chatNavAttentionPending", script)
         self.assertNotIn("alert(error.message)}finally{chatSendInFlight", script)
         self.assertIn("visibilitychange", script)
         self.assertIn("window.addEventListener('focus',syncChatAfterWake)", script)

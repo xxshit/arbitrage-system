@@ -2842,7 +2842,7 @@ def cleanup_expired_chat_history(now=None):
     return {"messages": len(message_ids), "images": image_count, "cutoff": cutoff}
 
 
-def chat_message_payload(row, usernames=None):
+def chat_message_payload(row, usernames=None, viewer_id=None, peer_last_read_message_id=0):
     usernames = usernames or {}
     attachment = row.attachment
     return {
@@ -2859,6 +2859,11 @@ def chat_message_payload(row, usernames=None):
             "size": attachment.file_size,
         } if attachment else None),
         "created_at": format_shanghai_time(row.created_at),
+        "read_by_peer": bool(
+            viewer_id
+            and row.sender_id == viewer_id
+            and row.id <= (peer_last_read_message_id or 0)
+        ),
     }
 
 
@@ -2913,6 +2918,8 @@ def chat_messages_api(peer_id):
     if after_id and before_id:
         return jsonify({"ok": False, "error": "消息游标不能同时向前和向后读取。"}), 400
     state = chat_state(user.id, peer.id, create=True)
+    peer_state = chat_state(peer.id, user.id)
+    peer_last_read_message_id = peer_state.last_read_message_id if peer_state else 0
     cleared_through_id = state.cleared_through_id or 0
     visible_after = max(after_id, cleared_through_id)
     retention_cutoff = utc_now_naive() - timedelta(days=CHAT_RETENTION_DAYS)
@@ -2969,7 +2976,13 @@ def chat_messages_api(peer_id):
             "online": bool(peer.last_seen_at and datetime.now() - peer.last_seen_at < timedelta(minutes=10)),
             "last_seen_at": format_shanghai_time(peer.last_seen_at),
         },
-        "items": [chat_message_payload(row, {user.id: user.username, peer.id: peer.username}) for row in rows],
+        "items": [chat_message_payload(
+            row,
+            {user.id: user.username, peer.id: peer.username},
+            viewer_id=user.id,
+            peer_last_read_message_id=peer_last_read_message_id,
+        ) for row in rows],
+        "peer_last_read_message_id": peer_last_read_message_id,
         "cleared_through_id": cleared_through_id,
         "oldest_id": rows[0].id if rows else None,
         "latest_id": rows[-1].id if rows else None,
@@ -3026,7 +3039,17 @@ def send_chat_message_api():
     except Exception:
         db.session.rollback()
         raise
-    return jsonify({"ok": True, "item": chat_message_payload(row, {user.id: user.username})})
+    peer_state = chat_state(peer.id, user.id)
+    peer_last_read_message_id = peer_state.last_read_message_id if peer_state else 0
+    return jsonify({
+        "ok": True,
+        "item": chat_message_payload(
+            row,
+            {user.id: user.username},
+            viewer_id=user.id,
+            peer_last_read_message_id=peer_last_read_message_id,
+        ),
+    })
 
 
 @app.get("/api/chat/attachments/<int:attachment_id>")

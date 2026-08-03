@@ -6,6 +6,7 @@ from werkzeug.security import check_password_hash
 
 os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["SECRET_KEY"] = "chat-test-secret"
+os.environ["CHAT_ENCRYPTION_KEY"] = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
 
 from app import (
     ChatAttachment,
@@ -15,6 +16,7 @@ from app import (
     UserAccount,
     app,
     cleanup_expired_chat_history,
+    migrate_chat_content_encryption,
     db,
     session_digest,
 )
@@ -203,15 +205,60 @@ class ChatModuleTests(unittest.TestCase):
         self.assertEqual(item["image"]["mime_type"], "image/png")
 
         with app.app_context():
+            message = db.session.get(ChatMessage, item["id"])
+            self.assertEqual(message.encryption_version, 1)
+            self.assertNotEqual(message.body, "图片说明 😊")
             attachment = db.session.get(ChatAttachment, item["image"]["id"])
             self.assertIsNotNone(attachment)
-            self.assertEqual(attachment.data, image_bytes)
+            self.assertEqual(attachment.encryption_version, 1)
+            self.assertNotEqual(attachment.data, image_bytes)
+            self.assertFalse(attachment.data.startswith(b"\x89PNG"))
 
         image_response = self.bob.get(item["image"]["url"])
         self.assertEqual(image_response.status_code, 200)
         self.assertEqual(image_response.mimetype, "image/png")
         image_response.close()
         self.assertEqual(app.test_client().get(item["image"]["url"]).status_code, 401)
+
+    def test_legacy_plaintext_chat_is_migrated_once(self):
+        image_bytes = b"\x89PNG\r\n\x1a\nlegacy-image"
+        with app.app_context():
+            message = ChatMessage(
+                sender_id=self.alice_id,
+                recipient_id=self.bob_id,
+                body="旧消息明文",
+                encryption_version=0,
+            )
+            db.session.add(message)
+            db.session.flush()
+            attachment = ChatAttachment(
+                message_id=message.id,
+                original_name="private-name.png",
+                mime_type="image/png",
+                file_size=len(image_bytes),
+                data=image_bytes,
+                encryption_version=0,
+            )
+            db.session.add(attachment)
+            db.session.commit()
+            message_id = message.id
+            attachment_id = attachment.id
+
+            first = migrate_chat_content_encryption()
+            second = migrate_chat_content_encryption()
+            migrated_message = db.session.get(ChatMessage, message_id)
+            migrated_attachment = db.session.get(ChatAttachment, attachment_id)
+            self.assertEqual(first, {"messages": 1, "images": 1})
+            self.assertEqual(second, {"messages": 0, "images": 0})
+            self.assertEqual(migrated_message.encryption_version, 1)
+            self.assertNotIn("旧消息明文", migrated_message.body)
+            self.assertEqual(migrated_attachment.original_name, "image.png")
+            self.assertFalse(migrated_attachment.data.startswith(b"\x89PNG"))
+
+        messages = self.bob.get(f"/api/chat/messages/{self.alice_id}").get_json()["items"]
+        self.assertEqual(messages[-1]["body"], "旧消息明文")
+        image_response = self.bob.get(f"/api/chat/attachments/{attachment_id}")
+        self.assertEqual(image_response.data, image_bytes)
 
     def test_chat_retention_removes_message_metadata_and_file_after_30_days(self):
         now = datetime(2026, 8, 3, 12, 0, 0)

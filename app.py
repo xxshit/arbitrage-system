@@ -10,6 +10,7 @@ import secrets
 import click
 import math
 import io
+import base64
 from functools import wraps
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,13 +18,14 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from flask import Flask, g, has_app_context, jsonify, redirect, render_template, request, send_file, session, url_for
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import and_, case, func, inspect, or_, text, tuple_
 from sqlalchemy.orm import deferred
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
-from werkzeug.utils import secure_filename
 
 load_dotenv()
 
@@ -41,6 +43,9 @@ db = SQLAlchemy(app)
 
 CHAT_RETENTION_DAYS = 30
 CHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+CHAT_ENCRYPTION_VERSION = 1
+CHAT_TEXT_AAD = b"ArbiScope/chat-message/v1"
+CHAT_IMAGE_AAD = b"ArbiScope/chat-image/v1"
 CHAT_IMAGE_SIGNATURES = (
     (b"\x89PNG\r\n\x1a\n", "png", "image/png"),
     (b"\xff\xd8\xff", "jpg", "image/jpeg"),
@@ -48,6 +53,72 @@ CHAT_IMAGE_SIGNATURES = (
     (b"GIF89a", "gif", "image/gif"),
 )
 SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
+_chat_cipher = None
+
+
+def chat_cipher():
+    """Load the at-rest key outside MySQL and return a cached AES-256-GCM cipher."""
+    global _chat_cipher
+    if _chat_cipher is not None:
+        return _chat_cipher
+    encoded = os.getenv("CHAT_ENCRYPTION_KEY", "").strip()
+    key_path = os.getenv("CHAT_ENCRYPTION_KEY_FILE", ".chat_encryption.key").strip()
+    if key_path and not os.path.isabs(key_path):
+        key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), key_path)
+    if not encoded and key_path and os.path.exists(key_path):
+        with open(key_path, "r", encoding="ascii") as handle:
+            encoded = handle.read().strip()
+    if not encoded and app.config["SQLALCHEMY_DATABASE_URI"].startswith("sqlite"):
+        encoded = base64.urlsafe_b64encode(
+            hashlib.sha256(f"chat-test:{app.config['SECRET_KEY']}".encode("utf-8")).digest()
+        ).decode("ascii")
+    if not encoded:
+        raise RuntimeError("聊天加密密钥缺失，请先运行 scripts/ensure_chat_encryption_key.py。")
+    try:
+        key = base64.urlsafe_b64decode(encoded.encode("ascii"))
+    except Exception as exc:
+        raise RuntimeError("聊天加密密钥格式无效。") from exc
+    if len(key) != 32:
+        raise RuntimeError("聊天加密密钥必须是32字节的URL安全Base64值。")
+    _chat_cipher = AESGCM(key)
+    return _chat_cipher
+
+
+def encrypt_chat_text(value):
+    if not value:
+        return ""
+    nonce = secrets.token_bytes(12)
+    encrypted = chat_cipher().encrypt(nonce, str(value).encode("utf-8"), CHAT_TEXT_AAD)
+    return base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")
+
+
+def decrypt_chat_text(value, encryption_version=0):
+    if not value or int(encryption_version or 0) == 0:
+        return value or ""
+    if int(encryption_version) != CHAT_ENCRYPTION_VERSION:
+        raise RuntimeError("不支持的聊天文字加密版本。")
+    try:
+        payload = base64.urlsafe_b64decode(value.encode("ascii"))
+        return chat_cipher().decrypt(payload[:12], payload[12:], CHAT_TEXT_AAD).decode("utf-8")
+    except (InvalidTag, ValueError, UnicodeError) as exc:
+        raise RuntimeError("聊天文字解密失败。") from exc
+
+
+def encrypt_chat_bytes(value):
+    nonce = secrets.token_bytes(12)
+    return nonce + chat_cipher().encrypt(nonce, bytes(value), CHAT_IMAGE_AAD)
+
+
+def decrypt_chat_bytes(value, encryption_version=0):
+    if int(encryption_version or 0) == 0:
+        return bytes(value)
+    if int(encryption_version) != CHAT_ENCRYPTION_VERSION:
+        raise RuntimeError("不支持的聊天图片加密版本。")
+    payload = bytes(value)
+    try:
+        return chat_cipher().decrypt(payload[:12], payload[12:], CHAT_IMAGE_AAD)
+    except (InvalidTag, ValueError) as exc:
+        raise RuntimeError("聊天图片解密失败。") from exc
 
 
 def utc_now_naive():
@@ -492,6 +563,7 @@ class ChatMessage(db.Model):
     sender_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
     recipient_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
     body = db.Column(db.Text, nullable=False)
+    encryption_version = db.Column(db.SmallInteger, nullable=False, default=0)
     created_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, index=True)
     attachment = db.relationship(
         "ChatAttachment",
@@ -512,6 +584,7 @@ class ChatAttachment(db.Model):
     mime_type = db.Column(db.String(80), nullable=False)
     file_size = db.Column(db.Integer, nullable=False)
     data = deferred(db.Column(db.LargeBinary(length=CHAT_IMAGE_MAX_BYTES), nullable=False))
+    encryption_version = db.Column(db.SmallInteger, nullable=False, default=0)
     created_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, index=True)
     message = db.relationship("ChatMessage", back_populates="attachment")
 
@@ -2745,9 +2818,10 @@ def save_chat_image(upload):
     extension, mime_type = detect_chat_image(data)
     if not extension:
         raise ValueError("只支持 JPG、PNG、GIF 或 WEBP 图片。")
-    original_name = secure_filename(upload.filename or "") or f"image.{extension}"
     return {
-        "original_name": original_name[:255],
+        # Do not persist the sender's original filename because it can itself
+        # reveal private content to someone inspecting MySQL directly.
+        "original_name": f"image.{extension}",
         "mime_type": mime_type,
         "file_size": len(data),
         "data": data,
@@ -2776,7 +2850,7 @@ def chat_message_payload(row, usernames=None):
         "sender_id": row.sender_id,
         "recipient_id": row.recipient_id,
         "sender": usernames.get(row.sender_id),
-        "body": row.body,
+        "body": decrypt_chat_text(row.body, row.encryption_version),
         "image": ({
             "id": attachment.id,
             "url": url_for("chat_attachment_api", attachment_id=attachment.id),
@@ -2819,7 +2893,7 @@ def chat_users_api():
             "role": peer.role,
             "online": bool(peer.last_seen_at and datetime.now() - peer.last_seen_at < timedelta(minutes=10)),
             "last_seen_at": format_shanghai_time(peer.last_seen_at),
-            "last_message": (("[图片] " if latest.attachment else "") + latest.body)[:80] if latest else None,
+            "last_message": (("[图片] " if latest.attachment else "") + decrypt_chat_text(latest.body, latest.encryption_version))[:80] if latest else None,
             "last_message_at": format_shanghai_time(latest.created_at, "%m-%d %H:%M") if latest else None,
             "last_message_id": latest.id if latest else 0,
             "unread": unread,
@@ -2928,7 +3002,12 @@ def send_chat_message_api():
         stored_image = None
         if image_upload:
             stored_image = save_chat_image(image_upload)
-        row = ChatMessage(sender_id=user.id, recipient_id=peer.id, body=message)
+        row = ChatMessage(
+            sender_id=user.id,
+            recipient_id=peer.id,
+            body=encrypt_chat_text(message),
+            encryption_version=CHAT_ENCRYPTION_VERSION,
+        )
         db.session.add(row)
         db.session.flush()
         if stored_image:
@@ -2937,7 +3016,8 @@ def send_chat_message_api():
                 original_name=stored_image["original_name"],
                 mime_type=stored_image["mime_type"],
                 file_size=stored_image["file_size"],
-                data=stored_image["data"],
+                data=encrypt_chat_bytes(stored_image["data"]),
+                encryption_version=CHAT_ENCRYPTION_VERSION,
             ))
         db.session.commit()
     except ValueError as exc:
@@ -2956,7 +3036,7 @@ def chat_attachment_api(attachment_id):
     if not attachment or user.id not in {attachment.message.sender_id, attachment.message.recipient_id}:
         return jsonify({"ok": False, "error": "图片不存在或无权查看。"}), 404
     response = send_file(
-        io.BytesIO(attachment.data),
+        io.BytesIO(decrypt_chat_bytes(attachment.data, attachment.encryption_version)),
         mimetype=attachment.mime_type,
         as_attachment=False,
         download_name=attachment.original_name,
@@ -8497,8 +8577,53 @@ def create_database_schema():
             connection.execute(text("SELECT RELEASE_LOCK('arbitrage_hub_schema_init')"))
 
 
+def migrate_chat_content_encryption(batch_size=100):
+    """Encrypt legacy plaintext chat rows once; version flags make this restart-safe."""
+    migrated_messages = 0
+    migrated_images = 0
+    while True:
+        rows = ChatMessage.query.filter(
+            ChatMessage.encryption_version == 0
+        ).order_by(ChatMessage.id).limit(batch_size).all()
+        if not rows:
+            break
+        for row in rows:
+            row.body = encrypt_chat_text(row.body)
+            row.encryption_version = CHAT_ENCRYPTION_VERSION
+            migrated_messages += 1
+        db.session.commit()
+    while True:
+        rows = ChatAttachment.query.filter(
+            ChatAttachment.encryption_version == 0
+        ).order_by(ChatAttachment.id).limit(batch_size).all()
+        if not rows:
+            break
+        for row in rows:
+            extension = {
+                "image/png": "png",
+                "image/jpeg": "jpg",
+                "image/gif": "gif",
+                "image/webp": "webp",
+            }.get(row.mime_type, "bin")
+            row.original_name = f"image.{extension}"
+            row.data = encrypt_chat_bytes(row.data)
+            row.encryption_version = CHAT_ENCRYPTION_VERSION
+            migrated_images += 1
+        db.session.commit()
+    return {"messages": migrated_messages, "images": migrated_images}
+
+
 with app.app_context():
     create_database_schema()
+    chat_message_columns = {column["name"] for column in inspect(db.engine).get_columns("chat_message")}
+    if "encryption_version" not in chat_message_columns:
+        db.session.execute(text("ALTER TABLE chat_message ADD COLUMN encryption_version SMALLINT NOT NULL DEFAULT 0"))
+        db.session.commit()
+    chat_attachment_columns = {column["name"] for column in inspect(db.engine).get_columns("chat_attachment")}
+    if "encryption_version" not in chat_attachment_columns:
+        db.session.execute(text("ALTER TABLE chat_attachment ADD COLUMN encryption_version SMALLINT NOT NULL DEFAULT 0"))
+        db.session.commit()
+    migrate_chat_content_encryption()
     user_columns = {column["name"] for column in inspect(db.engine).get_columns("user_account")}
     if "chat_nav_hidden" not in user_columns:
         db.session.execute(text("ALTER TABLE user_account ADD COLUMN chat_nav_hidden BOOLEAN NOT NULL DEFAULT 0"))

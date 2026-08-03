@@ -29,6 +29,7 @@ if ([string]::IsNullOrWhiteSpace($LocalBackupRoot)) {
     $LocalBackupRoot = Join-Path $repositoryRoot "backups\cloud-mysql"
 }
 $remoteRoot = "/var/backups/arbitrage-hub/mysql"
+$remoteChatKey = "/var/backups/arbitrage-hub/secrets/chat-encryption.key"
 $sshTarget = "${User}@${ServerHost}"
 $sshOptions = @(
     "-i", $KeyPath,
@@ -84,9 +85,30 @@ if ($actualHash -ne $expectedHash) {
     throw "Backup checksum verification failed. The incomplete copy was removed."
 }
 
+$localSecretsRoot = Join-Path $repositoryRoot "backups\cloud-secrets"
+New-Item -ItemType Directory -Force -Path $localSecretsRoot | Out-Null
+$localChatKey = Join-Path $localSecretsRoot "chat-encryption.key"
+$localChatKeyChecksum = "$localChatKey.sha256"
+& scp @scpPortOptions "${sshTarget}:$remoteChatKey" $localChatKey
+if ($LASTEXITCODE -ne 0) {
+    throw "Downloading the separate chat encryption key failed; the SQL backup alone cannot restore encrypted chat content."
+}
+& scp @scpPortOptions "${sshTarget}:$remoteChatKey.sha256" $localChatKeyChecksum
+if ($LASTEXITCODE -ne 0) {
+    Remove-Item -LiteralPath $localChatKey -Force -ErrorAction SilentlyContinue
+    throw "Downloading the chat encryption key checksum failed."
+}
+$expectedKeyHash = ((Get-Content -LiteralPath $localChatKeyChecksum -Raw).Trim() -split '\s+')[0].ToUpperInvariant()
+$actualKeyHash = (Get-FileHash -LiteralPath $localChatKey -Algorithm SHA256).Hash.ToUpperInvariant()
+if ($actualKeyHash -ne $expectedKeyHash) {
+    Remove-Item -LiteralPath $localChatKey, $localChatKeyChecksum -Force -ErrorAction SilentlyContinue
+    throw "Chat encryption key checksum verification failed."
+}
+
 Get-ChildItem -LiteralPath $LocalBackupRoot -File -Filter "arbitrage_hub-*.sql.gz*" |
     Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-$RetentionDays) } |
     Remove-Item -Force
 
 $sizeMb = [Math]::Round((Get-Item -LiteralPath $localFile).Length / 1MB, 2)
 Write-Output "Local verified backup: $localFile ($sizeMb MB)"
+Write-Output "Separate chat encryption recovery key verified in the ignored cloud-secrets backup directory."

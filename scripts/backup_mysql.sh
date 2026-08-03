@@ -12,9 +12,20 @@ BACKUP_ROOT="${BACKUP_ROOT:-/var/backups/arbitrage-hub/mysql}"
 SIX_HOUR_DIR="${BACKUP_ROOT}/six-hour"
 DAILY_DIR="${BACKUP_ROOT}/daily"
 LOCK_FILE="${BACKUP_ROOT}/.backup.lock"
+CHAT_KEY_FILE="${CHAT_ENCRYPTION_KEY_FILE:-/opt/arbitrage-hub/.chat_encryption.key}"
+SECRETS_DIR="$(dirname "${BACKUP_ROOT}")/secrets"
 
-mkdir -p "$SIX_HOUR_DIR" "$DAILY_DIR"
-chmod 700 "$BACKUP_ROOT" "$SIX_HOUR_DIR" "$DAILY_DIR"
+mkdir -p "$SIX_HOUR_DIR" "$DAILY_DIR" "$SECRETS_DIR"
+chmod 700 "$BACKUP_ROOT" "$SIX_HOUR_DIR" "$DAILY_DIR" "$SECRETS_DIR"
+
+# The SQL dump contains only encrypted chat content. Preserve the matching key
+# separately so a disaster recovery can still decrypt messages and images.
+if [[ ! -s "$CHAT_KEY_FILE" ]]; then
+  echo "Chat encryption key is missing; refusing to create an unrecoverable backup." >&2
+  exit 1
+fi
+install -m 600 "$CHAT_KEY_FILE" "${SECRETS_DIR}/chat-encryption.key"
+sha256sum "${SECRETS_DIR}/chat-encryption.key" > "${SECRETS_DIR}/chat-encryption.key.sha256"
 
 if command -v mariadb-dump >/dev/null 2>&1; then
   DUMP_BIN="$(command -v mariadb-dump)"

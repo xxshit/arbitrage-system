@@ -1,7 +1,7 @@
 import os
 import io
 import unittest
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from werkzeug.security import check_password_hash
 
 os.environ["DATABASE_URL"] = "sqlite://"
@@ -81,6 +81,30 @@ class ChatModuleTests(unittest.TestCase):
         self.assertEqual(bob_contacts["unread_total"], 1)
         bob_messages = self.bob.get(f"/api/chat/messages/{self.alice_id}").get_json()["items"]
         self.assertEqual([item["body"] for item in bob_messages], ["只清空自己的记录"])
+
+    def test_chat_timestamps_are_utc_plus_8_and_delivery_is_logged(self):
+        sent_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        expected_full = (sent_at + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+        expected_short = (sent_at + timedelta(hours=8)).strftime("%m-%d %H:%M")
+        with app.app_context():
+            row = ChatMessage(
+                sender_id=self.alice_id,
+                recipient_id=self.bob_id,
+                body="北京时间验证",
+                created_at=sent_at,
+            )
+            db.session.add(row)
+            db.session.commit()
+            message_id = row.id
+
+        with self.assertLogs(app.logger, level="INFO") as logs:
+            messages = self.bob.get(f"/api/chat/messages/{self.alice_id}").get_json()["items"]
+        self.assertEqual(messages[-1]["created_at"], expected_full)
+        self.assertTrue(any(f"message_id={message_id}" in line for line in logs.output))
+
+        contacts = self.bob.get("/api/chat/users").get_json()["items"]
+        alice = next(item for item in contacts if item["id"] == self.alice_id)
+        self.assertEqual(alice["last_message_at"], expected_short)
 
     def test_history_can_page_backward_without_crossing_clear_cursor(self):
         with app.app_context():
@@ -234,6 +258,8 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn("chatMessageIsRendered(item.id)", script)
         self.assertIn("appendNewChatMessages([data.item],true)", script)
         self.assertIn("let chatSendInFlight=false", script)
+        self.assertIn("visibilitychange", script)
+        self.assertIn("window.addEventListener('focus',syncChatAfterWake)", script)
         self.assertNotIn("await loadChatMessages('newer',true);await loadChatUsers()", script)
 
 

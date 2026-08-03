@@ -47,6 +47,20 @@ CHAT_IMAGE_SIGNATURES = (
     (b"GIF87a", "gif", "image/gif"),
     (b"GIF89a", "gif", "image/gif"),
 )
+SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
+
+
+def utc_now_naive():
+    """Return a timezone-stable UTC timestamp for DATETIME columns."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def format_shanghai_time(value, pattern="%Y-%m-%d %H:%M:%S"):
+    """Render UTC/naive database timestamps consistently as UTC+8."""
+    if value is None:
+        return None
+    aware = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return aware.astimezone(SHANGHAI_TZ).strftime(pattern)
 
 
 @app.after_request
@@ -478,7 +492,7 @@ class ChatMessage(db.Model):
     sender_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
     recipient_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
     body = db.Column(db.Text, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, index=True)
     attachment = db.relationship(
         "ChatAttachment",
         back_populates="message",
@@ -498,7 +512,7 @@ class ChatAttachment(db.Model):
     mime_type = db.Column(db.String(80), nullable=False)
     file_size = db.Column(db.Integer, nullable=False)
     data = deferred(db.Column(db.LargeBinary(length=CHAT_IMAGE_MAX_BYTES), nullable=False))
-    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, index=True)
     message = db.relationship("ChatMessage", back_populates="attachment")
 
 
@@ -509,7 +523,7 @@ class ChatViewState(db.Model):
     peer_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
     cleared_through_id = db.Column(db.Integer, nullable=False, default=0)
     last_read_message_id = db.Column(db.Integer, nullable=False, default=0)
-    updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False, onupdate=datetime.now)
+    updated_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, onupdate=utc_now_naive)
     __table_args__ = (
         db.UniqueConstraint("user_id", "peer_id", name="uq_chat_view_state_user_peer"),
     )
@@ -571,7 +585,6 @@ FUNDING_HISTORY_CACHE = {}
 FUNDING_STATISTICS_CACHE = {"ts": 0.0, "symbols": frozenset(), "data": {}}
 FUNDING_STATISTICS_LOCK = threading.Lock()
 LAST_PRICE_HISTORY_BUCKET = None
-SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 BASIS_CANDIDATES = {}
 PUMP_CANDIDATES = {}
 QUOTE_VALIDATION_CACHE = {}
@@ -2743,7 +2756,7 @@ def save_chat_image(upload):
 
 def cleanup_expired_chat_history(now=None):
     """Physically remove shared chat messages and private images after 30 days."""
-    cutoff = (now or datetime.now()) - timedelta(days=CHAT_RETENTION_DAYS)
+    cutoff = (now or utc_now_naive()) - timedelta(days=CHAT_RETENTION_DAYS)
     expired_messages = ChatMessage.query.filter(ChatMessage.created_at < cutoff).all()
     if not expired_messages:
         return {"messages": 0, "images": 0, "cutoff": cutoff}
@@ -2771,14 +2784,14 @@ def chat_message_payload(row, usernames=None):
             "mime_type": attachment.mime_type,
             "size": attachment.file_size,
         } if attachment else None),
-        "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "created_at": format_shanghai_time(row.created_at),
     }
 
 
 @app.get("/api/chat/users")
 def chat_users_api():
     user = current_user()
-    retention_cutoff = datetime.now() - timedelta(days=CHAT_RETENTION_DAYS)
+    retention_cutoff = utc_now_naive() - timedelta(days=CHAT_RETENTION_DAYS)
     peers = UserAccount.query.filter(UserAccount.id != user.id, UserAccount.active.is_(True)).order_by(UserAccount.username).all()
     items = []
     for peer in peers:
@@ -2805,9 +2818,9 @@ def chat_users_api():
             "username": peer.username,
             "role": peer.role,
             "online": bool(peer.last_seen_at and datetime.now() - peer.last_seen_at < timedelta(minutes=10)),
-            "last_seen_at": peer.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if peer.last_seen_at else None,
+            "last_seen_at": format_shanghai_time(peer.last_seen_at),
             "last_message": (("[图片] " if latest.attachment else "") + latest.body)[:80] if latest else None,
-            "last_message_at": latest.created_at.strftime("%m-%d %H:%M") if latest else None,
+            "last_message_at": format_shanghai_time(latest.created_at, "%m-%d %H:%M") if latest else None,
             "last_message_id": latest.id if latest else 0,
             "unread": unread,
         })
@@ -2828,7 +2841,7 @@ def chat_messages_api(peer_id):
     state = chat_state(user.id, peer.id, create=True)
     cleared_through_id = state.cleared_through_id or 0
     visible_after = max(after_id, cleared_through_id)
-    retention_cutoff = datetime.now() - timedelta(days=CHAT_RETENTION_DAYS)
+    retention_cutoff = utc_now_naive() - timedelta(days=CHAT_RETENTION_DAYS)
     pair_filter = or_(
         and_(ChatMessage.sender_id == user.id, ChatMessage.recipient_id == peer.id),
         and_(ChatMessage.sender_id == peer.id, ChatMessage.recipient_id == user.id),
@@ -2852,10 +2865,18 @@ def chat_messages_api(peer_id):
         rows = query.order_by(ChatMessage.id.asc()).limit(page_size).all()
     else:
         rows = list(reversed(query.order_by(ChatMessage.id.desc()).limit(page_size).all()))
-    incoming_ids = [row.id for row in rows if row.recipient_id == user.id]
-    if incoming_ids:
-        state.last_read_message_id = max(state.last_read_message_id or 0, max(incoming_ids))
-        state.updated_at = datetime.now()
+    previous_read_id = state.last_read_message_id or 0
+    newly_delivered = [row for row in rows if row.recipient_id == user.id and row.id > previous_read_id]
+    if newly_delivered:
+        delivered_at = utc_now_naive()
+        state.last_read_message_id = max(previous_read_id, max(row.id for row in newly_delivered))
+        state.updated_at = delivered_at
+        for row in newly_delivered:
+            latency_ms = max(0, round((delivered_at - row.created_at).total_seconds() * 1000))
+            app.logger.info(
+                "chat_delivery message_id=%s sender_id=%s recipient_id=%s latency_ms=%s",
+                row.id, row.sender_id, row.recipient_id, latency_ms,
+            )
     oldest_id = rows[0].id if rows else (before_id or 0)
     has_more_before = False
     if oldest_id:
@@ -2872,7 +2893,7 @@ def chat_messages_api(peer_id):
             "username": peer.username,
             "role": peer.role,
             "online": bool(peer.last_seen_at and datetime.now() - peer.last_seen_at < timedelta(minutes=10)),
-            "last_seen_at": peer.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if peer.last_seen_at else None,
+            "last_seen_at": format_shanghai_time(peer.last_seen_at),
         },
         "items": [chat_message_payload(row, {user.id: user.username, peer.id: peer.username}) for row in rows],
         "cleared_through_id": cleared_through_id,
@@ -2959,12 +2980,12 @@ def clear_chat_conversation_api(peer_id):
     )
     latest_id = db.session.query(func.max(ChatMessage.id)).filter(
         pair_filter,
-        ChatMessage.created_at >= datetime.now() - timedelta(days=CHAT_RETENTION_DAYS),
+        ChatMessage.created_at >= utc_now_naive() - timedelta(days=CHAT_RETENTION_DAYS),
     ).scalar() or 0
     state = chat_state(user.id, peer.id, create=True)
     state.cleared_through_id = max(state.cleared_through_id or 0, latest_id)
     state.last_read_message_id = max(state.last_read_message_id or 0, latest_id)
-    state.updated_at = datetime.now()
+    state.updated_at = utc_now_naive()
     db.session.commit()
     return jsonify({"ok": True, "cleared_through_id": state.cleared_through_id})
 

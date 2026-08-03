@@ -602,6 +602,19 @@ class ChatViewState(db.Model):
     )
 
 
+class ChatContactRemark(db.Model):
+    """Private encrypted contact labels, owned independently by each viewer."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    peer_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    remark = db.Column(db.Text, nullable=False)
+    encryption_version = db.Column(db.SmallInteger, nullable=False, default=CHAT_ENCRYPTION_VERSION)
+    updated_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, onupdate=utc_now_naive)
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "peer_id", name="uq_chat_contact_remark_user_peer"),
+    )
+
+
 class InviteCode(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     code_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
@@ -2799,6 +2812,11 @@ def chat_state(user_id, peer_id, create=False):
     return row
 
 
+def chat_contact_remark_text(user_id, peer_id):
+    row = ChatContactRemark.query.filter_by(user_id=user_id, peer_id=peer_id).first()
+    return decrypt_chat_text(row.remark, row.encryption_version) if row else ""
+
+
 def detect_chat_image(data):
     """Return a trusted extension and MIME type based on file bytes, never the browser filename."""
     for signature, extension, mime_type in CHAT_IMAGE_SIGNATURES:
@@ -2872,6 +2890,10 @@ def chat_users_api():
     user = current_user()
     retention_cutoff = utc_now_naive() - timedelta(days=CHAT_RETENTION_DAYS)
     peers = UserAccount.query.filter(UserAccount.id != user.id, UserAccount.active.is_(True)).order_by(UserAccount.username).all()
+    remarks = {
+        row.peer_id: decrypt_chat_text(row.remark, row.encryption_version)
+        for row in ChatContactRemark.query.filter_by(user_id=user.id).all()
+    }
     items = []
     for peer in peers:
         state = chat_state(user.id, peer.id)
@@ -2892,9 +2914,12 @@ def chat_users_api():
             ChatMessage.id > max(cleared_id, last_read_id),
             ChatMessage.created_at >= retention_cutoff,
         ).count()
+        remark = remarks.get(peer.id, "")
         items.append({
             "id": peer.id,
             "username": peer.username,
+            "remark": remark,
+            "display_name": remark or peer.username,
             "role": peer.role,
             "online": bool(peer.last_seen_at and datetime.now() - peer.last_seen_at < timedelta(minutes=10)),
             "last_seen_at": format_shanghai_time(peer.last_seen_at),
@@ -2905,6 +2930,40 @@ def chat_users_api():
         })
     items.sort(key=lambda item: (item["last_message_id"], item["username"]), reverse=True)
     return jsonify({"items": items, "unread_total": sum(item["unread"] for item in items)})
+
+
+@app.patch("/api/chat/users/<int:peer_id>/remark")
+def update_chat_contact_remark_api(peer_id):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    user = current_user()
+    peer = db.session.get(UserAccount, peer_id)
+    if not peer or not peer.active or peer.id == user.id:
+        return jsonify({"ok": False, "error": "联系人不存在。"}), 404
+    payload = request.get_json(silent=True) or {}
+    remark = str(payload.get("remark", "")).strip()
+    if "\n" in remark or "\r" in remark:
+        return jsonify({"ok": False, "error": "备注只能填写一行。"}), 400
+    if len(remark) > 24:
+        return jsonify({"ok": False, "error": "备注最多 24 个字符。"}), 400
+    row = ChatContactRemark.query.filter_by(user_id=user.id, peer_id=peer.id).first()
+    if remark:
+        if row is None:
+            row = ChatContactRemark(user_id=user.id, peer_id=peer.id, remark="")
+            db.session.add(row)
+        row.remark = encrypt_chat_text(remark)
+        row.encryption_version = CHAT_ENCRYPTION_VERSION
+        row.updated_at = utc_now_naive()
+    elif row is not None:
+        db.session.delete(row)
+    db.session.commit()
+    return jsonify({
+        "ok": True,
+        "peer_id": peer.id,
+        "username": peer.username,
+        "remark": remark,
+        "display_name": remark or peer.username,
+    })
 
 
 @app.get("/api/chat/messages/<int:peer_id>")
@@ -2920,6 +2979,7 @@ def chat_messages_api(peer_id):
     state = chat_state(user.id, peer.id, create=True)
     peer_state = chat_state(peer.id, user.id)
     peer_last_read_message_id = peer_state.last_read_message_id if peer_state else 0
+    peer_remark = chat_contact_remark_text(user.id, peer.id)
     cleared_through_id = state.cleared_through_id or 0
     visible_after = max(after_id, cleared_through_id)
     retention_cutoff = utc_now_naive() - timedelta(days=CHAT_RETENTION_DAYS)
@@ -2972,6 +3032,8 @@ def chat_messages_api(peer_id):
         "peer": {
             "id": peer.id,
             "username": peer.username,
+            "remark": peer_remark,
+            "display_name": peer_remark or peer.username,
             "role": peer.role,
             "online": bool(peer.last_seen_at and datetime.now() - peer.last_seen_at < timedelta(minutes=10)),
             "last_seen_at": format_shanghai_time(peer.last_seen_at),

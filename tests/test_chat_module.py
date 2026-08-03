@@ -10,6 +10,7 @@ os.environ["CHAT_ENCRYPTION_KEY"] = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8
 
 from app import (
     ChatAttachment,
+    ChatContactRemark,
     ChatMessage,
     ChatViewState,
     AccountSecurityEvent,
@@ -322,10 +323,53 @@ class ChatModuleTests(unittest.TestCase):
             self.assertIsNone(db.session.get(ChatMessage, old_id))
             self.assertIsNotNone(db.session.get(ChatMessage, fresh_id))
 
+    def test_contact_remark_is_private_encrypted_and_can_be_cleared(self):
+        response = self.alice.patch(
+            f"/api/chat/users/{self.bob_id}/remark",
+            json={"remark": "盘友小林"},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["display_name"], "盘友小林")
+
+        alice_contacts = self.alice.get("/api/chat/users").get_json()["items"]
+        bob_for_alice = next(item for item in alice_contacts if item["id"] == self.bob_id)
+        self.assertEqual(bob_for_alice["remark"], "盘友小林")
+        self.assertEqual(bob_for_alice["display_name"], "盘友小林")
+        conversation = self.alice.get(f"/api/chat/messages/{self.bob_id}").get_json()
+        self.assertEqual(conversation["peer"]["remark"], "盘友小林")
+
+        bob_contacts = self.bob.get("/api/chat/users").get_json()["items"]
+        alice_for_bob = next(item for item in bob_contacts if item["id"] == self.alice_id)
+        self.assertEqual(alice_for_bob["remark"], "")
+        self.assertEqual(alice_for_bob["display_name"], "alice")
+
+        with app.app_context():
+            stored = ChatContactRemark.query.filter_by(
+                user_id=self.alice_id,
+                peer_id=self.bob_id,
+            ).one()
+            self.assertNotEqual(stored.remark, "盘友小林")
+            self.assertEqual(stored.encryption_version, 1)
+
+        cleared = self.alice.patch(
+            f"/api/chat/users/{self.bob_id}/remark",
+            json={"remark": ""},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        )
+        self.assertEqual(cleared.status_code, 200)
+        self.assertEqual(cleared.get_json()["display_name"], "bob")
+        with app.app_context():
+            self.assertIsNone(ChatContactRemark.query.filter_by(
+                user_id=self.alice_id,
+                peer_id=self.bob_id,
+            ).first())
+
     def test_chat_frontend_coalesces_reads_and_deduplicates_rendering(self):
         script_path = os.path.join(os.path.dirname(__file__), "..", "static", "app.js")
         with open(script_path, "r", encoding="utf-8") as handle:
             script = handle.read()
+        page = self.alice.get("/").get_data(as_text=True)
 
         self.assertIn("chatMessageRequests.has(requestKey)", script)
         self.assertIn("chatMessageIsRendered(item.id)", script)
@@ -342,6 +386,11 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn("let chatSoundEnabled=", script)
         self.assertIn("playChatSound()", script)
         self.assertIn("arbi-chat-sound", script)
+        self.assertIn("function openChatRemarkEditor", script)
+        self.assertIn("/remark`,{method:'PATCH'", script)
+        self.assertIn("chatDisplayName(item).toLowerCase()", script)
+        self.assertIn('id="chatRemarkModal"', page)
+        self.assertIn('placeholder="搜索账号或备注"', page)
         self.assertNotIn("alert(error.message)}finally{chatSendInFlight", script)
         self.assertIn("visibilitychange", script)
         self.assertIn("window.addEventListener('focus',syncChatAfterWake)", script)

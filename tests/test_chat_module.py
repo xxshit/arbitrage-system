@@ -225,6 +225,17 @@ class ChatModuleTests(unittest.TestCase):
             self.assertIsNone(db.session.get(ChatMessage, old_id))
             self.assertIsNotNone(db.session.get(ChatMessage, fresh_id))
 
+    def test_chat_frontend_coalesces_reads_and_deduplicates_rendering(self):
+        script_path = os.path.join(os.path.dirname(__file__), "..", "static", "app.js")
+        with open(script_path, "r", encoding="utf-8") as handle:
+            script = handle.read()
+
+        self.assertIn("chatMessageRequests.has(requestKey)", script)
+        self.assertIn("chatMessageIsRendered(item.id)", script)
+        self.assertIn("appendNewChatMessages([data.item],true)", script)
+        self.assertIn("let chatSendInFlight=false", script)
+        self.assertNotIn("await loadChatMessages('newer',true);await loadChatUsers()", script)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,10 @@ let chatLastMessageId=0;
 let chatOldestMessageId=0;
 let chatHasMoreBefore=false;
 let chatPollTimer=null;
+let chatMessagePollTimer=null;
+let chatUsersRequest=null;
+let chatMessageRequests=new Map();
+let chatSendInFlight=false;
 let chatUsers=[];
 let chatUsersSignature='';
 let chatPeerQuery='';
@@ -229,25 +233,66 @@ function escapeChatHtml(value){return String(value??'').replace(/[&<>"']/g,char=
 function chatPeerMarkup(item){const preview=item.last_message?escapeChatHtml(item.last_message):'还没有消息',badge=item.unread?`<em>${item.unread>99?'99+':item.unread}</em>`:'';return `<button class="chat-peer ${item.id===chatPeerId?'active':''}" onclick="selectChatPeer(${item.id})"><span class="chat-avatar">${escapeChatHtml(item.username.slice(0,1).toUpperCase())}</span><span class="chat-peer-copy"><b>${escapeChatHtml(item.username)} ${item.online?'<i>在线</i>':''}</b><small>${preview}</small></span><span class="chat-peer-meta"><time>${item.last_message_at||''}</time>${badge}</span></button>`}
 function filteredChatUsers(){return chatUsers.filter(item=>!chatPeerQuery||item.username.toLowerCase().includes(chatPeerQuery))}
 function renderChatUsers(data,force=false){chatUsers=data.items||[];const total=Number(data.unread_total)||0,navBadge=byId('chatNavUnread'),target=byId('chatPeerList'),hasNewUnread=chatUnreadInitialized&&total>chatUnreadTotal;chatUnreadTotal=total;chatUnreadInitialized=true;byId('chatUnreadSummary').textContent=`${total} 条未读`;navBadge.textContent='NEW';navBadge.classList.toggle('hidden',total===0);if(hasNewUnread)playAlarmSound();const visible=filteredChatUsers(),signature=JSON.stringify([chatPeerId,chatPeerQuery,chatUsers.map(item=>[item.id,item.online,item.last_seen_at,item.last_message,item.last_message_at,item.last_message_id,item.unread])]);if(!force&&signature===chatUsersSignature)return;chatUsersSignature=signature;target.innerHTML=visible.length?visible.map(chatPeerMarkup).join(''):(chatUsers.length?'<p class="chat-empty">没有匹配的账号。</p>':'<p class="chat-empty">目前没有其他可用账号。</p>')}
-async function loadChatUsers(){const response=await fetch('/api/chat/users'),data=await response.json();if(!response.ok)throw new Error(data.error||'联系人读取失败');renderChatUsers(data);return data}
+async function loadChatUsers(){
+  if(chatUsersRequest)return chatUsersRequest;
+  const task=(async()=>{const response=await fetch('/api/chat/users'),data=await response.json();if(!response.ok)throw new Error(data.error||'联系人读取失败');renderChatUsers(data);return data})();
+  chatUsersRequest=task;
+  try{return await task}finally{if(chatUsersRequest===task)chatUsersRequest=null}
+}
 function chatMessageMarkup(item){const mine=item.sender_id===authState.user_id,body=item.body?`<p>${escapeChatHtml(item.body).replace(/\n/g,'<br>')}</p>`:'',picture=item.image?`<a class="chat-message-image" href="${escapeChatHtml(item.image.url)}" target="_blank" rel="noopener" title="打开原图"><img src="${escapeChatHtml(item.image.url)}" alt="${escapeChatHtml(item.image.name||'聊天图片')}" loading="lazy"><span>${escapeChatHtml(item.image.name||'图片')} · ${chatFileSize(item.image.size)}</span></a>`:'';return `<article class="chat-message ${mine?'mine':'theirs'}" data-message-id="${item.id}"><div>${picture}${body}<small>${escapeChatHtml(item.created_at)}</small></div></article>`}
+function uniqueChatMessages(items){const unique=new Map();for(const item of items||[]){const id=Number(item?.id)||0;if(id)unique.set(id,item)}return [...unique.values()].sort((left,right)=>Number(left.id)-Number(right.id))}
+function chatMessageIsRendered(id){return Boolean(byId('chatMessages')?.querySelector(`[data-message-id="${Number(id)}"]`))}
+function appendNewChatMessages(rawItems,forceScroll=false){const target=byId('chatMessages');if(!target)return 0;const items=uniqueChatMessages(rawItems),nearBottom=target.scrollHeight-target.scrollTop-target.clientHeight<90,fresh=items.filter(item=>!chatMessageIsRendered(item.id));if(fresh.length){target.querySelector('.chat-empty')?.remove();target.insertAdjacentHTML('beforeend',fresh.map(chatMessageMarkup).join(''))}if(items.length){chatLastMessageId=Math.max(chatLastMessageId,...items.map(item=>Number(item.id)));if(!chatOldestMessageId)chatOldestMessageId=Math.min(...items.map(item=>Number(item.id)))}if(fresh.length&&(forceScroll||nearBottom))scrollChatToBottom();return fresh.length}
 function chatFileSize(size){const value=Number(size)||0;return value>=1024*1024?`${(value/1024/1024).toFixed(1)}MB`:`${Math.max(1,Math.round(value/1024))}KB`}
 function scrollChatToBottom(){const target=byId('chatMessages');requestAnimationFrame(()=>{target.scrollTop=target.scrollHeight})}
 function chatPresenceText(peer){if(peer.online)return '在线';return peer.last_seen_at?`最近在线 ${peer.last_seen_at}`:'当前离线'}
 function renderChatConversationHeader(peer){if(!peer||peer.id!==chatPeerId)return;byId('chatConversationHeader').innerHTML=`<div><b>${escapeChatHtml(peer.username)}</b><small>${peer.role==='admin'?'管理员':'普通账号'} · ${escapeChatHtml(chatPresenceText(peer))}</small></div><button class="chat-clear" onclick="clearMyChatHistory()">清空我的记录</button>`}
 function updateChatHistoryBar(){const bar=byId('chatHistoryBar');if(!bar)return;bar.classList.toggle('hidden',!chatPeerId||!chatHasMoreBefore);const button=bar.querySelector('button');if(button){button.disabled=false;button.textContent='加载更早消息'}}
 async function selectChatPeer(peerId){chatPeerId=Number(peerId);chatLastMessageId=0;chatOldestMessageId=0;chatHasMoreBefore=false;chatUsersSignature='';clearChatImage();const peer=chatUsers.find(item=>item.id===chatPeerId);if(!peer)return;renderChatConversationHeader(peer);const input=byId('chatInput'),send=byId('chatComposer').querySelector('button[type="submit"]');input.disabled=false;send.disabled=false;byId('chatEmojiButton').disabled=false;byId('chatImageButton').disabled=false;byId('chatMessages').innerHTML='<p class="loading">正在读取消息…</p>';updateChatHistoryBar();renderChatUsers({items:chatUsers,unread_total:chatUsers.reduce((sum,item)=>sum+Number(item.unread||0),0)},true);await loadChatMessages('initial');await loadChatUsers();startChatPolling();input.focus()}
-async function loadChatMessages(mode='newer',forceScroll=false){if(!chatPeerId)return;let query='';if(mode==='newer'&&chatLastMessageId)query=`?after_id=${chatLastMessageId}`;if(mode==='older'&&chatOldestMessageId)query=`?before_id=${chatOldestMessageId}`;const target=byId('chatMessages'),oldHeight=target.scrollHeight,oldTop=target.scrollTop,nearBottom=oldHeight-oldTop-target.clientHeight<90;const response=await fetch(`/api/chat/messages/${chatPeerId}${query}`),data=await response.json();if(!response.ok)throw new Error(data.error||'消息读取失败');const items=data.items||[];if(mode==='initial'||(!chatLastMessageId&&mode!=='older')){target.innerHTML=items.length?items.map(chatMessageMarkup).join(''):'<p class="chat-empty">你这边还没有保留的聊天记录。</p>';chatOldestMessageId=items[0]?.id||0;chatLastMessageId=items[items.length-1]?.id||0;chatHasMoreBefore=Boolean(data.has_more_before);scrollChatToBottom()}else if(mode==='older'){if(items.length){target.querySelector('.chat-empty')?.remove();target.insertAdjacentHTML('afterbegin',items.map(chatMessageMarkup).join(''));chatOldestMessageId=items[0].id;requestAnimationFrame(()=>{target.scrollTop=target.scrollHeight-oldHeight+oldTop})}chatHasMoreBefore=Boolean(data.has_more_before)}else if(items.length){target.querySelector('.chat-empty')?.remove();target.insertAdjacentHTML('beforeend',items.map(chatMessageMarkup).join(''));chatLastMessageId=items[items.length-1].id;if(!chatOldestMessageId)chatOldestMessageId=items[0].id;if(forceScroll||nearBottom)scrollChatToBottom()}updateChatHistoryBar();if(data.peer)renderChatConversationHeader(data.peer);return data}
+async function loadChatMessages(mode='newer',forceScroll=false){
+  const requestedPeerId=Number(chatPeerId);
+  if(!requestedPeerId)return;
+  let query='';
+  if(mode==='newer'&&chatLastMessageId)query=`?after_id=${chatLastMessageId}`;
+  if(mode==='older'&&chatOldestMessageId)query=`?before_id=${chatOldestMessageId}`;
+  const requestKey=`${requestedPeerId}:${mode}:${query}`;
+  if(chatMessageRequests.has(requestKey))return chatMessageRequests.get(requestKey);
+  const task=(async()=>{
+    const target=byId('chatMessages'),oldHeight=target.scrollHeight,oldTop=target.scrollTop;
+    const response=await fetch(`/api/chat/messages/${requestedPeerId}${query}`),data=await response.json();
+    if(!response.ok)throw new Error(data.error||'消息读取失败');
+    if(Number(chatPeerId)!==requestedPeerId)return data;
+    const items=uniqueChatMessages(data.items||[]);
+    if(mode==='initial'||(!chatLastMessageId&&mode!=='older')){
+      target.innerHTML=items.length?items.map(chatMessageMarkup).join(''):'<p class="chat-empty">你这边还没有保留的聊天记录。</p>';
+      chatOldestMessageId=items[0]?.id||0;
+      chatLastMessageId=items[items.length-1]?.id||0;
+      chatHasMoreBefore=Boolean(data.has_more_before);
+      scrollChatToBottom();
+    }else if(mode==='older'){
+      const fresh=items.filter(item=>!chatMessageIsRendered(item.id));
+      if(fresh.length){target.querySelector('.chat-empty')?.remove();target.insertAdjacentHTML('afterbegin',fresh.map(chatMessageMarkup).join(''));chatOldestMessageId=Math.min(chatOldestMessageId||Infinity,...items.map(item=>Number(item.id)));requestAnimationFrame(()=>{target.scrollTop=target.scrollHeight-oldHeight+oldTop})}
+      chatHasMoreBefore=Boolean(data.has_more_before);
+    }else{
+      appendNewChatMessages(items,forceScroll);
+    }
+    updateChatHistoryBar();
+    if(data.peer)renderChatConversationHeader(data.peer);
+    return data;
+  })();
+  chatMessageRequests.set(requestKey,task);
+  try{return await task}finally{if(chatMessageRequests.get(requestKey)===task)chatMessageRequests.delete(requestKey)}
+}
 async function loadOlderChatMessages(){if(!chatHasMoreBefore||!chatOldestMessageId)return;const button=byId('chatHistoryBar')?.querySelector('button');if(button){button.disabled=true;button.textContent='正在加载…'}try{await loadChatMessages('older')}catch(error){if(button){button.disabled=false;button.textContent='加载失败，点击重试'}}}
 async function loadChat(force=false){try{await loadAuthState();await loadChatUsers();if(chatPeerId&&chatUsers.some(item=>item.id===chatPeerId))await loadChatMessages(force?'initial':'newer');else if(chatUsers.length)await selectChatPeer(chatUsers[0].id);startChatPolling()}catch(error){byId('chatPeerList').innerHTML=`<p class="chat-empty">${escapeChatHtml(error.message)}</p>`}}
-function startChatPolling(){clearInterval(chatPollTimer);chatPollTimer=setInterval(async()=>{try{const active=byId('chat')?.classList.contains('active');await loadChatUsers();if(active&&chatPeerId)await loadChatMessages('newer')}catch(error){}},3000)}
+function startChatPolling(){clearInterval(chatPollTimer);clearInterval(chatMessagePollTimer);chatPollTimer=setInterval(()=>loadChatUsers().catch(()=>{}),3000);chatMessagePollTimer=setInterval(()=>{if(byId('chat')?.classList.contains('active')&&chatPeerId)loadChatMessages('newer').catch(()=>{})},1000)}
 function updateChatComposer(){const input=byId('chatInput'),count=byId('chatCharCount');if(count)count.textContent=`${input?.value.length||0} / 2000`}
 function toggleChatEmojiPicker(event){event?.stopPropagation();byId('chatEmojiPicker')?.classList.toggle('hidden')}
 function insertChatEmoji(emoji){const input=byId('chatInput');if(!input||input.disabled)return;const start=input.selectionStart??input.value.length,end=input.selectionEnd??start;input.value=input.value.slice(0,start)+emoji+input.value.slice(end);input.selectionStart=input.selectionEnd=start+emoji.length;updateChatComposer();input.focus();byId('chatEmojiPicker')?.classList.add('hidden')}
 function chooseChatImage(){if(chatPeerId)byId('chatImageInput')?.click()}
 function setChatImage(file){if(!file)return;if(!['image/jpeg','image/png','image/gif','image/webp'].includes(file.type)){alert('只支持 JPG、PNG、GIF 或 WEBP 图片。');return}if(file.size>5*1024*1024){alert('单张图片不能超过 5MB。');return}clearChatImage();chatPendingImage=file;chatPendingImageUrl=URL.createObjectURL(file);byId('chatImagePreviewThumb').src=chatPendingImageUrl;byId('chatImagePreviewName').textContent=`${file.name} · ${chatFileSize(file.size)}`;byId('chatImagePreview').classList.remove('hidden')}
 function clearChatImage(){if(chatPendingImageUrl)URL.revokeObjectURL(chatPendingImageUrl);chatPendingImage=null;chatPendingImageUrl='';const input=byId('chatImageInput'),preview=byId('chatImagePreview'),thumb=byId('chatImagePreviewThumb');if(input)input.value='';if(preview)preview.classList.add('hidden');if(thumb)thumb.removeAttribute('src')}
-async function sendChatMessage(event){event.preventDefault();const input=byId('chatInput'),message=input.value.trim(),status=byId('chatSendStatus');if(!chatPeerId||(!message&&!chatPendingImage))return;const button=event.currentTarget.querySelector('button[type="submit"]');button.disabled=true;if(status)status.textContent=chatPendingImage?'正在上传并发送…':'正在发送…';try{let options;if(chatPendingImage){const form=new FormData();form.append('recipient_id',String(chatPeerId));form.append('body',message);form.append('image',chatPendingImage,chatPendingImage.name);options={method:'POST',headers:{'X-CSRF-Token':authState.csrf_token},body:form}}else{options={method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':authState.csrf_token},body:JSON.stringify({recipient_id:chatPeerId,body:message})}}const response=await fetch('/api/chat/messages',options),data=await response.json();if(!response.ok)throw new Error(data.error||'发送失败');input.value='';clearChatImage();updateChatComposer();if(status)status.textContent='已发送';await loadChatMessages('newer',true);await loadChatUsers()}catch(error){if(status)status.textContent='发送失败';alert(error.message)}finally{button.disabled=false;input.focus();setTimeout(()=>{if(status&&status.textContent==='已发送')status.textContent='内容仅在登录账号间可见 · 最多保留 30 天'},1800)}}
+async function sendChatMessage(event){event.preventDefault();if(chatSendInFlight)return;const input=byId('chatInput'),message=input.value.trim(),status=byId('chatSendStatus');if(!chatPeerId||(!message&&!chatPendingImage))return;const recipientId=Number(chatPeerId),button=event.currentTarget.querySelector('button[type="submit"]');chatSendInFlight=true;button.disabled=true;if(status)status.textContent=chatPendingImage?'正在上传并发送…':'正在发送…';try{let options;if(chatPendingImage){const form=new FormData();form.append('recipient_id',String(recipientId));form.append('body',message);form.append('image',chatPendingImage,chatPendingImage.name);options={method:'POST',headers:{'X-CSRF-Token':authState.csrf_token},body:form}}else{options={method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':authState.csrf_token},body:JSON.stringify({recipient_id:recipientId,body:message})}}const response=await fetch('/api/chat/messages',options),data=await response.json();if(!response.ok)throw new Error(data.error||'发送失败');input.value='';clearChatImage();updateChatComposer();if(Number(chatPeerId)===recipientId&&data.item)appendNewChatMessages([data.item],true);if(status)status.textContent='已发送';loadChatUsers().catch(()=>{})}catch(error){if(status)status.textContent='发送失败';alert(error.message)}finally{chatSendInFlight=false;button.disabled=false;input.focus();setTimeout(()=>{if(status&&status.textContent==='已发送')status.textContent='内容仅在登录账号间可见 · 最多保留 30 天'},1800)}}
 async function clearMyChatHistory(){if(!chatPeerId||!confirm('只清空你自己看到的历史记录？对方的聊天记录不会受到影响。'))return;const response=await fetch(`/api/chat/conversations/${chatPeerId}/clear`,{method:'POST',headers:{'X-CSRF-Token':authState.csrf_token}}),data=await response.json();if(!response.ok){alert(data.error||'清空失败');return}chatLastMessageId=0;chatOldestMessageId=0;chatHasMoreBefore=false;updateChatHistoryBar();byId('chatMessages').innerHTML='<p class="chat-empty">你的历史记录已经清空，对方记录保持不变。</p>';await loadChatUsers()}
 byId('chatInput')?.addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();byId('chatComposer')?.requestSubmit()}});
 byId('chatInput')?.addEventListener('input',updateChatComposer);

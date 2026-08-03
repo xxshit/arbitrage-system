@@ -178,6 +178,9 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn('class="chat-nav-entry', page)
         self.assertNotIn('id="chatNavUnread"', page)
         self.assertNotIn('>NEW</span>', page)
+        self.assertIn('id="alarmSoundToggle" type="checkbox"', page)
+        self.assertIn('id="chatSoundToggle" type="checkbox"', page)
+        self.assertIn("协作声音", page)
         self.assertNotIn("账号之间的一对一协作留言", page)
 
     def test_admin_can_reset_forgotten_password_without_storing_plaintext(self):
@@ -336,6 +339,9 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn("observeIncomingChatMessages", script)
         self.assertIn("updateChatReadReceipts", script)
         self.assertIn("chatNavAttentionPending", script)
+        self.assertIn("let chatSoundEnabled=", script)
+        self.assertIn("playChatSound()", script)
+        self.assertIn("arbi-chat-sound", script)
         self.assertNotIn("alert(error.message)}finally{chatSendInFlight", script)
         self.assertIn("visibilitychange", script)
         self.assertIn("window.addEventListener('focus',syncChatAfterWake)", script)

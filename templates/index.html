@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <title>ArbiScope | 套利监控中心</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260803-chat-receipts">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260803-sound-channels">
 </head>
 <body>
   <aside>
@@ -29,7 +29,7 @@
     <div class="aside-foot"><span class="dot"></span> 云端服务运行中<br><small>行情来源：交易所公开 API</small></div>
   </aside>
   <main>
-    <header><div><p class="eyebrow">ARBITRAGE DESK</p><h1>套利机会看板</h1><p class="sub">跨交易所价差、现货/合约对冲与资金费率监控</p></div><div class="header-actions"><div class="account-chip"><span>{{ current_user.username }}</span><b>{{ '管理员' if current_user.role == 'admin' else '查看账号' }}</b><button onclick="logoutAccount()">退出</button></div><div class="sound-actions"><button id="alarmSoundToggle" class="sound-toggle" onclick="toggleAlarmSound()">报警声音：静音</button><button class="sound-test" onclick="testAlarmSound()">测试报警音</button></div><div class="status"><span class="pulse"></span><span id="updated">正在获取行情…</span></div></div></header>
+    <header><div><p class="eyebrow">ARBITRAGE DESK</p><h1>套利机会看板</h1><p class="sub">跨交易所价差、现货/合约对冲与资金费率监控</p></div><div class="header-actions"><div class="account-chip"><span>{{ current_user.username }}</span><b>{{ '管理员' if current_user.role == 'admin' else '查看账号' }}</b><button onclick="logoutAccount()">退出</button></div><div class="sound-actions" aria-label="声音控制"><label class="sound-choice"><input id="alarmSoundToggle" type="checkbox" onchange="toggleAlarmSound(this.checked)"><i aria-hidden="true"></i><span>报警声音</span></label><label class="sound-choice"><input id="chatSoundToggle" type="checkbox" onchange="toggleChatSound(this.checked)"><i aria-hidden="true"></i><span>协作声音</span></label><button class="sound-test" onclick="testAlarmSound()">测试声音</button></div><div class="status"><span class="pulse"></span><span id="updated">正在获取行情…</span></div></div></header>
     <section class="metrics"><article><p>最佳预估净收益</p><strong id="bestSpread">--</strong><small>已扣除预估手续费 0.12%</small></article><article><p>扫描市场</p><strong id="markets">--</strong><small>3 家交易所 · 3 个交易对</small></article><article><p>运行中策略</p><strong id="activeStrategies">--</strong><small>可在下方随时启停</small></article><article><p>行情模式</p><strong id="mode">--</strong><small>接入 API 后自动切换</small></article></section>
 
     <section id="dashboard" class="view active"><div class="panel"><div class="panel-title"><div><p class="eyebrow">LIVE SCANNER</p><h2>发现的价差机会</h2></div><button onclick="loadDashboard()">↻ 刷新行情</button></div><div id="majorMarketOverview" class="major-market-overview"><p class="loading">正在读取 BTC / ETH / SOL 大盘风向…</p></div><div class="table-wrap"><table><thead><tr><th>交易对</th><th>BN / OK / BY 价格</th><th>买入（低价）</th><th>卖出（高价）</th><th>价差</th><th>预估净收益</th><th>资金费率 / 8h</th><th>更新时间</th></tr></thead><tbody id="opportunities"></tbody></table></div></div></section>
@@ -56,5 +56,5 @@
   </main>
   <section id="tipsPanel" class="tips-panel collapsed"><button class="tips-toggle" onclick="toggleTips()"><span class="tips-dot"></span><b>TIPS</b><span id="tipsCount">0</span><span id="tipsChevron">⌃</span></button><div class="tips-body"><div class="tips-title"><span>实时报警</span><button onclick="loadAlerts()">↻</button></div><div id="tipsItems" class="tips-items"><p>正在检查报警…</p></div><button class="tips-collapse" onclick="toggleTips()">收起</button></div></section>
   <div id="modal" class="modal hidden"><form class="dialog" onsubmit="saveStrategy(event)"><button type="button" class="close" onclick="closeModal()">×</button><p class="eyebrow">NEW STRATEGY</p><h2>创建监控策略</h2><label>策略名称<input id="name" required placeholder="例如：BTC 跨所价差"></label><label>套利类型<select id="strategyMode"><option>跨所合约套利</option><option>现货多/合约空</option><option>资金费率套利</option></select></label><label>交易对<select id="symbol"><option>BTC/USDT</option><option>ETH/USDT</option><option>SOL/USDT</option></select></label><button class="primary submit">创建策略</button></form></div>
-  <script src="{{ url_for('static', filename='app.js') }}?v=20260803-chat-receipts"></script>
+  <script src="{{ url_for('static', filename='app.js') }}?v=20260803-sound-channels"></script>
 </body></html>

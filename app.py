@@ -458,8 +458,18 @@ class UserAccount(db.Model):
     active_session_hash = db.Column(db.String(64))
     last_login_at = db.Column(db.DateTime)
     last_seen_at = db.Column(db.DateTime)
+    password_changed_at = db.Column(db.DateTime, default=datetime.now, nullable=True)
     chat_nav_hidden = db.Column(db.Boolean, nullable=False, default=False)
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+
+
+class AccountSecurityEvent(db.Model):
+    """Password and session security audit without ever storing password material."""
+    id = db.Column(db.Integer, primary_key=True)
+    actor_user_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    target_user_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    event_type = db.Column(db.String(40), nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
 
 
 class ChatMessage(db.Model):
@@ -2511,14 +2521,16 @@ def create_admin_command(username, password):
     username = username.strip().lower()
     if len(password) < 12:
         raise click.ClickException("管理员密码至少需要 12 位。")
+    changed_at = datetime.now()
     row = UserAccount.query.filter_by(username=username).first()
     if row:
         row.password_hash = generate_password_hash(password)
+        row.password_changed_at = changed_at
         row.role = "admin"
         row.active = True
         row.active_session_hash = None
     else:
-        db.session.add(UserAccount(username=username, password_hash=generate_password_hash(password), role="admin"))
+        db.session.add(UserAccount(username=username, password_hash=generate_password_hash(password), role="admin", password_changed_at=changed_at))
     db.session.commit()
     click.echo(f"管理员 {username} 已创建/重置。")
 
@@ -2650,7 +2662,46 @@ def list_users():
         "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
         "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
         "last_seen_at": row.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_seen_at else None,
+        "password_changed_at": row.password_changed_at.strftime("%Y-%m-%d %H:%M:%S") if row.password_changed_at else None,
     } for row in UserAccount.query.order_by(UserAccount.created_at).all()]})
+
+
+@app.patch("/api/admin/users/<int:user_id>/password")
+@admin_required
+def reset_user_password(user_id):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    target = db.session.get(UserAccount, user_id)
+    if not target or not target.active:
+        return jsonify({"ok": False, "error": "账号不存在或已停用。"}), 404
+    body = request.get_json(silent=True) or {}
+    generate_temporary = str(body.get("mode", "")).lower() == "generate"
+    new_password = secrets.token_urlsafe(12) if generate_temporary else str(body.get("new_password", ""))
+    if len(new_password) < 10:
+        return jsonify({"ok": False, "error": "新密码至少需要 10 位。"}), 400
+    if len(new_password) > 128:
+        return jsonify({"ok": False, "error": "新密码不能超过 128 位。"}), 400
+    changed_at = datetime.now()
+    target.password_hash = generate_password_hash(new_password)
+    target.password_changed_at = changed_at
+    target.active_session_hash = None
+    db.session.add(AccountSecurityEvent(
+        actor_user_id=current_user().id,
+        target_user_id=target.id,
+        event_type="admin_password_reset_generated" if generate_temporary else "admin_password_reset_custom",
+        created_at=changed_at,
+    ))
+    db.session.commit()
+    response = jsonify({
+        "ok": True,
+        "user_id": target.id,
+        "username": target.username,
+        "password_changed_at": changed_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "temporary_password": new_password if generate_temporary else None,
+        "signed_out": True,
+    })
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def chat_state(user_id, peer_id, create=False):
@@ -8430,6 +8481,9 @@ with app.app_context():
     user_columns = {column["name"] for column in inspect(db.engine).get_columns("user_account")}
     if "chat_nav_hidden" not in user_columns:
         db.session.execute(text("ALTER TABLE user_account ADD COLUMN chat_nav_hidden BOOLEAN NOT NULL DEFAULT 0"))
+        db.session.commit()
+    if "password_changed_at" not in user_columns:
+        db.session.execute(text("ALTER TABLE user_account ADD COLUMN password_changed_at DATETIME"))
         db.session.commit()
     invite_columns = {column["name"] for column in inspect(db.engine).get_columns("invite_code")}
     if "code_value" not in invite_columns:

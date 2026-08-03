@@ -2,6 +2,7 @@ import os
 import io
 import unittest
 from datetime import datetime, timedelta
+from werkzeug.security import check_password_hash
 
 os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["SECRET_KEY"] = "chat-test-secret"
@@ -10,6 +11,7 @@ from app import (
     ChatAttachment,
     ChatMessage,
     ChatViewState,
+    AccountSecurityEvent,
     UserAccount,
     app,
     cleanup_expired_chat_history,
@@ -128,6 +130,36 @@ class ChatModuleTests(unittest.TestCase):
         page = self.alice.get("/").get_data(as_text=True)
         self.assertIn('class="nav-unread chat-new hidden">NEW</span>', page)
         self.assertNotIn("账号之间的一对一协作留言", page)
+
+    def test_admin_can_reset_forgotten_password_without_storing_plaintext(self):
+        denied = self.bob.patch(
+            f"/api/admin/users/{self.alice_id}/password",
+            json={"mode": "generate"},
+            headers={"X-CSRF-Token": "bob-csrf"},
+        )
+        self.assertEqual(denied.status_code, 403)
+
+        response = self.alice.patch(
+            f"/api/admin/users/{self.bob_id}/password",
+            json={"mode": "generate"},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+        temporary_password = response.get_json()["temporary_password"]
+        self.assertGreaterEqual(len(temporary_password), 10)
+
+        with app.app_context():
+            bob = db.session.get(UserAccount, self.bob_id)
+            self.assertIsNone(bob.active_session_hash)
+            self.assertIsNotNone(bob.password_changed_at)
+            self.assertNotEqual(bob.password_hash, temporary_password)
+            self.assertTrue(check_password_hash(bob.password_hash, temporary_password))
+            event = AccountSecurityEvent.query.filter_by(target_user_id=self.bob_id).one()
+            self.assertEqual(event.actor_user_id, self.alice_id)
+            self.assertEqual(event.event_type, "admin_password_reset_generated")
+
+        self.assertEqual(self.bob.get("/api/auth/me").status_code, 401)
 
     def test_image_message_is_private_and_has_mysql_metadata(self):
         image_bytes = b"\x89PNG\r\n\x1a\n" + b"chat-image-test"

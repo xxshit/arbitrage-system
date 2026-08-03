@@ -16,6 +16,7 @@ from app import (
     AccountSecurityEvent,
     UserAccount,
     app,
+    backfill_chat_read_times,
     cleanup_expired_chat_history,
     migrate_chat_content_encryption,
     db,
@@ -118,6 +119,7 @@ class ChatModuleTests(unittest.TestCase):
         self.assertEqual(sent.status_code, 200)
         sent_item = sent.get_json()["item"]
         self.assertFalse(sent_item["read_by_peer"])
+        self.assertIsNone(sent_item["read_at"])
 
         before_read = self.alice.get(f"/api/chat/messages/{self.bob_id}").get_json()
         self.assertFalse(before_read["items"][-1]["read_by_peer"])
@@ -128,7 +130,35 @@ class ChatModuleTests(unittest.TestCase):
 
         after_read = self.alice.get(f"/api/chat/messages/{self.bob_id}").get_json()
         self.assertTrue(after_read["items"][-1]["read_by_peer"])
+        self.assertIsNotNone(after_read["items"][-1]["read_at"])
+        self.assertEqual(after_read["items"][-1]["read_at"], after_read["peer_last_read_at"])
         self.assertGreaterEqual(after_read["peer_last_read_message_id"], sent_item["id"])
+
+        with app.app_context():
+            self.assertIsNotNone(db.session.get(ChatMessage, sent_item["id"]).read_at)
+
+    def test_legacy_read_receipt_time_is_backfilled_once(self):
+        legacy_read_at = datetime(2026, 8, 3, 12, 34, 56)
+        with app.app_context():
+            message = ChatMessage(
+                sender_id=self.alice_id,
+                recipient_id=self.bob_id,
+                body="旧已读回执",
+            )
+            db.session.add(message)
+            db.session.flush()
+            db.session.add(ChatViewState(
+                user_id=self.bob_id,
+                peer_id=self.alice_id,
+                last_read_message_id=message.id,
+                updated_at=legacy_read_at,
+            ))
+            db.session.commit()
+            message_id = message.id
+
+            self.assertEqual(backfill_chat_read_times(), 1)
+            self.assertEqual(backfill_chat_read_times(), 0)
+            self.assertEqual(db.session.get(ChatMessage, message_id).read_at, legacy_read_at)
 
     def test_history_can_page_backward_without_crossing_clear_cursor(self):
         with app.app_context():
@@ -385,6 +415,10 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn("chatNavAttentionPending", script)
         self.assertIn("let chatSoundEnabled=", script)
         self.assertIn("playChatSound()", script)
+        self.assertIn("oscillator.type='sine'", script)
+        self.assertIn("function chatReceiptTitle", script)
+        self.assertIn('class="chat-read-state', script)
+        self.assertIn("data.peer_last_read_at", script)
         self.assertIn("arbi-chat-sound", script)
         self.assertIn("function openChatRemarkEditor", script)
         self.assertIn("/remark`,{method:'PATCH'", script)

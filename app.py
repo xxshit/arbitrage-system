@@ -565,6 +565,7 @@ class ChatMessage(db.Model):
     body = db.Column(db.Text, nullable=False)
     encryption_version = db.Column(db.SmallInteger, nullable=False, default=0)
     created_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, index=True)
+    read_at = db.Column(db.DateTime, nullable=True)
     attachment = db.relationship(
         "ChatAttachment",
         back_populates="message",
@@ -2860,9 +2861,21 @@ def cleanup_expired_chat_history(now=None):
     return {"messages": len(message_ids), "images": image_count, "cutoff": cutoff}
 
 
-def chat_message_payload(row, usernames=None, viewer_id=None, peer_last_read_message_id=0):
+def chat_message_payload(
+    row,
+    usernames=None,
+    viewer_id=None,
+    peer_last_read_message_id=0,
+    peer_last_read_at=None,
+):
     usernames = usernames or {}
     attachment = row.attachment
+    read_by_peer = bool(
+        viewer_id
+        and row.sender_id == viewer_id
+        and (row.read_at is not None or row.id <= (peer_last_read_message_id or 0))
+    )
+    read_at = row.read_at or (peer_last_read_at if read_by_peer else None)
     return {
         "id": row.id,
         "sender_id": row.sender_id,
@@ -2877,11 +2890,8 @@ def chat_message_payload(row, usernames=None, viewer_id=None, peer_last_read_mes
             "size": attachment.file_size,
         } if attachment else None),
         "created_at": format_shanghai_time(row.created_at),
-        "read_by_peer": bool(
-            viewer_id
-            and row.sender_id == viewer_id
-            and row.id <= (peer_last_read_message_id or 0)
-        ),
+        "read_by_peer": read_by_peer,
+        "read_at": format_shanghai_time(read_at),
     }
 
 
@@ -2979,6 +2989,7 @@ def chat_messages_api(peer_id):
     state = chat_state(user.id, peer.id, create=True)
     peer_state = chat_state(peer.id, user.id)
     peer_last_read_message_id = peer_state.last_read_message_id if peer_state else 0
+    peer_last_read_at = peer_state.updated_at if peer_state else None
     peer_remark = chat_contact_remark_text(user.id, peer.id)
     cleared_through_id = state.cleared_through_id or 0
     visible_after = max(after_id, cleared_through_id)
@@ -3010,8 +3021,16 @@ def chat_messages_api(peer_id):
     newly_delivered = [row for row in rows if row.recipient_id == user.id and row.id > previous_read_id]
     if newly_delivered:
         delivered_at = utc_now_naive()
-        state.last_read_message_id = max(previous_read_id, max(row.id for row in newly_delivered))
+        read_through_id = max(previous_read_id, max(row.id for row in newly_delivered))
+        state.last_read_message_id = read_through_id
         state.updated_at = delivered_at
+        ChatMessage.query.filter(
+            ChatMessage.sender_id == peer.id,
+            ChatMessage.recipient_id == user.id,
+            ChatMessage.id > previous_read_id,
+            ChatMessage.id <= read_through_id,
+            ChatMessage.read_at.is_(None),
+        ).update({ChatMessage.read_at: delivered_at}, synchronize_session=False)
         for row in newly_delivered:
             latency_ms = max(0, round((delivered_at - row.created_at).total_seconds() * 1000))
             app.logger.info(
@@ -3043,8 +3062,10 @@ def chat_messages_api(peer_id):
             {user.id: user.username, peer.id: peer.username},
             viewer_id=user.id,
             peer_last_read_message_id=peer_last_read_message_id,
+            peer_last_read_at=peer_last_read_at,
         ) for row in rows],
         "peer_last_read_message_id": peer_last_read_message_id,
+        "peer_last_read_at": format_shanghai_time(peer_last_read_at),
         "cleared_through_id": cleared_through_id,
         "oldest_id": rows[0].id if rows else None,
         "latest_id": rows[-1].id if rows else None,
@@ -3103,6 +3124,7 @@ def send_chat_message_api():
         raise
     peer_state = chat_state(peer.id, user.id)
     peer_last_read_message_id = peer_state.last_read_message_id if peer_state else 0
+    peer_last_read_at = peer_state.updated_at if peer_state else None
     return jsonify({
         "ok": True,
         "item": chat_message_payload(
@@ -3110,6 +3132,7 @@ def send_chat_message_api():
             {user.id: user.username},
             viewer_id=user.id,
             peer_last_read_message_id=peer_last_read_message_id,
+            peer_last_read_at=peer_last_read_at,
         ),
     })
 
@@ -3148,9 +3171,16 @@ def clear_chat_conversation_api(peer_id):
         ChatMessage.created_at >= utc_now_naive() - timedelta(days=CHAT_RETENTION_DAYS),
     ).scalar() or 0
     state = chat_state(user.id, peer.id, create=True)
+    read_at = utc_now_naive()
     state.cleared_through_id = max(state.cleared_through_id or 0, latest_id)
     state.last_read_message_id = max(state.last_read_message_id or 0, latest_id)
-    state.updated_at = utc_now_naive()
+    state.updated_at = read_at
+    ChatMessage.query.filter(
+        ChatMessage.sender_id == peer.id,
+        ChatMessage.recipient_id == user.id,
+        ChatMessage.id <= latest_id,
+        ChatMessage.read_at.is_(None),
+    ).update({ChatMessage.read_at: read_at}, synchronize_session=False)
     db.session.commit()
     return jsonify({"ok": True, "cleared_through_id": state.cleared_through_id})
 
@@ -8698,17 +8728,38 @@ def migrate_chat_content_encryption(batch_size=100):
     return {"messages": migrated_messages, "images": migrated_images}
 
 
+def backfill_chat_read_times():
+    """Give legacy read receipts the best known time without changing unread state."""
+    updated = 0
+    states = ChatViewState.query.filter(ChatViewState.last_read_message_id > 0).all()
+    for state in states:
+        read_at = state.updated_at or utc_now_naive()
+        updated += ChatMessage.query.filter(
+            ChatMessage.sender_id == state.peer_id,
+            ChatMessage.recipient_id == state.user_id,
+            ChatMessage.id <= state.last_read_message_id,
+            ChatMessage.read_at.is_(None),
+        ).update({ChatMessage.read_at: read_at}, synchronize_session=False)
+    if updated:
+        db.session.commit()
+    return updated
+
+
 with app.app_context():
     create_database_schema()
     chat_message_columns = {column["name"] for column in inspect(db.engine).get_columns("chat_message")}
     if "encryption_version" not in chat_message_columns:
         db.session.execute(text("ALTER TABLE chat_message ADD COLUMN encryption_version SMALLINT NOT NULL DEFAULT 0"))
         db.session.commit()
+    if "read_at" not in chat_message_columns:
+        db.session.execute(text("ALTER TABLE chat_message ADD COLUMN read_at DATETIME NULL"))
+        db.session.commit()
     chat_attachment_columns = {column["name"] for column in inspect(db.engine).get_columns("chat_attachment")}
     if "encryption_version" not in chat_attachment_columns:
         db.session.execute(text("ALTER TABLE chat_attachment ADD COLUMN encryption_version SMALLINT NOT NULL DEFAULT 0"))
         db.session.commit()
     migrate_chat_content_encryption()
+    backfill_chat_read_times()
     user_columns = {column["name"] for column in inspect(db.engine).get_columns("user_account")}
     if "chat_nav_hidden" not in user_columns:
         db.session.execute(text("ALTER TABLE user_account ADD COLUMN chat_nav_hidden BOOLEAN NOT NULL DEFAULT 0"))

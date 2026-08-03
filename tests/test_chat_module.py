@@ -12,6 +12,7 @@ from app import (
     ChatAttachment,
     ChatContactRemark,
     ChatMessage,
+    ChatMessagePreference,
     ChatViewState,
     AccountSecurityEvent,
     UserAccount,
@@ -85,6 +86,78 @@ class ChatModuleTests(unittest.TestCase):
         self.assertEqual(bob_contacts["unread_total"], 1)
         bob_messages = self.bob.get(f"/api/chat/messages/{self.alice_id}").get_json()["items"]
         self.assertEqual([item["body"] for item in bob_messages], ["只清空自己的记录"])
+
+    def test_reply_keeps_a_safe_reference_to_the_original_message(self):
+        original = self.alice.post(
+            "/api/chat/messages",
+            json={"recipient_id": self.bob_id, "body": "原消息内容"},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        ).get_json()["item"]
+        response = self.bob.post(
+            "/api/chat/messages",
+            json={
+                "recipient_id": self.alice_id,
+                "body": "这是引用回复",
+                "reply_to_id": original["id"],
+            },
+            headers={"X-CSRF-Token": "bob-csrf"},
+        )
+        self.assertEqual(response.status_code, 200)
+        reply = self.alice.get(f"/api/chat/messages/{self.bob_id}").get_json()["items"][-1]
+        self.assertEqual(reply["reply"]["id"], original["id"])
+        self.assertEqual(reply["reply"]["body"], "原消息内容")
+        self.assertEqual(reply["reply"]["sender"], "alice")
+        self.alice.delete(
+            f"/api/chat/messages/{original['id']}",
+            headers={"X-CSRF-Token": "alice-csrf"},
+        )
+        hidden_source_reply = self.alice.get(
+            f"/api/chat/messages/{self.bob_id}"
+        ).get_json()["items"][-1]["reply"]
+        self.assertTrue(hidden_source_reply["unavailable"])
+
+    def test_deleting_one_message_only_hides_the_current_users_copy(self):
+        sent = self.alice.post(
+            "/api/chat/messages",
+            json={"recipient_id": self.bob_id, "body": "只在一侧删除"},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        ).get_json()["item"]
+        deleted = self.alice.delete(
+            f"/api/chat/messages/{sent['id']}",
+            headers={"X-CSRF-Token": "alice-csrf"},
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(self.alice.get(f"/api/chat/messages/{self.bob_id}").get_json()["items"], [])
+        bob_items = self.bob.get(f"/api/chat/messages/{self.alice_id}").get_json()["items"]
+        self.assertEqual([item["body"] for item in bob_items], ["只在一侧删除"])
+        with app.app_context():
+            preference = ChatMessagePreference.query.filter_by(
+                user_id=self.alice_id,
+                message_id=sent["id"],
+            ).one()
+            self.assertIsNotNone(preference.hidden_at)
+
+    def test_pin_is_private_and_replaces_the_previous_pin_in_the_conversation(self):
+        message_ids = []
+        for body in ("第一条置顶候选", "第二条置顶候选"):
+            sent = self.alice.post(
+                "/api/chat/messages",
+                json={"recipient_id": self.bob_id, "body": body},
+                headers={"X-CSRF-Token": "alice-csrf"},
+            )
+            message_ids.append(sent.get_json()["item"]["id"])
+        for message_id in message_ids:
+            response = self.alice.patch(
+                f"/api/chat/messages/{message_id}/pin",
+                json={"pinned": True},
+                headers={"X-CSRF-Token": "alice-csrf"},
+            )
+            self.assertEqual(response.status_code, 200)
+        alice_data = self.alice.get(f"/api/chat/messages/{self.bob_id}").get_json()
+        self.assertEqual(alice_data["pinned"]["id"], message_ids[-1])
+        self.assertFalse(alice_data["items"][0]["pinned"])
+        self.assertTrue(alice_data["items"][1]["pinned"])
+        self.assertIsNone(self.bob.get(f"/api/chat/messages/{self.alice_id}").get_json()["pinned"])
 
     def test_chat_timestamps_are_utc_plus_8_and_delivery_is_logged(self):
         sent_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -396,6 +469,11 @@ class ChatModuleTests(unittest.TestCase):
                 data=image_bytes,
                 created_at=old.created_at,
             ))
+            db.session.add(ChatMessagePreference(
+                user_id=self.alice_id,
+                message_id=old.id,
+                pinned_at=now - timedelta(days=30),
+            ))
             db.session.commit()
             old_id = old.id
             fresh_id = fresh.id
@@ -404,6 +482,7 @@ class ChatModuleTests(unittest.TestCase):
             self.assertEqual(result["messages"], 1)
             self.assertEqual(result["images"], 1)
             self.assertIsNone(db.session.get(ChatMessage, old_id))
+            self.assertIsNone(ChatMessagePreference.query.filter_by(message_id=old_id).first())
             self.assertIsNotNone(db.session.get(ChatMessage, fresh_id))
 
     def test_contact_remark_is_private_encrypted_and_can_be_cleared(self):
@@ -471,6 +550,15 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn("document.visibilityState==='visible'&&document.hasFocus()", script)
         self.assertIn("announceIncomingChatMessage(latest,latestItem.sender_id)", script)
         self.assertIn("announceIncomingChatMessage(latestUnread,latestUnreadItem.id)", script)
+        self.assertIn("function openChatMessageMenu", script)
+        self.assertIn("function startChatReply", script)
+        self.assertIn("reply_to_id:replyToId||null", script)
+        self.assertIn("function deleteChatMessageForMe", script)
+        self.assertIn("function toggleChatMessagePin", script)
+        self.assertIn("id=\"chatMessageMenu\"", script)
+        self.assertIn(".chat-message-menu", style)
+        self.assertIn(".chat-pinned-bar", style)
+        self.assertIn(".chat-reply-preview", style)
         self.assertIn("updateChatReadReceipts", script)
         self.assertIn("chatNavAttentionPending", script)
         self.assertIn("let chatSoundEnabled=", script)

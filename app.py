@@ -564,6 +564,7 @@ class ChatMessage(db.Model):
     recipient_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
     body = db.Column(db.Text, nullable=False)
     encryption_version = db.Column(db.SmallInteger, nullable=False, default=0)
+    reply_to_id = db.Column(db.Integer, nullable=True, index=True)
     created_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, index=True)
     read_at = db.Column(db.DateTime, nullable=True)
     attachment = db.relationship(
@@ -613,6 +614,19 @@ class ChatContactRemark(db.Model):
     updated_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, onupdate=utc_now_naive)
     __table_args__ = (
         db.UniqueConstraint("user_id", "peer_id", name="uq_chat_contact_remark_user_peer"),
+    )
+
+
+class ChatMessagePreference(db.Model):
+    """Per-account actions for one shared message: local deletion and pinning."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    message_id = db.Column(db.Integer, db.ForeignKey("chat_message.id"), nullable=False, index=True)
+    hidden_at = db.Column(db.DateTime, nullable=True)
+    pinned_at = db.Column(db.DateTime, nullable=True, index=True)
+    updated_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, onupdate=utc_now_naive)
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "message_id", name="uq_chat_message_preference_user_message"),
     )
 
 
@@ -2854,6 +2868,36 @@ def chat_contact_remark_text(user_id, peer_id):
     return decrypt_chat_text(row.remark, row.encryption_version) if row else ""
 
 
+def chat_pair_filter(user_id, peer_id):
+    return or_(
+        and_(ChatMessage.sender_id == user_id, ChatMessage.recipient_id == peer_id),
+        and_(ChatMessage.sender_id == peer_id, ChatMessage.recipient_id == user_id),
+    )
+
+
+def chat_hidden_message_ids(user_id):
+    return db.session.query(ChatMessagePreference.message_id).filter(
+        ChatMessagePreference.user_id == user_id,
+        ChatMessagePreference.hidden_at.isnot(None),
+    )
+
+
+def chat_message_preference(user_id, message_id, create=False):
+    row = ChatMessagePreference.query.filter_by(user_id=user_id, message_id=message_id).first()
+    if row is None and create:
+        row = ChatMessagePreference(user_id=user_id, message_id=message_id)
+        db.session.add(row)
+        db.session.flush()
+    return row
+
+
+def chat_message_for_participant(message_id, user_id):
+    row = db.session.get(ChatMessage, message_id)
+    if not row or user_id not in {row.sender_id, row.recipient_id}:
+        return None
+    return row
+
+
 def detect_chat_image(data):
     """Return a trusted extension and MIME type based on file bytes, never the browser filename."""
     for signature, extension, mime_type in CHAT_IMAGE_SIGNATURES:
@@ -2891,6 +2935,7 @@ def cleanup_expired_chat_history(now=None):
         return {"messages": 0, "images": 0, "cutoff": cutoff}
     message_ids = [row.id for row in expired_messages]
     image_count = ChatAttachment.query.filter(ChatAttachment.message_id.in_(message_ids)).count()
+    ChatMessagePreference.query.filter(ChatMessagePreference.message_id.in_(message_ids)).delete(synchronize_session=False)
     ChatAttachment.query.filter(ChatAttachment.message_id.in_(message_ids)).delete(synchronize_session=False)
     ChatMessage.query.filter(ChatMessage.id.in_(message_ids)).delete(synchronize_session=False)
     db.session.commit()
@@ -2903,9 +2948,15 @@ def chat_message_payload(
     viewer_id=None,
     peer_last_read_message_id=0,
     peer_last_read_at=None,
+    viewer_preferences=None,
+    reply_rows=None,
 ):
     usernames = usernames or {}
+    viewer_preferences = viewer_preferences or {}
+    reply_rows = reply_rows or {}
     attachment = row.attachment
+    preference = viewer_preferences.get(row.id)
+    reply_row = reply_rows.get(row.reply_to_id) if row.reply_to_id else None
     read_by_peer = bool(
         viewer_id
         and row.sender_id == viewer_id
@@ -2918,6 +2969,20 @@ def chat_message_payload(
         "recipient_id": row.recipient_id,
         "sender": usernames.get(row.sender_id),
         "body": decrypt_chat_text(row.body, row.encryption_version),
+        "reply": ({
+            "id": reply_row.id,
+            "sender": usernames.get(reply_row.sender_id) or "对方",
+            "body": decrypt_chat_text(reply_row.body, reply_row.encryption_version)[:160],
+            "has_image": bool(reply_row.attachment),
+            "unavailable": False,
+        } if reply_row else ({
+            "id": row.reply_to_id,
+            "sender": "原消息",
+            "body": "原消息已不在保留期",
+            "has_image": False,
+            "unavailable": True,
+        } if row.reply_to_id else None)),
+        "pinned": bool(preference and preference.pinned_at),
         "image": ({
             "id": attachment.id,
             "url": url_for("chat_attachment_api", attachment_id=attachment.id),
@@ -2931,6 +2996,40 @@ def chat_message_payload(
     }
 
 
+def chat_payload_context(rows, viewer_id):
+    message_ids = {row.id for row in rows}
+    reply_ids = {row.reply_to_id for row in rows if row.reply_to_id}
+    preferences = {
+        row.message_id: row
+        for row in ChatMessagePreference.query.filter(
+            ChatMessagePreference.user_id == viewer_id,
+            ChatMessagePreference.message_id.in_(message_ids or {-1}),
+        ).all()
+    }
+    replies = {
+        row.id: row
+        for row in ChatMessage.query.filter(
+            ChatMessage.id.in_(reply_ids or {-1}),
+            ~ChatMessage.id.in_(chat_hidden_message_ids(viewer_id)),
+        ).all()
+    }
+    return preferences, replies
+
+
+def pinned_chat_message(user_id, peer_id, cleared_through_id, retention_cutoff):
+    preference = ChatMessagePreference.query.join(
+        ChatMessage, ChatMessage.id == ChatMessagePreference.message_id
+    ).filter(
+        ChatMessagePreference.user_id == user_id,
+        ChatMessagePreference.pinned_at.isnot(None),
+        ChatMessagePreference.hidden_at.is_(None),
+        chat_pair_filter(user_id, peer_id),
+        ChatMessage.id > cleared_through_id,
+        ChatMessage.created_at >= retention_cutoff,
+    ).order_by(ChatMessagePreference.pinned_at.desc()).first()
+    return db.session.get(ChatMessage, preference.message_id) if preference else None
+
+
 @app.get("/api/chat/users")
 def chat_users_api():
     user = current_user()
@@ -2941,23 +3040,23 @@ def chat_users_api():
         for row in ChatContactRemark.query.filter_by(user_id=user.id).all()
     }
     items = []
+    hidden_ids = chat_hidden_message_ids(user.id)
     for peer in peers:
         state = chat_state(user.id, peer.id)
         cleared_id = state.cleared_through_id if state else 0
         last_read_id = state.last_read_message_id if state else 0
-        pair_filter = or_(
-            and_(ChatMessage.sender_id == user.id, ChatMessage.recipient_id == peer.id),
-            and_(ChatMessage.sender_id == peer.id, ChatMessage.recipient_id == user.id),
-        )
+        pair_filter = chat_pair_filter(user.id, peer.id)
         latest = ChatMessage.query.filter(
             pair_filter,
             ChatMessage.id > cleared_id,
+            ~ChatMessage.id.in_(hidden_ids),
             ChatMessage.created_at >= retention_cutoff,
         ).order_by(ChatMessage.id.desc()).first()
         unread = ChatMessage.query.filter(
             ChatMessage.sender_id == peer.id,
             ChatMessage.recipient_id == user.id,
             ChatMessage.id > max(cleared_id, last_read_id),
+            ~ChatMessage.id.in_(hidden_ids),
             ChatMessage.created_at >= retention_cutoff,
         ).count()
         remark = remarks.get(peer.id, "")
@@ -3030,14 +3129,13 @@ def chat_messages_api(peer_id):
     cleared_through_id = state.cleared_through_id or 0
     visible_after = max(after_id, cleared_through_id)
     retention_cutoff = utc_now_naive() - timedelta(days=CHAT_RETENTION_DAYS)
-    pair_filter = or_(
-        and_(ChatMessage.sender_id == user.id, ChatMessage.recipient_id == peer.id),
-        and_(ChatMessage.sender_id == peer.id, ChatMessage.recipient_id == user.id),
-    )
+    pair_filter = chat_pair_filter(user.id, peer.id)
+    hidden_ids = chat_hidden_message_ids(user.id)
     page_size = 100
     query = ChatMessage.query.filter(
         pair_filter,
         ChatMessage.id > visible_after,
+        ~ChatMessage.id.in_(hidden_ids),
         ChatMessage.created_at >= retention_cutoff,
     )
     if before_id:
@@ -3046,6 +3144,7 @@ def chat_messages_api(peer_id):
                 pair_filter,
                 ChatMessage.id > cleared_through_id,
                 ChatMessage.id < before_id,
+                ~ChatMessage.id.in_(hidden_ids),
                 ChatMessage.created_at >= retention_cutoff,
             ).order_by(ChatMessage.id.desc()).limit(page_size).all()
         ))
@@ -3080,8 +3179,13 @@ def chat_messages_api(peer_id):
             pair_filter,
             ChatMessage.id > cleared_through_id,
             ChatMessage.id < oldest_id,
+            ~ChatMessage.id.in_(hidden_ids),
             ChatMessage.created_at >= retention_cutoff,
         ).first() is not None
+    pinned_row = pinned_chat_message(user.id, peer.id, cleared_through_id, retention_cutoff)
+    context_rows = rows + ([pinned_row] if pinned_row and pinned_row not in rows else [])
+    viewer_preferences, reply_rows = chat_payload_context(context_rows, user.id)
+    usernames = {user.id: user.username, peer.id: peer.username}
     db.session.commit()
     return jsonify({
         "peer": {
@@ -3095,11 +3199,22 @@ def chat_messages_api(peer_id):
         },
         "items": [chat_message_payload(
             row,
-            {user.id: user.username, peer.id: peer.username},
+            usernames,
             viewer_id=user.id,
             peer_last_read_message_id=peer_last_read_message_id,
             peer_last_read_at=peer_last_read_at,
+            viewer_preferences=viewer_preferences,
+            reply_rows=reply_rows,
         ) for row in rows],
+        "pinned": (chat_message_payload(
+            pinned_row,
+            usernames,
+            viewer_id=user.id,
+            peer_last_read_message_id=peer_last_read_message_id,
+            peer_last_read_at=peer_last_read_at,
+            viewer_preferences=viewer_preferences,
+            reply_rows=reply_rows,
+        ) if pinned_row else None),
         "peer_last_read_message_id": peer_last_read_message_id,
         "peer_last_read_at": format_shanghai_time(peer_last_read_at),
         "cleared_through_id": cleared_through_id,
@@ -3118,6 +3233,7 @@ def send_chat_message_api():
     body = request.form if is_multipart else (request.get_json(silent=True) or {})
     recipient_id = body.get("recipient_id")
     message = str(body.get("body", "")).strip()
+    reply_to_id = body.get("reply_to_id")
     image_upload = request.files.get("image") if is_multipart else None
     try:
         recipient_id = int(recipient_id)
@@ -3130,6 +3246,21 @@ def send_chat_message_api():
         return jsonify({"ok": False, "error": "请输入文字或选择一张图片。"}), 400
     if len(message) > 2000:
         return jsonify({"ok": False, "error": "单条消息最多 2000 个字符。"}), 400
+    if reply_to_id in (None, "", 0, "0"):
+        reply_to_id = None
+    else:
+        try:
+            reply_to_id = int(reply_to_id)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "引用的消息无效。"}), 400
+        reply_row = ChatMessage.query.filter(
+            ChatMessage.id == reply_to_id,
+            chat_pair_filter(user.id, peer.id),
+            ~ChatMessage.id.in_(chat_hidden_message_ids(user.id)),
+            ChatMessage.created_at >= utc_now_naive() - timedelta(days=CHAT_RETENTION_DAYS),
+        ).first()
+        if not reply_row:
+            return jsonify({"ok": False, "error": "引用的消息已删除或不在保留期。"}), 400
     try:
         stored_image = None
         if image_upload:
@@ -3139,6 +3270,7 @@ def send_chat_message_api():
             recipient_id=peer.id,
             body=encrypt_chat_text(message),
             encryption_version=CHAT_ENCRYPTION_VERSION,
+            reply_to_id=reply_to_id,
         )
         db.session.add(row)
         db.session.flush()
@@ -3161,6 +3293,7 @@ def send_chat_message_api():
     peer_state = chat_state(peer.id, user.id)
     peer_last_read_message_id = peer_state.last_read_message_id if peer_state else 0
     peer_last_read_at = peer_state.updated_at if peer_state else None
+    viewer_preferences, reply_rows = chat_payload_context([row], user.id)
     return jsonify({
         "ok": True,
         "item": chat_message_payload(
@@ -3169,7 +3302,75 @@ def send_chat_message_api():
             viewer_id=user.id,
             peer_last_read_message_id=peer_last_read_message_id,
             peer_last_read_at=peer_last_read_at,
+            viewer_preferences=viewer_preferences,
+            reply_rows=reply_rows,
         ),
+    })
+
+
+@app.delete("/api/chat/messages/<int:message_id>")
+def delete_chat_message_api(message_id):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    user = current_user()
+    row = chat_message_for_participant(message_id, user.id)
+    if not row:
+        return jsonify({"ok": False, "error": "消息不存在或无权操作。"}), 404
+    preference = chat_message_preference(user.id, row.id, create=True)
+    preference.hidden_at = utc_now_naive()
+    preference.pinned_at = None
+    preference.updated_at = utc_now_naive()
+    db.session.commit()
+    return jsonify({"ok": True, "message_id": row.id, "deleted_for_me": True})
+
+
+@app.patch("/api/chat/messages/<int:message_id>/pin")
+def pin_chat_message_api(message_id):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    user = current_user()
+    row = chat_message_for_participant(message_id, user.id)
+    if not row:
+        return jsonify({"ok": False, "error": "消息不存在或无权操作。"}), 404
+    payload = request.get_json(silent=True) or {}
+    pinned = payload.get("pinned")
+    if not isinstance(pinned, bool):
+        return jsonify({"ok": False, "error": "置顶状态无效。"}), 400
+    preference = chat_message_preference(user.id, row.id, create=True)
+    if preference.hidden_at:
+        return jsonify({"ok": False, "error": "这条消息已从你的记录中删除。"}), 400
+    peer_id = row.recipient_id if row.sender_id == user.id else row.sender_id
+    if pinned:
+        existing = ChatMessagePreference.query.join(
+            ChatMessage, ChatMessage.id == ChatMessagePreference.message_id
+        ).filter(
+            ChatMessagePreference.user_id == user.id,
+            ChatMessagePreference.pinned_at.isnot(None),
+            chat_pair_filter(user.id, peer_id),
+        ).all()
+        for item in existing:
+            item.pinned_at = None
+            item.updated_at = utc_now_naive()
+        preference.pinned_at = utc_now_naive()
+    else:
+        preference.pinned_at = None
+    preference.updated_at = utc_now_naive()
+    db.session.commit()
+    viewer_preferences, reply_rows = chat_payload_context([row], user.id)
+    usernames = {
+        user.id: user.username,
+        peer_id: db.session.get(UserAccount, peer_id).username,
+    }
+    return jsonify({
+        "ok": True,
+        "message_id": row.id,
+        "pinned": (chat_message_payload(
+            row,
+            usernames,
+            viewer_id=user.id,
+            viewer_preferences=viewer_preferences,
+            reply_rows=reply_rows,
+        ) if pinned else None),
     })
 
 
@@ -8789,6 +8990,9 @@ with app.app_context():
         db.session.commit()
     if "read_at" not in chat_message_columns:
         db.session.execute(text("ALTER TABLE chat_message ADD COLUMN read_at DATETIME NULL"))
+        db.session.commit()
+    if "reply_to_id" not in chat_message_columns:
+        db.session.execute(text("ALTER TABLE chat_message ADD COLUMN reply_to_id INTEGER NULL"))
         db.session.commit()
     chat_attachment_columns = {column["name"] for column in inspect(db.engine).get_columns("chat_attachment")}
     if "encryption_version" not in chat_attachment_columns:

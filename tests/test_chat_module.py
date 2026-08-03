@@ -244,6 +244,59 @@ class ChatModuleTests(unittest.TestCase):
 
         self.assertEqual(self.bob.get("/api/auth/me").status_code, 401)
 
+    def test_admin_can_disable_and_restore_account_without_self_lockout(self):
+        denied = self.bob.patch(
+            f"/api/admin/users/{self.alice_id}/active",
+            json={"active": False},
+            headers={"X-CSRF-Token": "bob-csrf"},
+        )
+        self.assertEqual(denied.status_code, 403)
+
+        self_lockout = self.alice.patch(
+            f"/api/admin/users/{self.alice_id}/active",
+            json={"active": False},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        )
+        self.assertEqual(self_lockout.status_code, 400)
+
+        disabled = self.alice.patch(
+            f"/api/admin/users/{self.bob_id}/active",
+            json={"active": False},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        )
+        self.assertEqual(disabled.status_code, 200)
+        self.assertFalse(disabled.get_json()["active"])
+        self.assertTrue(disabled.get_json()["signed_out"])
+        self.assertEqual(self.bob.get("/api/auth/me").status_code, 401)
+
+        with app.app_context():
+            bob = db.session.get(UserAccount, self.bob_id)
+            self.assertFalse(bob.active)
+            self.assertIsNone(bob.active_session_hash)
+            event = AccountSecurityEvent.query.filter_by(
+                target_user_id=self.bob_id,
+                event_type="admin_account_disabled",
+            ).one()
+            self.assertEqual(event.actor_user_id, self.alice_id)
+
+        restored = self.alice.patch(
+            f"/api/admin/users/{self.bob_id}/active",
+            json={"active": True},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        )
+        self.assertEqual(restored.status_code, 200)
+        self.assertTrue(restored.get_json()["active"])
+
+        with app.app_context():
+            self.assertTrue(db.session.get(UserAccount, self.bob_id).active)
+            self.assertEqual(
+                AccountSecurityEvent.query.filter_by(
+                    target_user_id=self.bob_id,
+                    event_type="admin_account_enabled",
+                ).count(),
+                1,
+            )
+
     def test_image_message_is_private_and_has_mysql_metadata(self):
         image_bytes = b"\x89PNG\r\n\x1a\n" + b"chat-image-test"
         response = self.alice.post(
@@ -399,6 +452,9 @@ class ChatModuleTests(unittest.TestCase):
         script_path = os.path.join(os.path.dirname(__file__), "..", "static", "app.js")
         with open(script_path, "r", encoding="utf-8") as handle:
             script = handle.read()
+        style_path = os.path.join(os.path.dirname(__file__), "..", "static", "style.css")
+        with open(style_path, "r", encoding="utf-8") as handle:
+            style = handle.read()
         page = self.alice.get("/").get_data(as_text=True)
 
         self.assertIn("chatMessageRequests.has(requestKey)", script)
@@ -419,6 +475,10 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn("function chatReceiptTitle", script)
         self.assertIn('class="chat-read-state', script)
         self.assertIn("data.peer_last_read_at", script)
+        self.assertIn("/active`,{method:'PATCH'", script)
+        self.assertIn('class="chat-message-time"', script)
+        self.assertIn("animation-duration:1.6s", style)
+        self.assertIn("font-size:10px", style)
         self.assertIn("arbi-chat-sound", script)
         self.assertIn("function openChatRemarkEditor", script)
         self.assertIn("/remark`,{method:'PATCH'", script)

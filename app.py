@@ -2766,6 +2766,42 @@ def list_users():
     } for row in UserAccount.query.order_by(UserAccount.created_at).all()]})
 
 
+@app.patch("/api/admin/users/<int:user_id>/active")
+@admin_required
+def set_user_active(user_id):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    target = db.session.get(UserAccount, user_id)
+    if not target:
+        return jsonify({"ok": False, "error": "账号不存在。"}), 404
+    body = request.get_json(silent=True) or {}
+    desired_active = body.get("active")
+    if not isinstance(desired_active, bool):
+        return jsonify({"ok": False, "error": "请提供明确的启用状态。"}), 400
+    actor = current_user()
+    if target.id == actor.id and not desired_active:
+        return jsonify({"ok": False, "error": "不能封禁当前登录的管理员账号。"}), 400
+
+    changed_at = datetime.now()
+    target.active = desired_active
+    target.active_session_hash = None
+    db.session.add(AccountSecurityEvent(
+        actor_user_id=actor.id,
+        target_user_id=target.id,
+        event_type="admin_account_enabled" if desired_active else "admin_account_disabled",
+        created_at=changed_at,
+    ))
+    db.session.commit()
+    return jsonify({
+        "ok": True,
+        "user_id": target.id,
+        "username": target.username,
+        "active": bool(target.active),
+        "signed_out": True,
+        "changed_at": changed_at.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+
+
 @app.patch("/api/admin/users/<int:user_id>/password")
 @admin_required
 def reset_user_password(user_id):

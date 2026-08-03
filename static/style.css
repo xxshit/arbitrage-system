@@ -287,3 +287,10 @@ aside nav>a[data-view="token-hedge"]{order:11}aside nav>a[data-view="strategies"
 @media(max-width:800px){.chat-peer-search{top:53px}.chat-history-bar{padding-top:5px}.chat-input-wrap>small span{display:none}}
 #chatRemarkModal{z-index:90}.chat-remark-dialog{width:min(390px,100%);background:#fffaf0}.chat-remark-account{margin:-10px 0 18px;color:#6d7f89;font-size:11px}.chat-remark-help{display:block;margin-top:8px;color:#7b878f;font-size:10px;line-height:1.6}.chat-remark-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:22px}.chat-remark-actions button{min-width:88px}
 .rule-toggle{display:flex;align-items:center;gap:8px;color:#35536a;font-size:12px}.rule-toggle input{width:16px;height:16px;accent-color:#178f7d}.rule-open-private{margin-top:10px;padding:6px 10px;border-color:#bed1d5;background:#f1f7f5;color:#356a68;font-size:11px}
+
+/* Account access controls and clearer chat timing. */
+.account-summary{grid-template-columns:repeat(4,minmax(0,1fr))}
+.account-security-actions>div{display:flex!important;gap:7px}.account-security-actions button:disabled{cursor:not-allowed;opacity:.55}.account-security-actions .account-ban{border-color:#e3aaa3;background:#fff1ee;color:#b8463f}.account-security-actions .account-unban{border-color:#8fcbbb;background:#e9f8f2;color:#08755b}
+.chat-nav-entry.chat-attention{animation-duration:1.6s}
+.chat-message .chat-message-time{display:block;color:#68777c;font-size:10px;font-weight:600;line-height:16px;white-space:nowrap}
+@media(max-width:700px){.account-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}

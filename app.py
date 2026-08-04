@@ -11,10 +11,11 @@ import click
 import math
 import io
 import base64
+from html.parser import HTMLParser
 from functools import wraps
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
@@ -389,6 +390,8 @@ class ListingEvent(db.Model):
     source_url = db.Column(db.String(1000))
     announcement = db.Column(db.Boolean, default=False, nullable=False, index=True)
     effective_at = db.Column(db.DateTime)
+    effective_time_status = db.Column(db.String(24), nullable=False, default="pending", index=True)
+    details_checked_at = db.Column(db.DateTime)
     occurred_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
 
 
@@ -1000,29 +1003,251 @@ def announcement_symbols(title):
     return sorted({f"{base}/USDT" for base in re.findall(r"\b([A-Z0-9]{2,15})(?:USDT|USDC)\b", normalized)})
 
 
+class AnnouncementLinkParser(HTMLParser):
+    """Collect announcement anchors without adding an HTML parsing dependency."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.current_href = None
+        self.current_text = []
+        self.links = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "a" or self.current_href is not None:
+            return
+        href = dict(attrs).get("href")
+        if href:
+            self.current_href = href
+            self.current_text = []
+
+    def handle_data(self, data):
+        if self.current_href is not None:
+            self.current_text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag.lower() != "a" or self.current_href is None:
+            return
+        title = re.sub(r"\s+", " ", " ".join(self.current_text)).strip()
+        if title:
+            self.links.append((self.current_href, title))
+        self.current_href = None
+        self.current_text = []
+
+
+def fetch_announcement_page(url, timeout=12):
+    request_obj = Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ArbiScope/1.0",
+        "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+    })
+    with urlopen(request_obj, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="ignore")
+
+
+def announcement_event_type(title):
+    lowered = title.lower()
+    if any(word in lowered for word in ("delist", "removal", "remove from trading", "下架")):
+        return "下架"
+    if any(word in lowered for word in ("listing", "to list", "lists ", "listed ", "launch", "上架")):
+        return "上架"
+    return None
+
+
+def announcement_links(page, base_url):
+    parser = AnnouncementLinkParser()
+    try:
+        parser.feed(page)
+    except Exception:
+        pass
+    rows = []
+    seen = set()
+    for href, title in parser.links:
+        event_type = announcement_event_type(title)
+        if not event_type or not announcement_symbols(title):
+            continue
+        detail_url = urljoin(base_url, html.unescape(href))
+        key = (title[:500], detail_url)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append({"title": title[:500], "url": detail_url, "event_type": event_type})
+    return rows
+
+
+def announcement_visible_text(page):
+    cleaned = re.sub(r"(?is)<(script|style|svg)\b[^>]*>.*?</\1>", " ", page)
+    cleaned = re.sub(r"(?i)<br\s*/?>|</(?:p|div|li|tr|h[1-6])>", "\n", cleaned)
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    return re.sub(r"[ \t\r\f\v]+", " ", html.unescape(cleaned)).strip()
+
+
+def parse_announcement_published_at(page):
+    matched = re.search(r'"datePublished"\s*:\s*"([^"]+)"', page)
+    if not matched:
+        return None
+    try:
+        value = datetime.fromisoformat(matched.group(1).replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=SHANGHAI_TZ)
+        return value.astimezone(SHANGHAI_TZ).replace(tzinfo=None)
+    except (TypeError, ValueError):
+        return None
+
+
+ANNOUNCEMENT_MONTHS = {
+    name.lower(): index for index, name in enumerate(
+        ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"),
+        start=1,
+    )
+}
+ANNOUNCEMENT_DATETIME_PATTERNS = (
+    re.compile(
+        r"(?P<year>20\d{2})\s*[-/年]\s*(?P<month>\d{1,2})\s*[-/月]\s*(?P<day>\d{1,2})\s*日?"
+        r"\s*(?:at|,|，)?\s*(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>AM|PM)?"
+        r"\s*[（(]?\s*(?:UTC|GMT)\s*(?P<offset>[+-]\s*\d{1,2}(?::?\d{2})?)?\s*[)）]?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?P<month_name>January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+(?P<day>\d{1,2}),\s*(?P<year>20\d{2})\s*(?:at|,|，)?\s*"
+        r"(?P<hour>\d{1,2}):(?P<minute>\d{2})\s*(?P<ampm>AM|PM)?"
+        r"\s*[（(]?\s*(?:UTC|GMT)\s*(?P<offset>[+-]\s*\d{1,2}(?::?\d{2})?)?\s*[)）]?",
+        re.IGNORECASE,
+    ),
+)
+
+
+def announcement_timezone(offset):
+    compact = (offset or "+0").replace(" ", "")
+    sign = -1 if compact.startswith("-") else 1
+    digits = compact.lstrip("+-")
+    if ":" in digits:
+        hours, minutes = digits.split(":", 1)
+    elif len(digits) > 2:
+        hours, minutes = digits[:-2], digits[-2:]
+    else:
+        hours, minutes = digits or "0", "0"
+    return timezone(sign * timedelta(hours=int(hours), minutes=int(minutes)))
+
+
+def announcement_datetime_candidates(text):
+    # Some articles place the timezone between the date and time. Normalize that
+    # layout before matching, e.g. "June 26, 2026 (UTC+8), 3:00 PM".
+    normalized = re.sub(
+        r"((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s*20\d{2})"
+        r"\s*[（(]\s*((?:UTC|GMT)\s*[+-]\s*\d{1,2}(?::?\d{2})?)\s*[)）]\s*[,，]?\s*"
+        r"(\d{1,2}:\d{2}\s*(?:AM|PM)?)",
+        r"\1, \3 (\2)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    candidates = []
+    for pattern in ANNOUNCEMENT_DATETIME_PATTERNS:
+        for matched in pattern.finditer(normalized):
+            parts = matched.groupdict()
+            month = int(parts["month"]) if parts.get("month") else ANNOUNCEMENT_MONTHS[parts["month_name"].lower()]
+            hour = int(parts["hour"])
+            if parts.get("ampm"):
+                hour %= 12
+                if parts["ampm"].upper() == "PM":
+                    hour += 12
+            try:
+                value = datetime(
+                    int(parts["year"]), month, int(parts["day"]), hour, int(parts["minute"]),
+                    tzinfo=announcement_timezone(parts.get("offset")),
+                ).astimezone(SHANGHAI_TZ).replace(tzinfo=None)
+            except (TypeError, ValueError):
+                continue
+            candidates.append((value, matched.start(), matched.end(), normalized))
+    return candidates
+
+
+def announcement_effective_score(text, start, end, event_type):
+    before = text[max(0, start - 180):start].lower()
+    after = text[end:min(len(text), end + 90)].lower()
+    context = before + " " + after
+    if event_type == "下架":
+        positive = (
+            ("will delist", 12), ("delist futures", 10), ("discontinue", 9),
+            ("must close", 8), ("removed from", 8), ("remove from", 8),
+            ("suspend the futures trading", 8), ("terminate", 7), ("下架", 12),
+            ("停止交易", 9), ("自行平仓", 7),
+        )
+        negative = (("relist", -12), ("opening of new", -9), ("stock split", -5), ("重新上架", -12), ("暂停开新仓", -9))
+    else:
+        positive = (
+            ("will list", 12), ("has listed", 12), ("open trading", 10),
+            ("trading starts", 10), ("go live", 9), ("launch", 8),
+            ("上架", 12), ("开放交易", 10),
+        )
+        negative = (("delist", -12), ("remove", -8), ("下架", -12), ("暂停", -6))
+    return sum(weight for phrase, weight in positive + negative if phrase in context)
+
+
+def parse_announcement_effective_at(page, event_type):
+    text_content = announcement_visible_text(page)
+    scored = []
+    for value, start, end, normalized in announcement_datetime_candidates(text_content):
+        scored.append((announcement_effective_score(normalized, start, end, event_type), -start, value))
+    if not scored:
+        return None
+    score, _, value = max(scored)
+    return value if score >= 7 else None
+
+
+def hydrate_listing_event(event, detail_url, detail_page=None):
+    checked_at = datetime.now()
+    try:
+        detail_page = detail_page if detail_page is not None else fetch_announcement_page(detail_url)
+    except Exception:
+        event.effective_time_status = "retry"
+        event.details_checked_at = checked_at
+        return False
+    published_at = parse_announcement_published_at(detail_page)
+    effective_at = parse_announcement_effective_at(detail_page, event.event_type)
+    event.source_url = detail_url
+    event.details_checked_at = checked_at
+    if published_at:
+        event.occurred_at = published_at
+    if effective_at:
+        event.effective_at = effective_at
+        event.effective_time_status = "parsed"
+    else:
+        event.effective_time_status = "not_stated"
+    return True
+
+
 def scan_exchange_announcements():
-    """Read the official announcement landing pages once daily and persist listing notices."""
+    """Read official announcement details and persist publication/effective times."""
     for exchange, url in ANNOUNCEMENT_SOURCES.items():
         try:
-            request_obj = Request(url, headers={"User-Agent": "Mozilla/5.0 ArbiScope/1.0"})
-            with urlopen(request_obj, timeout=8) as response:
-                page = response.read().decode("utf-8", errors="ignore")
+            page = fetch_announcement_page(url)
         except Exception:
             continue
-        fragments = re.findall(r">([^<>]{6,260}(?:delist|listing|list)[^<>]{0,180})<", page, flags=re.IGNORECASE)
-        titles = set()
-        for fragment in fragments:
-            title = re.sub(r"\s+", " ", html.unescape(fragment)).strip()
-            lowered = title.lower()
-            if len(title) >= 8 and ("delist" in lowered or "listing" in lowered or " list " in f" {lowered} "):
-                titles.add(title[:500])
-        for title in list(titles)[:80]:
-            lowered = title.lower()
-            event_type = "下架" if "delist" in lowered else "上架"
+        entries = announcement_links(page, url)
+        for entry in entries[:80]:
+            title, event_type, detail_url = entry["title"], entry["event_type"], entry["url"]
+            try:
+                detail_page = fetch_announcement_page(detail_url)
+            except Exception:
+                detail_page = None
             for symbol in announcement_symbols(title):
                 exists = ListingEvent.query.filter_by(exchange=exchange, symbol=symbol, event_type=event_type, title=title, announcement=True).first()
                 if not exists:
-                    db.session.add(ListingEvent(exchange=exchange, symbol=symbol, event_type=event_type, title=title, source_url=url, announcement=True, occurred_at=datetime.now()))
+                    exists = ListingEvent(
+                        exchange=exchange,
+                        symbol=symbol,
+                        event_type=event_type,
+                        title=title,
+                        source_url=detail_url,
+                        announcement=True,
+                        occurred_at=datetime.now(),
+                    )
+                    db.session.add(exists)
+                if detail_page is not None and (exists.effective_at is None or exists.source_url != detail_url):
+                    hydrate_listing_event(exists, detail_url, detail_page)
+                elif detail_page is None and exists.effective_at is None:
+                    exists.effective_time_status = "retry"
+                    exists.details_checked_at = datetime.now()
         db.session.commit()
 
 
@@ -7702,7 +7927,7 @@ def daily_report_thoughts():
 def daily_report_listings():
     cutoff = datetime.now() - timedelta(days=30)
     events = ListingEvent.query.filter(ListingEvent.occurred_at >= cutoff).order_by(ListingEvent.occurred_at.desc()).limit(100).all()
-    return jsonify({"events": [{"exchange": item.exchange, "symbol": item.symbol if "/" in item.symbol else (item.symbol[:-4] + "/USDT" if item.symbol.endswith("USDT") else item.symbol), "type": item.event_type, "title": item.title, "source_url": item.source_url, "occurred_at": item.occurred_at.strftime("%m-%d %H:%M:%S"), "effective_at": item.effective_at.strftime("%Y-%m-%d %H:%M UTC+8") if item.effective_at else None} for item in events], "automation_status": automation_statuses("announcement_scan")})
+    return jsonify({"events": [{"exchange": item.exchange, "symbol": item.symbol if "/" in item.symbol else (item.symbol[:-4] + "/USDT" if item.symbol.endswith("USDT") else item.symbol), "type": item.event_type, "title": item.title, "source_url": item.source_url, "occurred_at": item.occurred_at.strftime("%Y-%m-%d %H:%M UTC+8"), "effective_at": item.effective_at.strftime("%Y-%m-%d %H:%M UTC+8") if item.effective_at else None, "effective_time_status": item.effective_time_status or "pending", "details_checked_at": item.details_checked_at.strftime("%Y-%m-%d %H:%M UTC+8") if item.details_checked_at else None} for item in events], "automation_status": automation_statuses("announcement_scan")})
 
 
 TOKEN_HEDGE_PROFILES = [
@@ -9175,7 +9400,14 @@ with app.app_context():
         if column_name not in market_columns:
             db.session.execute(text(f"ALTER TABLE latest_market_snapshot ADD COLUMN {column_name} FLOAT"))
     listing_event_columns = {column["name"] for column in inspect(db.engine).get_columns("listing_event")}
-    for column_name, column_type in (("title", "VARCHAR(500)"), ("source_url", "VARCHAR(1000)"), ("announcement", "BOOLEAN DEFAULT 0"), ("effective_at", "DATETIME")):
+    for column_name, column_type in (
+        ("title", "VARCHAR(500)"),
+        ("source_url", "VARCHAR(1000)"),
+        ("announcement", "BOOLEAN DEFAULT 0"),
+        ("effective_at", "DATETIME"),
+        ("effective_time_status", "VARCHAR(24) NOT NULL DEFAULT 'pending'"),
+        ("details_checked_at", "DATETIME"),
+    ):
         if column_name not in listing_event_columns:
             db.session.execute(text(f"ALTER TABLE listing_event ADD COLUMN {column_name} {column_type}"))
     daily_horn_columns = {column["name"] for column in inspect(db.engine).get_columns("daily_horn_signal")}

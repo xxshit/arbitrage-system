@@ -776,11 +776,15 @@ TREND_WINDOWS = {
 }
 BACKGROUND_WORKERS_STARTED = False
 EARLY_TREND_SCAN_LOCK = threading.Lock()
+SUDDEN_PUMP_SCAN_LOCK = threading.Lock()
+SUDDEN_PUMP_CONFIRMATIONS = {}
 RUNTIME_RULE_DEFAULTS = [
     {"rule_key": "spot_market_refresh", "category": "实时行情", "label": "现多期空行情刷新", "schedule_type": "interval", "value": "5", "unit": "秒", "min_value": 2, "max_value": 60, "description": "拉取现货与 Binance 合约盘口，刷新开差、平差、基差和报警候选。"},
     {"rule_key": "dual_market_refresh", "category": "实时行情", "label": "期多期空行情刷新", "schedule_type": "interval", "value": "5", "unit": "秒", "min_value": 2, "max_value": 60, "description": "拉取 Binance、Bybit、OKX 合约盘口和套利路径。"},
     {"rule_key": "browser_alert_refresh", "category": "页面显示", "label": "报警弹窗读取", "schedule_type": "interval", "value": "5", "unit": "秒", "min_value": 2, "max_value": 60, "description": "网页只读取服务器已经确认的报警，不重新请求交易所。"},
     {"rule_key": "thought_watch_scan", "category": "走势盯盘", "label": "思路分析盯盘", "schedule_type": "interval", "value": "300", "unit": "秒", "min_value": 60, "max_value": 14400, "description": "扫描思路分析中已加入盯盘的币；仅在出现新结构或判断变化时推送。"},
+    {"rule_key": "sudden_pump_scan", "category": "趋势筛选", "label": "全市场 5MIN 急涨扫描", "schedule_type": "interval", "value": "10", "unit": "秒", "min_value": 5, "max_value": 60, "description": "轻量读取本地5分钟价格桶；候选出现后才向 Binance 复核，捕捉短周期突然点火。"},
+    {"rule_key": "sudden_pump_threshold", "category": "趋势筛选", "label": "5MIN 急涨触发阈值", "schedule_type": "threshold", "value": "15", "unit": "%", "min_value": 5, "max_value": 50, "description": "单根5MIN涨幅达到阈值进入急涨提醒；盘中信号连续确认两次，已收盘信号直接确认。"},
     {"rule_key": "early_trend_scan", "category": "趋势筛选", "label": "全市场五根 30MIN 扫描", "schedule_type": "interval", "value": "1800", "unit": "秒", "min_value": 900, "max_value": 7200, "description": "每根 30MIN K线收盘后扫描全市场；只使用已收盘K线，识别启动前蓄势和五根强启动。"},
     {"rule_key": "daily_trend_push", "category": "每日任务", "label": "日报趋势汇总与推送", "schedule_type": "daily_time", "value": "08:00", "unit": "北京时间", "description": "汇总最新趋势结果并推送确定性最强的三个币；不承担首次发现信号。"},
     {"rule_key": "announcement_scan", "category": "每日任务", "label": "上下架公告抓取", "schedule_type": "daily_time", "value": "08:00", "unit": "北京时间", "description": "读取五家交易所公告，解析公告时间和具体执行时间并保存 MySQL。"},
@@ -1287,6 +1291,7 @@ AUTOMATION_LABELS = {
     "announcement_scan": "上下架公告抓取",
     "daily_horn_scan": "日报趋势扫描",
     "intraday_early_trend_scan": "五根30MIN全市场扫描",
+    "intraday_sudden_pump_scan": "5MIN急涨全市场扫描",
     "daily_lark_trend_push": "日报趋势推送",
     "thought_analysis_push": "思路分析盯盘推送",
     "turnover_basis_watch": "SOON/ZAMA基差换手监控",
@@ -2932,6 +2937,24 @@ def runtime_interval(rule_key, fallback):
         return fallback
 
 
+def runtime_number(rule_key, fallback):
+    """Read an enabled numeric runtime rule without treating it as a duration."""
+    def read_value():
+        row = runtime_rule(rule_key)
+        return (row.enabled, row.value) if row else (False, None)
+    if not has_app_context():
+        with app.app_context():
+            enabled, value = read_value()
+    else:
+        enabled, value = read_value()
+    if not enabled:
+        return fallback
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def runtime_daily_time(rule_key, fallback="08:00"):
     def read_value():
         row = runtime_rule(rule_key)
@@ -3109,6 +3132,7 @@ def create_admin_command(username, password):
 
 def runtime_rule_payload(row):
     status_key = {
+        "sudden_pump_scan": "intraday_sudden_pump_scan",
         "early_trend_scan": "intraday_early_trend_scan",
         "daily_trend_push": "daily_lark_trend_push",
         "announcement_scan": "announcement_scan",
@@ -4912,6 +4936,233 @@ def scan_intraday_early_trends():
         return len(early_signals)
     finally:
         EARLY_TREND_SCAN_LOCK.release()
+
+
+def classify_sudden_pump_stage(change_5m, change_15m, hot_bar_count):
+    """Classify a rapid rise without pretending that momentum alone confirms a safe long entry."""
+    change_5m = float(change_5m or 0)
+    change_15m = float(change_15m or 0)
+    hot_bar_count = int(hot_bar_count or 0)
+    if change_15m >= 50:
+        return {
+            "stage_key": "extreme_15m",
+            "stage_label": "15MIN极端扩张",
+            "stage_rank": 3,
+            "stage_reason": "15分钟累计涨幅已超过50%，说明行情已从点火进入极端扩张。",
+        }
+    if change_15m >= 30 or hot_bar_count >= 2:
+        return {
+            "stage_key": "acceleration",
+            "stage_label": "短线连续加速",
+            "stage_rank": 2,
+            "stage_reason": "单根5MIN急涨后，15分钟累计涨幅继续扩张或再次出现急涨K线，已不只是一次孤立脉冲。",
+        }
+    return {
+        "stage_key": "ignition",
+        "stage_label": "5MIN突然点火",
+        "stage_rank": 1,
+        "stage_reason": f"单根5MIN涨幅达到{change_5m:.2f}%，属于需要立即检查资金结构的短周期点火。",
+    }
+
+
+def sudden_pump_confirmation_ready(symbol, bucket_at, closed_trigger, observed_at=None):
+    """A live candle needs two observations; a completed candle is already time-confirmed."""
+    if closed_trigger:
+        return True
+    observed_at = time.monotonic() if observed_at is None else float(observed_at)
+    key = (symbol, int(bucket_at))
+    state = SUDDEN_PUMP_CONFIRMATIONS.get(key)
+    if not state:
+        SUDDEN_PUMP_CONFIRMATIONS[key] = {"first_seen": observed_at, "last_seen": observed_at, "count": 1}
+        return False
+    state["last_seen"] = observed_at
+    state["count"] += 1
+    return state["count"] >= 2 and observed_at - state["first_seen"] >= 5
+
+
+def fetch_sudden_pump_context(symbol, threshold=15.0):
+    """Verify a local price candidate with Binance 5MIN candles and fetch only its context data."""
+    raw_symbol = symbol.replace("/", "")
+    try:
+        klines = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({
+            "symbol": raw_symbol, "interval": "5m", "limit": 10,
+        }), timeout=5)
+        if len(klines or []) < 5:
+            return None
+        current = klines[-1]
+        closed = klines[:-1]
+        active_change = percent_delta(float(current[4]), float(current[1])) or 0.0
+        closed_change = percent_delta(float(closed[-1][4]), float(closed[-1][1])) or 0.0
+        closed_trigger = closed_change >= threshold and active_change < threshold
+        trigger_row = closed[-1] if closed_trigger else current
+        change_5m = closed_change if closed_trigger else active_change
+        if change_5m < threshold:
+            return None
+        recent = (closed[-2:] + [current]) if not closed_trigger else closed[-3:]
+        change_15m = percent_delta(float(recent[-1][4]), float(recent[0][1])) or 0.0
+        bar_changes = [percent_delta(float(row[4]), float(row[1])) or 0.0 for row in recent]
+        hot_bar_count = sum(1 for value in bar_changes if value >= threshold)
+        cvd = sum(2 * float(row[10]) - float(row[7]) for row in recent)
+        prior_volumes = [float(row[7]) for row in klines[:-3] if float(row[7]) > 0]
+        average_volume = sum(prior_volumes) / len(prior_volumes) if prior_volumes else None
+        volume_ratio = float(trigger_row[7]) / average_volume if average_volume else None
+
+        oi_rows = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({
+            "symbol": raw_symbol, "period": "5m", "limit": 4,
+        }), timeout=5)
+        ratio_rows = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({
+            "symbol": raw_symbol, "period": "5m", "limit": 4,
+        }), timeout=5)
+        oi_change = None
+        ratio_change = None
+        if len(oi_rows or []) >= 2:
+            oi_change = percent_delta(
+                float(oi_rows[-1].get("sumOpenInterest", 0) or 0),
+                float(oi_rows[0].get("sumOpenInterest", 0) or 0),
+            )
+        if len(ratio_rows or []) >= 2:
+            ratio_change = percent_delta(
+                float(ratio_rows[-1].get("longShortRatio", 0) or 0),
+                float(ratio_rows[0].get("longShortRatio", 0) or 0),
+            )
+        stage = classify_sudden_pump_stage(change_5m, change_15m, hot_bar_count)
+        return {
+            "symbol": symbol,
+            "last_price": float(recent[-1][4]),
+            "change_5m": change_5m,
+            "change_15m": change_15m,
+            "hot_bar_count": hot_bar_count,
+            "cvd": cvd,
+            "oi_change": oi_change,
+            "ratio_change": ratio_change,
+            "volume_ratio": volume_ratio,
+            "closed_trigger": closed_trigger,
+            "trigger_bucket": int(trigger_row[0] // 1000),
+            **stage,
+        }
+    except Exception:
+        return None
+
+
+def sudden_pump_rough_candidates(snapshot, threshold=15.0, now_bucket=None):
+    """Use MySQL price buckets to shortlist symbols so full-market scans do not fan out API calls."""
+    groups = snapshot.get("symbols", []) if snapshot else []
+    if not groups:
+        return []
+    now_bucket = now_bucket or int(time.time()) // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
+    symbols = [group["symbol"] for group in groups if not is_rwa_stock_pair(group["symbol"])]
+    rows = FuturesPriceHistory.query.filter(
+        FuturesPriceHistory.symbol.in_(symbols),
+        FuturesPriceHistory.bucket_at >= now_bucket - 20 * 60,
+    ).order_by(FuturesPriceHistory.symbol, FuturesPriceHistory.bucket_at).all()
+    points = {}
+    for row in rows:
+        points.setdefault(row.symbol, {})[row.bucket_at] = row.price
+    candidates = []
+    for group in groups:
+        symbol = group["symbol"]
+        if symbol not in points or is_rwa_stock_pair(symbol):
+            continue
+        current_price = contract_mid_price(group)
+        base = points[symbol].get(now_bucket)
+        previous = points[symbol].get(now_bucket - PRICE_HISTORY_BUCKET_SECONDS)
+        active_change = percent_delta(current_price, base) if base else None
+        closed_change = percent_delta(base, previous) if base and previous else None
+        if (active_change is not None and active_change >= threshold * 0.9) or (closed_change is not None and closed_change >= threshold * 0.9):
+            candidates.append(symbol)
+    return candidates
+
+
+def send_sudden_pump_push(items):
+    """Push one message per meaningful phase in a 30-minute episode."""
+    webhook = os.getenv("LARK_THOUGHT_ANALYSIS_WEBHOOK", "").strip()
+    if not webhook or not items:
+        return False
+    sections = []
+    reserved = []
+    now = datetime.now()
+    stage_ranks = {"ignition": 1, "acceleration": 2, "extreme_15m": 3}
+    for item in items:
+        episode = int(item["trigger_bucket"]) // 1800 * 1800
+        signal_key = f"{episode}:{item['stage_key']}"
+        episode_rows = LarkPushState.query.filter(
+            LarkPushState.channel == "sudden_pump_5m",
+            LarkPushState.symbol == item["symbol"],
+            LarkPushState.signal_key.like(f"{episode}:%"),
+        ).all()
+        highest_sent_rank = max(
+            (stage_ranks.get(row.signal_key.rsplit(":", 1)[-1], 0) for row in episode_rows),
+            default=0,
+        )
+        if highest_sent_rank >= item["stage_rank"]:
+            continue
+        horn = (item.get("oi_change") or 0) > 0 and (item.get("ratio_change") or 0) < 0
+        structure = "持仓增、人数比降，短线犄角同步" if horn else "资金结构尚未形成完整犄角"
+        confirmation = "已收盘5MIN确认" if item.get("closed_trigger") else "盘中连续两次确认"
+        sections.append("\n".join([
+            lark_dot_label(f"↑ 急涨 / {item['stage_label']}", "cus-bull"),
+            f"**{item['symbol']}　短周期突然启动**",
+            f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}｜{confirmation}",
+            f"价格：{lark_price_value(item.get('last_price'))}",
+            f"近5MIN：价格 <font color='cus-bull'>{item['change_5m']:+.2f}%</font>｜近15MIN <font color='cus-bull'>{item['change_15m']:+.2f}%</font>｜急涨K线 {item['hot_bar_count']} 根",
+            f"资金结构：持仓 {lark_plain_value(item.get('oi_change'), 2, '%')}｜多空人数比 {lark_plain_value(item.get('ratio_change'), 2, '%')}｜CVD {lark_cvd_label(item.get('cvd'))}｜量能 {lark_plain_value(item.get('volume_ratio'), 2, 'x')}",
+            f"阶段判断：{item['stage_reason']}{structure}。",
+            "风险提示：这是突然点火提醒，不等于无条件追多；若后续放量滞涨、持仓退出或CVD转弱，要防高位换手。",
+            f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{item['symbol'].replace('/', '')}",
+        ]))
+        reserved.append((item["symbol"], signal_key))
+    if not sections:
+        return False
+    for symbol, signal_key in reserved:
+        db.session.add(LarkPushState(
+            channel="sudden_pump_5m", symbol=symbol, signal_key=signal_key, pushed_at=now
+        ))
+    db.session.commit()
+    try:
+        request_obj = Request(
+            webhook,
+            data=json.dumps(lark_trend_card(sections), ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": "ArbiScope/1.0"},
+        )
+        with urlopen(request_obj, timeout=10) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        return result.get("code", 0) == 0 or result.get("StatusCode", 0) == 0
+    except Exception:
+        return False
+
+
+def scan_intraday_sudden_pumps():
+    """Scan every few seconds locally, and call Binance only for shortlisted rapid movers."""
+    if not SUDDEN_PUMP_SCAN_LOCK.acquire(blocking=False):
+        return 0
+    try:
+        snapshot = load_latest_market_snapshot()
+        if not snapshot:
+            return 0
+        threshold = runtime_number("sudden_pump_threshold", 15.0)
+        symbols = sudden_pump_rough_candidates(snapshot, threshold)
+        if not symbols:
+            return 0
+        verified = []
+        with ThreadPoolExecutor(max_workers=min(4, len(symbols))) as executor:
+            futures = [executor.submit(fetch_sudden_pump_context, symbol, threshold) for symbol in symbols]
+            for future in as_completed(futures):
+                item = future.result()
+                if not item:
+                    continue
+                if sudden_pump_confirmation_ready(
+                    item["symbol"], item["trigger_bucket"], item["closed_trigger"]
+                ):
+                    verified.append(item)
+        cutoff_bucket = int(time.time()) - 20 * 60
+        for key in list(SUDDEN_PUMP_CONFIRMATIONS):
+            if key[1] < cutoff_bucket:
+                SUDDEN_PUMP_CONFIRMATIONS.pop(key, None)
+        if verified:
+            send_sudden_pump_push(sorted(verified, key=lambda item: item["change_15m"], reverse=True))
+        return len(verified)
+    finally:
+        SUDDEN_PUMP_SCAN_LOCK.release()
 
 
 def daily_lark_trend_candidates(report_date):
@@ -9985,6 +10236,22 @@ def background_intraday_early_trend_scan():
         time.sleep(20)
 
 
+def background_intraday_sudden_pump_scan():
+    """Catch 5MIN sudden moves without turning the 30MIN structural scan back into a hot loop."""
+    time.sleep(15)
+    while True:
+        try:
+            with app.app_context():
+                mark_automation_status("intraday_sudden_pump_scan", "started")
+                scan_intraday_sudden_pumps()
+                mark_automation_status("intraday_sudden_pump_scan", "success")
+        except Exception as exc:
+            with app.app_context():
+                db.session.rollback()
+                mark_automation_status("intraday_sudden_pump_scan", "error", exc)
+        time.sleep(runtime_interval("sudden_pump_scan", 10))
+
+
 def background_transfer_network_sync():
     time.sleep(10)
     while True:
@@ -10172,6 +10439,7 @@ def start_background_workers():
     threading.Thread(target=background_index_component_sync, daemon=True, name="index-component-sync").start()
     threading.Thread(target=background_announcement_scan, daemon=True, name="announcement-scan").start()
     threading.Thread(target=background_daily_horn_scan, daemon=True, name="daily-horn-scan").start()
+    threading.Thread(target=background_intraday_sudden_pump_scan, daemon=True, name="intraday-sudden-pump-scan").start()
     threading.Thread(target=background_intraday_early_trend_scan, daemon=True, name="intraday-early-trend-scan").start()
     threading.Thread(target=background_transfer_network_sync, daemon=True, name="transfer-network-sync").start()
     threading.Thread(target=background_thought_analysis_push, daemon=True, name="thought-analysis-push").start()

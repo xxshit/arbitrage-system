@@ -33,6 +33,30 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertIn(".dual-liquidity-row>dd{min-width:0;width:100%}", STYLE_CSS)
         self.assertIn("grid-template-columns:minmax(0,1fr) auto minmax(0,1fr)", STYLE_CSS)
 
+    def test_dual_funding_history_is_nested_below_result(self):
+        source = function_source("dualRowsCompact", "positionFloatingPopup")
+        self.assertIn('class="dual-result-stack"', source)
+        self.assertIn("${dualResultPanel(row)}${dualFundingHistory(row)}", source)
+        self.assertNotIn("dual-funding-history-cell", source)
+
+    def test_dual_sorting_uses_one_title_dropdown(self):
+        source = function_source("dualSortPickerMarkup", "configureDualLayoutShell")
+        self.assertIn('id="dualSortSelect"', source)
+        self.assertIn("dualSortOptions.map", source)
+        for key in (
+            "open_spread", "close_spread", "funding_difference_30d",
+            "binance_basis", "bybit_basis", "okx_basis", "binance_change_7d",
+        ):
+            self.assertIn(key, APP_JS)
+
+    def test_legacy_funding_column_injector_is_disabled(self):
+        source = function_source("ensureDualFundingHistoryHeader", "dualLiquidity")
+        self.assertEqual(source.strip(), "function ensureDualFundingHistoryHeader(){}")
+
+    def test_dual_group_divider_matches_five_column_layout(self):
+        source = function_source("applyGroupFrameClasses", "installGroupFrameObservers")
+        self.assertIn("columns=prefix==='spot'?11:5", source)
+
 
 if __name__ == "__main__":
     unittest.main()

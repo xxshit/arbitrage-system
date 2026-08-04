@@ -5215,6 +5215,8 @@ def thought_snapshot(symbol):
         last = float(ticker.get("lastPrice", 0) or 0)
         oi_first = float(oi[0].get("sumOpenInterestValue", 0) or 0)
         oi_last = float(oi[-1].get("sumOpenInterestValue", 0) or 0)
+        oi_quantity_first = float(oi[0].get("sumOpenInterest", 0) or 0)
+        oi_quantity_last = float(oi[-1].get("sumOpenInterest", 0) or 0)
         ratio_first = float(ratios[0].get("longShortRatio", 0) or 0)
         ratio_last = float(ratios[-1].get("longShortRatio", 0) or 0)
         closed30 = k30[:-1] if len(k30) > 2 else k30
@@ -5234,13 +5236,17 @@ def thought_snapshot(symbol):
                 return {"price_change": None, "oi_change": None, "ratio_change": None, "cvd": None, "volume": None, "volume_ratio": None}
             price_change = percent_delta(float(window_rows[-1][4]), float(window_rows[0][1]))
             oi_change = percent_delta(float(oi_window[-1].get("sumOpenInterestValue", 0) or 0), float(oi_window[0].get("sumOpenInterestValue", 0) or 0))
+            quantity_change = percent_delta(
+                float(oi_window[-1].get("sumOpenInterest", 0) or 0),
+                float(oi_window[0].get("sumOpenInterest", 0) or 0),
+            )
             ratio_change = percent_delta(float(ratio_window[-1].get("longShortRatio", 0) or 0), float(ratio_window[0].get("longShortRatio", 0) or 0))
             cvd_value = sum((2 * float(row[10]) - float(row[7])) for row in window_rows)
             volume = sum(float(row[7]) for row in window_rows)
             prior_rows = closed30[-(candle_count + 10):-candle_count] if len(closed30) >= candle_count + 10 else []
             prior_average = (sum(float(row[7]) for row in prior_rows) / len(prior_rows) * candle_count) if prior_rows else None
             volume_ratio = volume / prior_average if prior_average else None
-            return {"price_change": price_change, "oi_change": oi_change, "ratio_change": ratio_change, "cvd": cvd_value, "volume": volume, "volume_ratio": volume_ratio}
+            return {"price_change": price_change, "oi_change": oi_change, "position_quantity_change": quantity_change, "ratio_change": ratio_change, "cvd": cvd_value, "volume": volume, "volume_ratio": volume_ratio}
         index_price = float(premium.get("indexPrice", 0) or 0)
         mark_price = float(premium.get("markPrice", 0) or 0)
         micro_validation = fetch_t_micro_metrics(raw_symbol) if symbol in {"T/USDT", "AKE/USDT", "ERA/USDT", "SOON/USDT", "ZAMA/USDT"} else {}
@@ -5259,11 +5265,14 @@ def thought_snapshot(symbol):
             "resistance": resistance,
             "oi_value": oi_last,
             "oi_change_pct": percent_delta(oi_last, oi_first),
+            "oi_quantity": oi_quantity_last,
+            "oi_quantity_change_pct": percent_delta(oi_quantity_last, oi_quantity_first),
             "ratio_value": ratio_last,
             "ratio_change_pct": percent_delta(ratio_last, ratio_first),
             "cvd": cvd,
             "change_30m": percent_delta(float(closed30[-1][4]), float(closed30[-13][4])),
             "change_4h": percent_delta(float(closed4h[-1][4]), float(closed4h[-8][4])),
+            "change_24h": float(ticker.get("priceChangePercent", 0) or 0),
             "change_1d": percent_delta(float(closed4h[-1][4]), float(closed4h[-7][1])) if len(closed4h) >= 7 else None,
             "change_3d": percent_delta(float(closed4h[-1][4]), float(closed4h[-19][1])) if len(closed4h) >= 19 else None,
             "funding_rate": float(premium.get("lastFundingRate", 0) or 0) * 100,
@@ -5714,8 +5723,9 @@ def ake_structure_direction(analysis):
         item = row.get(key)
         return default if item is None else item
 
-    oi_down_votes = sum(value(item, "oi_change") <= -1.0 for item in windows)
-    oi_up_votes = sum(value(item, "oi_change") >= 1.0 for item in windows)
+    quantity_changes = [position_quantity_change(item) for item in windows]
+    oi_down_votes = sum(item is not None and item <= -1.0 for item in quantity_changes)
+    oi_up_votes = sum(item is not None and item >= 1.0 for item in quantity_changes)
     ratio_up_votes = sum(value(item, "ratio_change") >= 0.3 for item in windows)
     ratio_down_votes = sum(value(item, "ratio_change") <= -0.3 for item in windows)
     cvd_up_votes = sum(value(item, "cvd") > 0 for item in windows)
@@ -5724,6 +5734,11 @@ def ake_structure_direction(analysis):
     price_down_votes = sum(value(item, "price_change") < -0.4 for item in windows)
     broad_oi_change = analysis.get("oi_change_pct")
     broad_ratio_change = analysis.get("ratio_change_pct")
+    broad_quantity_change = analysis.get("oi_quantity_change_pct")
+    if broad_quantity_change is None:
+        broad_quantity_change = estimated_position_quantity_change(
+            analysis.get("change_24h"), broad_oi_change,
+        )
     # 零轴附近属于噪声区，不能用 +0.004% / -0.099% 这种轻微摆动反复翻转叙事。
     funding_negative = funding is not None and funding <= -0.005
     basis_negative = basis is not None and basis <= -0.10
@@ -5732,8 +5747,9 @@ def ake_structure_direction(analysis):
     funding_not_bearish = funding is None or funding > -0.005
     basis_not_bearish = basis is None or basis > -0.10
     bullish_horn_votes = sum(
-        value(item, "oi_change") >= 0.8 and value(item, "ratio_change") <= -0.3
-        for item in windows
+        quantity_change is not None and quantity_change >= 0.8
+        and value(item, "ratio_change") <= -0.3
+        for item, quantity_change in zip(windows, quantity_changes)
     )
     bullish_flow_votes = sum(
         value(item, "price_change") > 0.4 and value(item, "cvd") > 0
@@ -5743,8 +5759,8 @@ def ake_structure_direction(analysis):
         # 一根短周期线的仓位下降/人数比回升只记为候选，至少两个中短周期共振才确认。
         oi_down_votes >= 2 and ratio_up_votes >= 2
     ) or (
-        broad_oi_change is not None and broad_ratio_change is not None
-        and broad_oi_change <= -5 and broad_ratio_change >= 3
+        broad_quantity_change is not None and broad_ratio_change is not None
+        and broad_quantity_change <= -5 and broad_ratio_change >= 3
     )
 
     # 离开历史卖墙后只看当前资金结构；0.002x 不再充当实时阈值。
@@ -6289,6 +6305,39 @@ def upsert_thought_push_snapshot(symbol, metrics):
     item.updated_at = datetime.now()
 
 
+def estimated_position_quantity_change(price_change, oi_notional_change):
+    """Estimate contract quantity change after removing mark-price repricing.
+
+    Binance ``sumOpenInterestValue`` is quote-currency notional.  Comparing it
+    directly across a large price move confuses repricing with contracts being
+    opened or closed.  For a linear contract, quantity is approximately
+    notional / price, so the relative change is the ratio of those two factors.
+    """
+    if price_change is None or oi_notional_change is None:
+        return None
+    try:
+        price_factor = 1.0 + float(price_change) / 100.0
+        notional_factor = 1.0 + float(oi_notional_change) / 100.0
+    except (TypeError, ValueError):
+        return None
+    if price_factor <= 0 or notional_factor < 0:
+        return None
+    return (notional_factor / price_factor - 1.0) * 100.0
+
+
+def position_quantity_change(item):
+    """Prefer Binance base-quantity OI; fall back to notional/price estimate."""
+    if not item:
+        return None
+    direct = item.get("position_quantity_change")
+    if direct is not None:
+        try:
+            return float(direct)
+        except (TypeError, ValueError):
+            return None
+    return estimated_position_quantity_change(item.get("price_change"), item.get("oi_change"))
+
+
 def thought_horizon_outlook(analysis):
     """Separate short, medium and multi-day direction instead of flattening them into one call."""
     stabilized = analysis.get("_horizon_outlook")
@@ -6314,17 +6363,20 @@ def thought_horizon_outlook(analysis):
             oi = item.get("oi_change")
             ratio = item.get("ratio_change")
             if oi is not None and ratio is not None:
-                if price > 0 and oi > 0 and ratio < 0:
+                quantity_change = position_quantity_change(item)
+                if price > 0 and quantity_change is not None and quantity_change > 0 and ratio < 0:
                     score += 0.8
-                elif price > 0 and oi > 0 and ratio > 0:
+                elif price > 0 and quantity_change is not None and quantity_change > 0 and ratio > 0:
                     # 价格、持仓、人数比一起上升更像追多拥挤或主力借势布空，
                     # 不能仅凭价格与CVD上涨就给出干净的中线偏多。
                     score -= 1.15
-                elif price < 0 and oi > 0 and ratio > 0:
+                elif price < 0 and quantity_change is not None and quantity_change > 0 and ratio > 0:
                     score -= 0.65
-                elif price > 0 and oi < 0:
-                    score -= 0.35
-                elif price < 0 and oi < 0:
+                elif price > 0 and quantity_change is not None and quantity_change < 0:
+                    # 价格上涨、实际仓位数量下降主要由空头回补或去杠杆推动；
+                    # 人数比还在上升时更不能当成新增多头趋势。
+                    score -= 1.25 if ratio > 0 else 0.55
+                elif price < 0 and quantity_change is not None and quantity_change < 0:
                     score += 0.2
             scores.append(score)
         return sum(scores) / len(scores) if scores else None
@@ -6798,13 +6850,116 @@ def thought_window_line(validation, label, key):
     ratio = item.get("ratio_change")
     cvd = item.get("cvd")
     volume_ratio = item.get("volume_ratio")
+    quantity_change = position_quantity_change(item)
     return (
         f"近{label}：价格 {lark_plain_value(price, 2, '%')}，"
-        f"持仓 {lark_plain_value(oi, 2, '%')}，"
+        f"名义持仓 {lark_plain_value(oi, 2, '%')}，"
+        f"估算仓位数量 {lark_plain_value(quantity_change, 2, '%')}，"
         f"多空人数比 {lark_plain_value(ratio, 2, '%')}，"
         f"CVD {lark_compact_number(cvd)}，"
         f"放量 {lark_plain_value(volume_ratio, 2, 'x')}"
     )
+
+
+def thought_primary_position_evidence(analysis):
+    """Build a data-driven position thesis instead of a repeated slogan."""
+    validation = analysis.get("validation") or {}
+    candidates = []
+    for key, label, reliability in (("30m", "30MIN", 0.0), ("1h", "1H", 0.25), ("2h", "2H", 0.5)):
+        item = validation.get(key) or {}
+        price = item.get("price_change")
+        oi = item.get("oi_change")
+        ratio = item.get("ratio_change")
+        quantity = position_quantity_change(item)
+        if None in (price, oi, ratio, quantity):
+            continue
+        score = abs(quantity) * 1.25 + abs(float(ratio)) + abs(float(price)) * 0.35 + reliability
+        candidates.append((score, label, item, quantity))
+    if not candidates:
+        return {
+            "title": "资金结构等待完整样本",
+            "summary": "30MIN/1H/2H 的价格、名义持仓或人数比数据尚不完整，本轮不套用固定结论，等待同周期数据补齐后再判断。",
+            "bias": "watch",
+        }
+
+    _, label, item, quantity = max(candidates, key=lambda row: row[0])
+    price = float(item.get("price_change"))
+    oi = float(item.get("oi_change"))
+    ratio = float(item.get("ratio_change"))
+    cvd = item.get("cvd")
+
+    if quantity >= 0.5:
+        quantity_word = "增加"
+        quantity_explanation = "说明名义持仓的上升不只是币价重估，确有新增合约仓位"
+    elif quantity <= -0.5:
+        quantity_word = "减少"
+        quantity_explanation = "说明名义持仓的变化不能只归因于币价，确有合约仓位退出"
+    else:
+        quantity_word = "基本持平"
+        quantity_explanation = "说明名义持仓变化主要来自币价重估，实际合约数量没有明显增加"
+
+    if ratio >= 0.3:
+        ratio_text = (
+            f"多空人数比同期上升 {ratio:+.2f}%，代表账户结构相对向多头倾斜；"
+            "它既可能来自小账户追多，也可能来自空头账户退出更快，不能单独等同于主力做多"
+        )
+    elif ratio <= -0.3:
+        ratio_text = (
+            f"多空人数比同期下降 {ratio:+.2f}%，代表账户结构相对向空头倾斜；"
+            "若仓位数量同时增加，更接近大资金承接空头对手盘的犄型候选"
+        )
+    else:
+        ratio_text = f"多空人数比同期仅变化 {ratio:+.2f}%，仍在噪声区，不给方向加分"
+
+    if quantity >= 0.5 and ratio <= -0.3:
+        bias = "bull"
+        structure = "实际仓位扩张而人数比下行，偏多犄型正在形成"
+    elif quantity >= 0.5 and ratio >= 0.3 and price <= 0.3:
+        bias = "bear"
+        structure = "实际仓位扩张、人数比上升但价格没有同步走强，更像多头账户增加后被大仓位承接，偏空权重上升"
+    elif quantity <= -0.5 and price < -0.25:
+        bias = "bear"
+        structure = "价格与实际仓位数量同降，去杠杆或多头退出正在发生，结构偏空"
+    elif quantity <= -0.5 and price > 0.25:
+        bias = "watch"
+        structure = "价格上涨但实际仓位数量下降，更像空头回补或高位去杠杆，上涨延续性需要重新确认"
+    elif price > 0.4:
+        bias = "bull"
+        structure = "价格偏强，但仓位和人数比尚未给出完整偏多共振"
+    elif price < -0.4:
+        bias = "bear"
+        structure = "价格偏弱，仓位结构暂未形成有效反证"
+    else:
+        bias = "watch"
+        structure = "价格与仓位结构仍在分歧区，暂不下单边结论"
+
+    if cvd is None:
+        cvd_text = "CVD 本轮缺失，只保留仓位与人数比的主判断"
+    elif float(cvd) > 0:
+        cvd_text = (
+            f"CVD 为 {lark_compact_number(cvd)}，主动买入与偏多主结构同向，增强看涨强度"
+            if bias == "bull"
+            else f"CVD 为 {lark_compact_number(cvd)}，主动买入与当前偏弱结构背离，只能降低看跌确定性，不能覆盖仓位证据"
+        )
+    elif float(cvd) < 0:
+        cvd_text = (
+            f"CVD 为 {lark_compact_number(cvd)}，主动卖出与偏空主结构同向，增强看跌强度"
+            if bias == "bear"
+            else f"CVD 为 {lark_compact_number(cvd)}，主动卖出与当前偏多/分歧结构背离，需要降低看涨权重"
+        )
+    else:
+        cvd_text = "CVD 接近中性，本轮不为方向加分"
+
+    return {
+        "title": f"近{label}估算仓位数量{quantity_word}，人数比{'上升' if ratio >= 0.3 else ('下降' if ratio <= -0.3 else '持平')} ",
+        "summary": (
+            f"近{label}价格 {price:+.2f}%，名义持仓 {oi:+.2f}%；剔除币价影响后，估算实际合约数量 {quantity:+.2f}%，{quantity_explanation}。"
+            f"{ratio_text}。综合来看，{structure}。{cvd_text}。"
+        ),
+        "bias": bias,
+        "label": label,
+        "quantity_change": quantity,
+    }
 
 
 def thought_structure_summary(analysis, direction):
@@ -6973,14 +7128,15 @@ def thought_lark_ake_structure_message(analysis, direction):
     previous_oi = previous.oi_value if previous else None
     previous_price = previous.last_price if previous else None
     live_key_zone = thought_key_zone(analysis)
+    position_evidence = thought_primary_position_evidence(analysis)
 
     if direction == "ake_main_long_unwind_watch":
         header = "方向：<font color='cus-bear'>● 🔵↘️ 看涨明显减弱 / 主力平多观察</font>"
-        title = "AKE思路盯盘：CVD上涨不能单独看多，持仓和人数比已经给出反证"
+        title = f"AKE思路盯盘：{position_evidence['title'].strip()}"
         judgement = (
-            "判断：这次不再只看价格区间。AKE 当前更关键的是资金面结构：持仓下降，同时多空人数比上升。"
-            "按照你的资金面框架，这更像“散户平空、主力平多”，即使 CVD 还在上涨，也可能只是高位主动买入承接或换手，不能把它简单解释成主力继续扫货。"
-            "如果负资费、负基差继续存在，说明多头剧本正在从“拉高逼空”转向“高位换手/出货风险”。"
+            f"判断：{position_evidence['summary']}"
+            "若负资费、负基差继续存在，多头剧本进一步向高位换手/出货风险倾斜；"
+            "若估算仓位数量重新增加、人数比回落且资费/基差修复，才恢复看涨权重。"
         )
         key_zone = live_key_zone + " 若持仓继续降、人数比继续升，即使价格横住，也按看涨减弱处理；只有持仓重新增加、人数比回落、资费/基差修复，才恢复看涨。"
     elif direction == "ake_above_wall_distribution_watch":
@@ -6990,13 +7146,13 @@ def thought_lark_ake_structure_message(analysis, direction):
         key_zone = live_key_zone + " 若近期防守带失守且资费/基差继续为负，看涨剧本降级。"
     elif direction == "ake_above_wall_bull_weakening":
         header = "方向：<font color='cus-bear'>● 🔵↘️ 看涨减弱 / 持仓结构走弱</font>"
-        title = "AKE思路盯盘：价格还在高位，但持仓或主动性开始减弱"
-        judgement = "判断：价格仍处于近期高位，但持仓下降、CVD走弱、负资费或负基差中出现至少一项。这里不能继续用同一句“吸空后继续拉”解释所有波动，应该按当前价格区间观察是否进入换手。"
+        title = f"AKE思路盯盘：{position_evidence['title'].strip()}"
+        judgement = f"判断：{position_evidence['summary']} 资费、基差和近期量能继续作为换手是否扩大的辅助验证。"
         key_zone = live_key_zone + " 只有重新放量站稳近期突破带且持仓不再下降，才恢复偏强。"
     elif direction == "ake_above_wall_bull_continue":
         header = "方向：<font color='cus-bull'>● 🔵⬆️ 看涨增强 / 当前区间延续</font>"
-        title = "AKE思路盯盘：当前高位区的多头结构仍在"
-        judgement = "判断：资费/基差仍支持合约多头，持仓或CVD没有明显破坏。这属于当前价格结构中的延续观察，后续重点看是否放量继续抬高近期低点，而不是拿早期卖墙或单根插针反复解释。"
+        title = f"AKE思路盯盘：{position_evidence['title'].strip()}"
+        judgement = f"判断：{position_evidence['summary']} 只有资费/基差与这组资金结构继续同向，才把当前区间延续升级为更强看涨。"
         key_zone = live_key_zone
     elif direction == "ake_wall_zone_weakening":
         header = "方向：<font color='cus-bear'>● 🔵↘️ 墙区减弱 / 防止假突破</font>"
@@ -7014,7 +7170,7 @@ def thought_lark_ake_structure_message(analysis, direction):
         judgement = "判断：资金结构还没有给出单边确认。当前必须根据最近K线和量能重新定义区间，不能继续沿用早期价格剧本。"
         key_zone = live_key_zone
 
-    oi_line = f"持仓：{lark_compact_number(analysis.get('oi_value'))}"
+    oi_line = f"当前名义持仓：{lark_compact_number(analysis.get('oi_value'))}"
     if previous_oi and analysis.get("oi_value"):
         oi_change = (analysis.get("oi_value") - previous_oi) / previous_oi * 100
         oi_line += f"（较上次推送 {lark_plain_value(oi_change, 2, '%')}）"

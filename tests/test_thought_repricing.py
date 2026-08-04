@@ -9,8 +9,11 @@ from app import (
     ake_structure_direction,
     app,
     classify_early_trend_stage,
+    estimated_position_quantity_change,
+    position_quantity_change,
     send_early_trend_stage_push,
     thought_lark_ake_structure_message,
+    thought_primary_position_evidence,
     thought_push_direction,
     thought_push_has_new_information,
     thought_signal_key,
@@ -46,6 +49,42 @@ class ThoughtRepricingTests(unittest.TestCase):
 
     def test_historical_wall_does_not_drive_live_direction(self):
         self.assertIsNone(ake_orderbook_wall_direction(self.analysis))
+
+    def test_notional_oi_is_adjusted_for_price_repricing(self):
+        self.assertAlmostEqual(estimated_position_quantity_change(100, 100), 0.0)
+        self.assertAlmostEqual(estimated_position_quantity_change(-50, -50), 0.0)
+        self.assertAlmostEqual(estimated_position_quantity_change(0, 25), 25.0)
+        self.assertAlmostEqual(position_quantity_change({
+            "price_change": 100,
+            "oi_change": 100,
+            "position_quantity_change": 12.5,
+        }), 12.5)
+
+    def test_position_evidence_uses_period_values_and_cvd_as_confirmation(self):
+        self.analysis["validation"] = {
+            "30m": {"price_change": -2.0, "oi_change": -8.0, "ratio_change": 3.0, "cvd": -100_000},
+            "1h": {"price_change": -4.0, "oi_change": -12.0, "ratio_change": 5.0, "cvd": -300_000},
+            "2h": {"price_change": -5.0, "oi_change": -15.0, "ratio_change": 7.0, "cvd": -500_000},
+        }
+        evidence = thought_primary_position_evidence(self.analysis)
+        self.assertIn("近2H价格 -5.00%", evidence["summary"])
+        self.assertIn("名义持仓 -15.00%", evidence["summary"])
+        self.assertIn("估算实际合约数量 -10.53%", evidence["summary"])
+        self.assertIn("多空人数比同期上升 +7.00%", evidence["summary"])
+        self.assertIn("主动卖出与偏空主结构同向", evidence["summary"])
+
+    def test_ake_unwind_message_no_longer_uses_fixed_cvd_slogan(self):
+        self.analysis["validation"] = {
+            "30m": {"price_change": -2.0, "oi_change": -8.0, "ratio_change": 3.0, "cvd": 100_000},
+            "1h": {"price_change": -4.0, "oi_change": -12.0, "ratio_change": 5.0, "cvd": 300_000},
+            "2h": {"price_change": -5.0, "oi_change": -15.0, "ratio_change": 7.0, "cvd": 500_000},
+        }
+        with app.app_context():
+            message = thought_lark_ake_structure_message(self.analysis, "ake_main_long_unwind_watch")
+        self.assertIn("近2H价格 -5.00%", message)
+        self.assertIn("估算实际合约数量 -10.53%", message)
+        self.assertIn("主动买入与当前偏弱结构背离", message)
+        self.assertNotIn("CVD上涨不能单独看多，持仓和人数比已经给出反证", message)
 
     def test_basis_noise_around_zero_does_not_flip_bull_structure(self):
         self.analysis["validation"] = {

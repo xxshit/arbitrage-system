@@ -342,6 +342,13 @@ class ChatModuleTests(unittest.TestCase):
         viewer_rule = next(item for item in viewer_rules if item["key"] == "chat_nav_hidden")
         self.assertEqual(viewer_rule["value"], "0")
         self.assertFalse(viewer_rule["editable"])
+        display_rule_indexes = [
+            index for index, item in enumerate(viewer_rules) if item["category"] == "界面显示"
+        ]
+        self.assertEqual(
+            display_rule_indexes,
+            list(range(len(viewer_rules) - len(display_rule_indexes), len(viewer_rules))),
+        )
 
         denied = self.bob.patch(
             "/api/runtime-rules/chat_nav_hidden",

@@ -3199,7 +3199,10 @@ def account_chat_nav_rule_payload(user):
 def runtime_rules_api():
     rows = RuntimeRule.query.order_by(RuntimeRule.category, RuntimeRule.id).all()
     user = current_user()
-    items = [account_chat_nav_rule_payload(user), *[runtime_rule_payload(row) for row in rows]]
+    items = [*[runtime_rule_payload(row) for row in rows], account_chat_nav_rule_payload(user)]
+    items = [item for item in items if item["category"] != "界面显示"] + [
+        item for item in items if item["category"] == "界面显示"
+    ]
     return jsonify({"items": items, "is_admin": user.role == "admin"})
 
 

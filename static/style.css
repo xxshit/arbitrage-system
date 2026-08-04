@@ -256,7 +256,7 @@ aside{overflow-y:auto;scrollbar-width:thin;scrollbar-color:#315f82 #092b52}aside
 .dual-card-funding .dual-sep{color:#9aaabc;font-size:11px;font-style:normal;font-weight:900}
 .dual-card-funding small{color:#61778e;font-size:10px;font-weight:800;white-space:nowrap}
 .dual-exchange-card dl>div:last-child dd{white-space:nowrap}
-.dual-card-liquidity{display:inline-flex;align-items:center;justify-content:flex-end;gap:5px;white-space:nowrap}.dual-card-liquidity>i{color:#9aaabc;font-style:normal;font-weight:900}.dual-card-liquidity .liquidity-metric{display:inline-grid;grid-template-columns:34px 66px;padding:3px 5px;text-align:left}.dual-card-liquidity .liquidity-metric b{font-size:8px}
+.dual-exchange-card dl>.dual-liquidity-row{grid-template-columns:minmax(0,1fr);align-items:stretch;gap:5px}.dual-liquidity-row>dt{text-align:left}.dual-liquidity-row>dd{min-width:0;width:100%}.dual-card-liquidity{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:4px;width:100%;min-width:0;white-space:nowrap}.dual-card-liquidity>i{color:#9aaabc;font-style:normal;font-weight:900}.dual-card-liquidity .liquidity-metric{display:grid;grid-template-columns:minmax(30px,.72fr) minmax(48px,1fr);min-width:0;padding:3px 5px;text-align:left}.dual-card-liquidity .liquidity-metric b{overflow:hidden;font-size:8px;text-overflow:ellipsis}.dual-card-liquidity .liquidity-metric i{overflow:hidden;text-overflow:ellipsis}
 .dual-result-panel{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:10px;border:1px solid #dfe8dc;border-radius:12px;background:linear-gradient(180deg,#fffef8,#f8fbf1);box-shadow:0 5px 16px rgba(36,59,76,.05)}
 .dual-result-panel>div{display:grid;gap:5px;justify-items:center;align-content:start;min-height:72px;padding:9px 6px;border-radius:9px;background:rgba(255,255,255,.74)}
 .dual-result-panel span{color:#60788e;font-size:11px;font-weight:800}
@@ -286,7 +286,7 @@ aside{overflow-y:auto;scrollbar-width:thin;scrollbar-color:#315f82 #092b52}aside
 .dual-redesign-table .dual-exchange-card{gap:7px;padding:10px}
 .dual-redesign-table .dual-exchange-card dl>div{grid-template-columns:112px minmax(0,1fr);gap:6px}
 .dual-redesign-table .dual-card-funding{grid-template-columns:112px minmax(0,1fr) auto auto auto auto;gap:5px}
-.dual-redesign-table .dual-card-liquidity .liquidity-metric{grid-template-columns:31px 61px}
+.dual-redesign-table .dual-card-liquidity .liquidity-metric{grid-template-columns:minmax(30px,.72fr) minmax(48px,1fr)}
 .dual-redesign-table .dual-result-panel{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;padding:8px}
 .dual-redesign-table .dual-result-panel>div{min-height:64px;padding:8px 4px}
 .dual-redesign-table .dual-result-panel b{font-size:13px}

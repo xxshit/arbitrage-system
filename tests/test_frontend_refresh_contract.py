@@ -3,6 +3,7 @@ from pathlib import Path
 
 
 APP_JS = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+STYLE_CSS = (Path(__file__).parents[1] / "static" / "style.css").read_text(encoding="utf-8")
 
 
 def function_source(name, next_name):
@@ -26,6 +27,11 @@ class FrontendRefreshContractTests(unittest.TestCase):
         source = function_source("replaceHtmlKeepingExchangeLogos", "coinglassKlineUrl")
         self.assertIn("syncRenderedChildren", source)
         self.assertNotIn("replaceChildren", source)
+
+    def test_dual_liquidity_boxes_use_bounded_flexible_columns(self):
+        self.assertIn('class="dual-liquidity-row"', APP_JS)
+        self.assertIn(".dual-liquidity-row>dd{min-width:0;width:100%}", STYLE_CSS)
+        self.assertIn("grid-template-columns:minmax(0,1fr) auto minmax(0,1fr)", STYLE_CSS)
 
 
 if __name__ == "__main__":

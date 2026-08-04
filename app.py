@@ -42,7 +42,7 @@ app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0").st
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
 
-CHAT_RETENTION_DAYS = 30
+CHAT_RETENTION_DAYS = 7
 CHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 CHAT_ENCRYPTION_VERSION = 1
 CHAT_TEXT_AAD = b"ArbiScope/chat-message/v1"
@@ -796,7 +796,7 @@ RUNTIME_RULE_DEFAULTS = [
     {"rule_key": "rapid_move_threshold", "category": "报警规则", "label": "30秒速变报警", "schedule_type": "policy", "value": "30秒 / 0.5%", "unit": "规则", "editable": False, "description": "30秒内开差或基差绝对值明显扩大；同一30分钟窗口必须继续扩大才允许续报。"},
     {"rule_key": "funding_retention", "category": "数据保留", "label": "资费历史保留", "schedule_type": "retention", "value": "30", "unit": "天", "editable": False, "description": "最近一个月资金费率留库，超过一个月自动清理。"},
     {"rule_key": "price_retention", "category": "数据保留", "label": "价格快照保留", "schedule_type": "retention", "value": "8", "unit": "天", "editable": False, "description": "涨跌幅计算所需的 Binance 价格快照滚动保留 8 天。"},
-    {"rule_key": "chat_retention", "category": "数据保留", "label": "协作记录保留", "schedule_type": "retention", "value": "30", "unit": "天", "editable": False, "description": "文字消息、图片消息和私有图片文件仅保留最近一个月，过期后自动物理清理。"},
+    {"rule_key": "chat_retention", "category": "数据保留", "label": "协作记录保留", "schedule_type": "retention", "value": str(CHAT_RETENTION_DAYS), "unit": "天", "editable": False, "description": f"文字消息、图片消息和私有图片文件仅保留最近 {CHAT_RETENTION_DAYS} 天，过期后自动物理清理。"},
 ]
 MARKET_REFRESH_METRICS = {
     "network_seconds": 0.0,
@@ -2910,7 +2910,11 @@ def opportunities():
 def seed_runtime_rules():
     existing = {row.rule_key: row for row in RuntimeRule.query.all()}
     for definition in RUNTIME_RULE_DEFAULTS:
-        if definition["rule_key"] in existing:
+        current = existing.get(definition["rule_key"])
+        if current:
+            if definition.get("editable", True) is False:
+                for field in ("category", "label", "schedule_type", "value", "unit", "min_value", "max_value", "editable", "description"):
+                    setattr(current, field, definition.get(field))
             continue
         db.session.add(RuntimeRule(**definition))
     db.session.commit()
@@ -3410,7 +3414,7 @@ def save_chat_image(upload):
 
 
 def cleanup_expired_chat_history(now=None):
-    """Physically remove shared chat messages and private images after 30 days."""
+    """Physically remove shared chat messages and private images after the retention window."""
     cutoff = (now or utc_now_naive()) - timedelta(days=CHAT_RETENTION_DAYS)
     expired_messages = ChatMessage.query.filter(ChatMessage.created_at < cutoff).all()
     if not expired_messages:

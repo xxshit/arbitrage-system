@@ -9,17 +9,20 @@ os.environ["SECRET_KEY"] = "chat-test-secret"
 os.environ["CHAT_ENCRYPTION_KEY"] = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
 
 from app import (
+    CHAT_RETENTION_DAYS,
     ChatAttachment,
     ChatContactRemark,
     ChatMessage,
     ChatMessagePreference,
     ChatViewState,
+    RuntimeRule,
     AccountSecurityEvent,
     UserAccount,
     app,
     backfill_chat_read_times,
     cleanup_expired_chat_history,
     migrate_chat_content_encryption,
+    seed_runtime_rules,
     db,
     session_digest,
 )
@@ -523,20 +526,21 @@ class ChatModuleTests(unittest.TestCase):
         image_response = self.bob.get(f"/api/chat/attachments/{attachment_id}")
         self.assertEqual(image_response.data, image_bytes)
 
-    def test_chat_retention_removes_message_metadata_and_file_after_30_days(self):
+    def test_chat_retention_removes_message_metadata_and_file_after_7_days(self):
+        self.assertEqual(CHAT_RETENTION_DAYS, 7)
         now = datetime(2026, 8, 3, 12, 0, 0)
         with app.app_context():
             old = ChatMessage(
                 sender_id=self.alice_id,
                 recipient_id=self.bob_id,
                 body="过期图片",
-                created_at=now - timedelta(days=31),
+                created_at=now - timedelta(days=8),
             )
             fresh = ChatMessage(
                 sender_id=self.alice_id,
                 recipient_id=self.bob_id,
                 body="仍在保留期",
-                created_at=now - timedelta(days=29),
+                created_at=now - timedelta(days=6),
             )
             db.session.add_all([old, fresh])
             db.session.flush()
@@ -552,7 +556,7 @@ class ChatModuleTests(unittest.TestCase):
             db.session.add(ChatMessagePreference(
                 user_id=self.alice_id,
                 message_id=old.id,
-                pinned_at=now - timedelta(days=30),
+                pinned_at=now - timedelta(days=8),
             ))
             db.session.commit()
             old_id = old.id
@@ -564,6 +568,29 @@ class ChatModuleTests(unittest.TestCase):
             self.assertIsNone(db.session.get(ChatMessage, old_id))
             self.assertIsNone(ChatMessagePreference.query.filter_by(message_id=old_id).first())
             self.assertIsNotNone(db.session.get(ChatMessage, fresh_id))
+
+    def test_fixed_chat_retention_rule_updates_without_overwriting_editable_rules(self):
+        with app.app_context():
+            db.session.add(RuntimeRule(
+                rule_key="chat_retention", category="数据保留", label="协作记录保留",
+                schedule_type="retention", value="30", unit="天", editable=False,
+                description="旧的 30 天说明",
+            ))
+            db.session.add(RuntimeRule(
+                rule_key="spot_market_refresh", category="实时行情", label="现多期空行情刷新",
+                schedule_type="interval", value="9", unit="秒", editable=True,
+                description="用户自定义刷新速度",
+            ))
+            db.session.commit()
+
+            seed_runtime_rules()
+
+            retention = RuntimeRule.query.filter_by(rule_key="chat_retention").one()
+            refresh = RuntimeRule.query.filter_by(rule_key="spot_market_refresh").one()
+            self.assertEqual(retention.value, "7")
+            self.assertIn("最近 7 天", retention.description)
+            self.assertEqual(refresh.value, "9")
+            self.assertEqual(refresh.description, "用户自定义刷新速度")
 
     def test_contact_remark_is_private_encrypted_and_can_be_cleared(self):
         response = self.alice.patch(

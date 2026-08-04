@@ -271,6 +271,36 @@ aside{overflow-y:auto;scrollbar-width:thin;scrollbar-color:#315f82 #092b52}aside
 .dual-redesign-table .basis-sort-controls>div{flex-wrap:wrap}
 .symbol-basis-opening{margin-top:7px}.symbol-basis-opening .basis-opening{padding:5px 7px;border:1px solid #ddcde9;border-radius:7px;background:#fbf6ff}.symbol-basis-opening .basis-opening-empty{display:inline-block;padding:4px 7px;border:1px solid #dce5ee;border-radius:7px;background:#f6fafc;color:#8b9aab;font:800 10px "Segoe UI",Arial,sans-serif}
 
+/* 期多期空：压紧路径卡片，把右侧完整留给多周期资费差。 */
+#dual-futures .dual-redesign-table{min-width:1380px;table-layout:auto}
+#dual-futures .dual-redesign-table th:nth-child(1){width:155px}
+#dual-futures .dual-redesign-table th:nth-child(2){width:130px}
+#dual-futures .dual-redesign-table th:nth-child(3),#dual-futures .dual-redesign-table th:nth-child(4){min-width:285px}
+#dual-futures .dual-redesign-table th:nth-child(5){min-width:185px}
+#dual-futures .dual-redesign-table th:nth-child(6){min-width:255px}
+#dual-futures .dual-redesign-table th:nth-child(n+2),#dual-futures .dual-redesign-table td:nth-child(n+2){padding-left:4px;padding-right:4px}
+#dual-futures .dual-redesign-table .price-change-cell{padding-right:3px!important}
+.dual-redesign-table .dual-leg-cell{min-width:285px;padding-left:3px!important;padding-right:3px!important}
+.dual-redesign-table .dual-result-cell{min-width:185px;padding-left:3px!important;padding-right:3px!important}
+.dual-redesign-table .dual-funding-history-cell{min-width:255px;padding-left:3px!important;padding-right:3px!important;vertical-align:top}
+.dual-redesign-table .dual-exchange-card{gap:7px;padding:10px}
+.dual-redesign-table .dual-exchange-card dl>div{grid-template-columns:112px minmax(0,1fr);gap:6px}
+.dual-redesign-table .dual-card-funding{grid-template-columns:112px minmax(0,1fr) auto auto auto auto;gap:5px}
+.dual-redesign-table .dual-card-liquidity .liquidity-metric{grid-template-columns:31px 61px}
+.dual-redesign-table .dual-result-panel{grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;padding:8px}
+.dual-redesign-table .dual-result-panel>div{min-height:64px;padding:8px 4px}
+.dual-redesign-table .dual-result-panel b{font-size:13px}
+.dual-funding-history{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;padding:8px;border:1px solid #d7e6df;border-radius:12px;background:linear-gradient(180deg,#fffef8,#f2faf5);box-shadow:0 5px 16px rgba(36,59,76,.05)}
+.dual-funding-history>span{display:grid;grid-template-columns:35px minmax(65px,1fr);align-items:center;gap:4px;min-height:34px;padding:6px 7px;border:1px solid #e4ece4;border-radius:8px;background:rgba(255,255,255,.78);text-align:left}
+.dual-funding-history b{color:#657b8e;font-size:10px;font-weight:800}
+.dual-funding-history em{font-size:12px;font-style:normal;font-weight:900;font-variant-numeric:tabular-nums;text-align:left;white-space:nowrap}
+.dual-funding-history small{grid-column:1/-1;color:#7b8d99;font-size:8px;font-weight:700;white-space:normal}
+.dual-funding-history-header>div{display:grid;gap:6px;min-width:250px}
+.dual-funding-history-header>div>span{font-size:11px;letter-spacing:.04em;white-space:nowrap}
+.dual-funding-history-header>div>div{display:grid;grid-template-columns:repeat(3,max-content);justify-content:start;gap:5px}
+.dual-funding-history-header .dual-sort-header{font-size:9px}
+@media(max-width:1450px){#dual-futures .dual-redesign-table{min-width:1320px}#dual-futures .dual-redesign-table th:nth-child(3),#dual-futures .dual-redesign-table th:nth-child(4),.dual-redesign-table .dual-leg-cell{min-width:270px}.dual-redesign-table .dual-exchange-card dl>div{grid-template-columns:100px minmax(0,1fr)}.dual-redesign-table .dual-card-funding{grid-template-columns:100px minmax(0,1fr) auto auto auto auto}}
+
 /* Account-to-account direct chat. Per-user clear state lives in MySQL. */
 .nav-unread{float:right;min-width:19px;height:19px;padding:0 5px;border-radius:10px;background:#ff625d;color:#fff;font-size:10px;font-weight:900;line-height:19px;text-align:center}.nav-unread.hidden{display:none}
 .chat-nav-entry.chat-attention{animation:chat-nav-double-jump 3.2s ease-in-out infinite;transform-origin:center bottom}

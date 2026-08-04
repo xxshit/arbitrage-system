@@ -314,6 +314,18 @@ class FundingRateRecord(db.Model):
     __table_args__ = (db.UniqueConstraint("symbol", "funding_time", name="uq_funding_symbol_time"),)
 
 
+class ExchangeFundingRateRecord(db.Model):
+    """Settled funding history for non-Binance dual-futures legs."""
+    id = db.Column(db.Integer, primary_key=True)
+    exchange = db.Column(db.String(30), nullable=False, index=True)
+    symbol = db.Column(db.String(30), nullable=False, index=True)
+    funding_time = db.Column(db.BigInteger, nullable=False, index=True)
+    funding_rate = db.Column(db.Float, nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint("exchange", "symbol", "funding_time", name="uq_exchange_funding_symbol_time"),
+    )
+
+
 class FuturesPriceHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     symbol = db.Column(db.String(30), nullable=False, index=True)
@@ -690,6 +702,8 @@ DUAL_VIEW_CACHE = {"key": None, "symbols": None}
 FUNDING_HISTORY_CACHE = {}
 FUNDING_STATISTICS_CACHE = {"ts": 0.0, "symbols": frozenset(), "data": {}}
 FUNDING_STATISTICS_LOCK = threading.Lock()
+DUAL_FUNDING_STATISTICS_CACHE = {"ts": 0.0, "key": frozenset(), "data": {}}
+DUAL_FUNDING_STATISTICS_LOCK = threading.Lock()
 LAST_PRICE_HISTORY_BUCKET = None
 BASIS_CANDIDATES = {}
 PUMP_CANDIDATES = {}
@@ -734,6 +748,7 @@ ANNOUNCEMENT_SOURCES = {
 }
 INDEX_COMPONENT_CURSOR = 0
 FUNDING_SYNC_CURSOR = 0
+DUAL_FUNDING_SYNC_CURSOR = 0
 MARKET_REFRESH_SECONDS = 5
 MARKET_DB_PERSIST_SECONDS = 15
 HORN_SCAN_HOUR = 8
@@ -1558,6 +1573,215 @@ def enrich_funding_statistics(groups):
         stats = statistics.get(group["symbol"].replace("/", ""), {})
         for row in group["rows"]:
             row.update({"funding_previous": stats.get("previous"), "funding_24h": stats.get("day_1", 0.0), "funding_3d": stats.get("day_3", 0.0), "funding_7d": stats.get("day_7", 0.0), "funding_30d": stats.get("day_30", 0.0)})
+
+
+def dual_funding_history_targets(snapshot):
+    if not snapshot:
+        return []
+    return sorted({
+        (exchange, group["symbol"])
+        for group in snapshot.get("symbols", [])
+        for row in group.get("rows", [])
+        for exchange in (row.get("long_exchange"), row.get("short_exchange"))
+        if exchange in {"Bybit", "OKX"}
+    })
+
+
+def fetch_exchange_funding_history(exchange, symbol, start_time, end_time):
+    """Fetch settled non-Binance funding rates, newest first, down to start_time."""
+    compact = symbol.replace("/", "")
+    output = []
+    if exchange == "Bybit":
+        cursor_end = end_time
+        for _ in range(8):
+            payload = get_json("https://api.bybit.com/v5/market/funding/history?" + urlencode({
+                "category": "linear", "symbol": compact, "endTime": cursor_end, "limit": 200,
+            }), timeout=5)
+            items = payload.get("result", {}).get("list", [])
+            if not items:
+                break
+            parsed = [
+                (int(item.get("fundingRateTimestamp") or 0), float(item.get("fundingRate") or 0) * 100)
+                for item in items if item.get("fundingRateTimestamp")
+            ]
+            output.extend((timestamp, rate) for timestamp, rate in parsed if start_time <= timestamp <= end_time)
+            oldest = min((timestamp for timestamp, _rate in parsed), default=0)
+            if not oldest or oldest <= start_time:
+                break
+            cursor_end = oldest - 1
+    elif exchange == "OKX":
+        inst_id = symbol.replace("/", "-") + "-SWAP"
+        after = None
+        for _ in range(10):
+            params = {"instId": inst_id, "limit": 100}
+            if after:
+                params["after"] = after
+            payload = get_json("https://www.okx.com/api/v5/public/funding-rate-history?" + urlencode(params), timeout=5)
+            items = payload.get("data", [])
+            if not items:
+                break
+            parsed = []
+            for item in items:
+                timestamp = int(item.get("fundingTime") or 0)
+                raw_rate = item.get("realizedRate")
+                if raw_rate in (None, ""):
+                    raw_rate = item.get("fundingRate")
+                if timestamp and raw_rate not in (None, ""):
+                    parsed.append((timestamp, float(raw_rate) * 100))
+            output.extend((timestamp, rate) for timestamp, rate in parsed if start_time <= timestamp <= end_time)
+            oldest = min((timestamp for timestamp, _rate in parsed), default=0)
+            if not oldest or oldest <= start_time:
+                break
+            after = str(oldest)
+    return list(dict.fromkeys(output))
+
+
+def sync_dual_funding_history(targets):
+    if not targets:
+        return 0
+    now = datetime.now(SHANGHAI_TZ)
+    full_start = int(datetime.combine(now.date() - timedelta(days=29), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
+    end_time = int(now.timestamp() * 1000)
+
+    def fetch_target(target):
+        exchange, symbol = target
+        earliest, latest = db.session.query(
+            func.min(ExchangeFundingRateRecord.funding_time),
+            func.max(ExchangeFundingRateRecord.funding_time),
+        ).filter_by(exchange=exchange, symbol=symbol).one()
+        history_complete = earliest is not None and earliest <= full_start + 12 * 60 * 60 * 1000
+        start_time = max(full_start, (latest or full_start) - 24 * 60 * 60 * 1000) if history_complete else full_start
+        return target, start_time, fetch_exchange_funding_history(exchange, symbol, start_time, end_time)
+
+    fetched = []
+    # Database sessions are not shared with worker threads; determine cursors and fetch serially per small background batch.
+    for target in targets:
+        try:
+            fetched.append(fetch_target(target))
+        except Exception:
+            db.session.rollback()
+    inserted = 0
+    for (exchange, symbol), start_time, rows in fetched:
+        existing = {
+            item[0] for item in db.session.query(ExchangeFundingRateRecord.funding_time).filter(
+                ExchangeFundingRateRecord.exchange == exchange,
+                ExchangeFundingRateRecord.symbol == symbol,
+                ExchangeFundingRateRecord.funding_time >= start_time,
+            ).all()
+        }
+        for funding_time, funding_rate in rows:
+            if funding_time in existing:
+                continue
+            db.session.add(ExchangeFundingRateRecord(
+                exchange=exchange, symbol=symbol, funding_time=funding_time, funding_rate=funding_rate,
+            ))
+            existing.add(funding_time)
+            inserted += 1
+    cutoff = int(datetime.combine(now.date() - timedelta(days=30), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
+    ExchangeFundingRateRecord.query.filter(ExchangeFundingRateRecord.funding_time < cutoff).delete(synchronize_session=False)
+    db.session.commit()
+    DUAL_FUNDING_STATISTICS_CACHE.update({"ts": 0.0, "key": frozenset(), "data": {}})
+    return inserted
+
+
+def calculate_dual_funding_differences(long_records, short_records, now=None):
+    """Net settled funding for a hedge: short receipts minus long payments."""
+    now = now or datetime.now(SHANGHAI_TZ)
+
+    def normalized(records, sign):
+        result = []
+        for item in records:
+            funding_time = item.get("funding_time") if isinstance(item, dict) else item.funding_time
+            funding_rate = item.get("funding_rate") if isinstance(item, dict) else item.funding_rate
+            if funding_time is not None and funding_rate is not None:
+                result.append((int(funding_time), sign * float(funding_rate)))
+        return result
+
+    long_values = normalized(long_records, -1)
+    short_values = normalized(short_records, 1)
+    empty = {"previous": None, "day_1": None, "day_3": None, "day_7": None, "day_30": None}
+    # Both histories must be available before showing a net value; otherwise a partial leg looks like real profit.
+    if not long_values or not short_values:
+        return empty
+    events = long_values + short_values
+    latest_minute = max(timestamp // 60_000 for timestamp, _rate in events)
+    previous = sum(rate for timestamp, rate in events if timestamp // 60_000 == latest_minute)
+    output = {"previous": previous}
+    for days in (1, 3, 7, 30):
+        start = int(datetime.combine(now.date() - timedelta(days=days - 1), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
+        output[f"day_{days}"] = sum(rate for timestamp, rate in events if start <= timestamp <= int(now.timestamp() * 1000))
+    return output
+
+
+def dual_funding_statistics(groups):
+    targets = frozenset(
+        (exchange, group["symbol"])
+        for group in groups
+        for row in group.get("rows", [])
+        for exchange in (row.get("long_exchange"), row.get("short_exchange"))
+        if exchange
+    )
+    now_ts = time.time()
+    if (
+        DUAL_FUNDING_STATISTICS_CACHE["data"]
+        and DUAL_FUNDING_STATISTICS_CACHE["key"] == targets
+        and now_ts - DUAL_FUNDING_STATISTICS_CACHE["ts"] < 60
+    ):
+        return DUAL_FUNDING_STATISTICS_CACHE["data"]
+    with DUAL_FUNDING_STATISTICS_LOCK:
+        now_ts = time.time()
+        if (
+            DUAL_FUNDING_STATISTICS_CACHE["data"]
+            and DUAL_FUNDING_STATISTICS_CACHE["key"] == targets
+            and now_ts - DUAL_FUNDING_STATISTICS_CACHE["ts"] < 60
+        ):
+            return DUAL_FUNDING_STATISTICS_CACHE["data"]
+        now = datetime.now(SHANGHAI_TZ)
+        start_time = int(datetime.combine(now.date() - timedelta(days=29), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
+        symbols = {symbol for _exchange, symbol in targets}
+        records = {}
+        non_binance = ExchangeFundingRateRecord.query.filter(
+            ExchangeFundingRateRecord.symbol.in_(symbols),
+            ExchangeFundingRateRecord.funding_time >= start_time,
+        ).all() if symbols else []
+        for item in non_binance:
+            records.setdefault((item.exchange, item.symbol), []).append(item)
+        canonical_by_compact = {symbol.replace("/", ""): symbol for symbol in symbols}
+        compact_symbols = set(canonical_by_compact)
+        binance_rows = FundingRateRecord.query.filter(
+            FundingRateRecord.symbol.in_(compact_symbols),
+            FundingRateRecord.funding_time >= start_time,
+        ).all() if compact_symbols else []
+        for item in binance_rows:
+            canonical = canonical_by_compact.get(item.symbol)
+            if canonical:
+                records.setdefault(("Binance", canonical), []).append(item)
+        output = {}
+        for group in groups:
+            for row in group.get("rows", []):
+                key = (group["symbol"], row.get("long_exchange"), row.get("short_exchange"))
+                output[key] = calculate_dual_funding_differences(
+                    records.get((row.get("long_exchange"), group["symbol"]), []),
+                    records.get((row.get("short_exchange"), group["symbol"]), []),
+                    now,
+                )
+        DUAL_FUNDING_STATISTICS_CACHE.update({"ts": now_ts, "key": targets, "data": output})
+        return output
+
+
+def enrich_dual_funding_statistics(groups):
+    statistics = dual_funding_statistics(groups)
+    for group in groups:
+        for row in group.get("rows", []):
+            stats = statistics.get((group["symbol"], row.get("long_exchange"), row.get("short_exchange")), {})
+            row.update({
+                "funding_difference_current": row.get("funding_difference"),
+                "funding_difference_previous": stats.get("previous"),
+                "funding_difference_24h": stats.get("day_1"),
+                "funding_difference_3d": stats.get("day_3"),
+                "funding_difference_7d": stats.get("day_7"),
+                "funding_difference_30d": stats.get("day_30"),
+            })
 
 
 def contract_mid_price(group):
@@ -4060,7 +4284,11 @@ def dual_futures():
     symbol_query = raw_symbol_query.replace("/", "").replace("-", "")
     include_bybit_okx = request.args.get("include_bybit_okx", "0") in {"1", "true", "TRUE", "yes", "on"}
     trend_sort_keys = {f"binance_{key}" for key in TREND_WINDOWS}
-    allowed_sort_keys = {"open_spread", "close_spread", "funding_difference", "binance_basis", "bybit_basis", "okx_basis", *trend_sort_keys}
+    funding_sort_keys = {
+        "funding_difference", "funding_difference_previous", "funding_difference_24h",
+        "funding_difference_3d", "funding_difference_7d", "funding_difference_30d",
+    }
+    allowed_sort_keys = {"open_spread", "close_spread", "binance_basis", "bybit_basis", "okx_basis", *funding_sort_keys, *trend_sort_keys}
     sort_by = request.args.get("sort_by", "open_spread")
     sort_direction = request.args.get("sort_direction", "desc")
     if sort_by not in allowed_sort_keys:
@@ -4079,6 +4307,7 @@ def dual_futures():
         enrich_dual_index_overlap(snapshot["symbols"])
         enrich_basis_openings(snapshot["symbols"], "futures_futures")
         DUAL_VIEW_CACHE = {"key": snapshot_key, "symbols": snapshot["symbols"]}
+    enrich_dual_funding_statistics(DUAL_VIEW_CACHE["symbols"])
     mark_announced_delistings(DUAL_VIEW_CACHE["symbols"])
     symbols = [group for group in DUAL_VIEW_CACHE["symbols"] if not is_rwa_stock_pair(group["symbol"])]
     if not include_bybit_okx:
@@ -9641,6 +9870,25 @@ def background_funding_history_sync():
         time.sleep(runtime_interval("funding_history_sync", FUNDING_HISTORY_SYNC_SECONDS))
 
 
+def background_dual_funding_history_sync():
+    global DUAL_FUNDING_SYNC_CURSOR
+    time.sleep(20)
+    while True:
+        try:
+            with app.app_context():
+                targets = dual_funding_history_targets(load_latest_dual_futures_snapshot())
+                if targets:
+                    batch_size = min(12, len(targets))
+                    start = DUAL_FUNDING_SYNC_CURSOR % len(targets)
+                    batch = (targets + targets)[start:start + batch_size]
+                    DUAL_FUNDING_SYNC_CURSOR = (start + len(batch)) % len(targets)
+                    sync_dual_funding_history(batch)
+        except Exception:
+            with app.app_context():
+                db.session.rollback()
+        time.sleep(runtime_interval("funding_history_sync", FUNDING_HISTORY_SYNC_SECONDS))
+
+
 def background_price_history_backfill():
     time.sleep(60)
     while True:
@@ -9919,6 +10167,7 @@ def start_background_workers():
     threading.Thread(target=background_spot_market_refresh, daemon=True, name="spot-market-refresh").start()
     threading.Thread(target=background_dual_market_refresh, daemon=True, name="dual-market-refresh").start()
     threading.Thread(target=background_funding_history_sync, daemon=True, name="funding-history-sync").start()
+    threading.Thread(target=background_dual_funding_history_sync, daemon=True, name="dual-funding-history-sync").start()
     threading.Thread(target=background_price_history_backfill, daemon=True, name="price-history-backfill").start()
     threading.Thread(target=background_index_component_sync, daemon=True, name="index-component-sync").start()
     threading.Thread(target=background_announcement_scan, daemon=True, name="announcement-scan").start()

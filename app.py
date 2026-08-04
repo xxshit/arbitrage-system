@@ -565,6 +565,8 @@ class ChatMessage(db.Model):
     body = db.Column(db.Text, nullable=False)
     encryption_version = db.Column(db.SmallInteger, nullable=False, default=0)
     reply_to_id = db.Column(db.Integer, nullable=True, index=True)
+    recalled_at = db.Column(db.DateTime, nullable=True, index=True)
+    recalled_by_id = db.Column(db.Integer, nullable=True)
     created_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, index=True)
     read_at = db.Column(db.DateTime, nullable=True)
     attachment = db.relationship(
@@ -2957,6 +2959,7 @@ def chat_message_payload(
     attachment = row.attachment
     preference = viewer_preferences.get(row.id)
     reply_row = reply_rows.get(row.reply_to_id) if row.reply_to_id else None
+    recalled = bool(row.recalled_at)
     read_by_peer = bool(
         viewer_id
         and row.sender_id == viewer_id
@@ -2968,18 +2971,25 @@ def chat_message_payload(
         "sender_id": row.sender_id,
         "recipient_id": row.recipient_id,
         "sender": usernames.get(row.sender_id),
-        "body": decrypt_chat_text(row.body, row.encryption_version),
+        "body": "" if recalled else decrypt_chat_text(row.body, row.encryption_version),
+        "recalled": recalled,
+        "recalled_by_me": bool(recalled and viewer_id and row.recalled_by_id == viewer_id),
+        "recalled_at": format_shanghai_time(row.recalled_at),
         "reply": ({
             "id": reply_row.id,
             "sender": usernames.get(reply_row.sender_id) or "对方",
-            "body": decrypt_chat_text(reply_row.body, reply_row.encryption_version)[:160],
-            "has_image": bool(reply_row.attachment),
+            "body": ("原消息已撤回" if reply_row.recalled_at else decrypt_chat_text(reply_row.body, reply_row.encryption_version)[:160]),
+            "has_image": bool(reply_row.attachment and not reply_row.recalled_at),
+            "image_url": (url_for("chat_attachment_api", attachment_id=reply_row.attachment.id) if reply_row.attachment and not reply_row.recalled_at else None),
+            "recalled": bool(reply_row.recalled_at),
             "unavailable": False,
         } if reply_row else ({
             "id": row.reply_to_id,
             "sender": "原消息",
             "body": "原消息已不在保留期",
             "has_image": False,
+            "image_url": None,
+            "recalled": False,
             "unavailable": True,
         } if row.reply_to_id else None)),
         "pinned": bool(preference and preference.pinned_at),
@@ -2989,7 +2999,7 @@ def chat_message_payload(
             "name": attachment.original_name,
             "mime_type": attachment.mime_type,
             "size": attachment.file_size,
-        } if attachment else None),
+        } if attachment and not recalled else None),
         "created_at": format_shanghai_time(row.created_at),
         "read_by_peer": read_by_peer,
         "read_at": format_shanghai_time(read_at),
@@ -3068,7 +3078,7 @@ def chat_users_api():
             "role": peer.role,
             "online": bool(peer.last_seen_at and datetime.now() - peer.last_seen_at < timedelta(minutes=10)),
             "last_seen_at": format_shanghai_time(peer.last_seen_at),
-            "last_message": (("[图片] " if latest.attachment else "") + decrypt_chat_text(latest.body, latest.encryption_version))[:80] if latest else None,
+            "last_message": ("[撤回消息]" if latest and latest.recalled_at else (("[图片] " if latest and latest.attachment else "") + decrypt_chat_text(latest.body, latest.encryption_version))[:80] if latest else None),
             "last_message_at": format_shanghai_time(latest.created_at, "%m-%d %H:%M") if latest else None,
             "last_message_id": latest.id if latest else 0,
             "unread": unread,
@@ -3113,13 +3123,16 @@ def update_chat_contact_remark_api(peer_id):
 
 @app.get("/api/chat/messages/<int:peer_id>")
 def chat_messages_api(peer_id):
+    request_started_at = utc_now_naive()
     user = current_user()
     peer = db.session.get(UserAccount, peer_id)
     if not peer or not peer.active or peer.id == user.id:
         return jsonify({"ok": False, "error": "聊天对象不存在。"}), 404
     after_id = max(0, request.args.get("after_id", 0, type=int) or 0)
     before_id = max(0, request.args.get("before_id", 0, type=int) or 0)
-    if after_id and before_id:
+    around_id = max(0, request.args.get("around_id", 0, type=int) or 0)
+    recalled_after_ms = max(0, request.args.get("recalled_after_ms", 0, type=int) or 0)
+    if sum(bool(value) for value in (after_id, before_id, around_id)) > 1:
         return jsonify({"ok": False, "error": "消息游标不能同时向前和向后读取。"}), 400
     state = chat_state(user.id, peer.id, create=True)
     peer_state = chat_state(peer.id, user.id)
@@ -3138,7 +3151,31 @@ def chat_messages_api(peer_id):
         ~ChatMessage.id.in_(hidden_ids),
         ChatMessage.created_at >= retention_cutoff,
     )
-    if before_id:
+    if around_id:
+        around_row = ChatMessage.query.filter(
+            pair_filter,
+            ChatMessage.id == around_id,
+            ChatMessage.id > cleared_through_id,
+            ~ChatMessage.id.in_(hidden_ids),
+            ChatMessage.created_at >= retention_cutoff,
+        ).first()
+        if not around_row:
+            return jsonify({"ok": False, "error": "原消息已删除或不在保留期。"}), 404
+        before_rows = list(reversed(ChatMessage.query.filter(
+            pair_filter,
+            ChatMessage.id > cleared_through_id,
+            ChatMessage.id < around_id,
+            ~ChatMessage.id.in_(hidden_ids),
+            ChatMessage.created_at >= retention_cutoff,
+        ).order_by(ChatMessage.id.desc()).limit(49).all()))
+        after_rows = ChatMessage.query.filter(
+            pair_filter,
+            ChatMessage.id > around_id,
+            ~ChatMessage.id.in_(hidden_ids),
+            ChatMessage.created_at >= retention_cutoff,
+        ).order_by(ChatMessage.id.asc()).limit(50).all()
+        rows = before_rows + [around_row] + after_rows
+    elif before_id:
         rows = list(reversed(
             ChatMessage.query.filter(
                 pair_filter,
@@ -3152,6 +3189,24 @@ def chat_messages_api(peer_id):
         rows = query.order_by(ChatMessage.id.asc()).limit(page_size).all()
     else:
         rows = list(reversed(query.order_by(ChatMessage.id.desc()).limit(page_size).all()))
+    recalled_rows = []
+    if recalled_after_ms:
+        # MySQL DATETIME may round away sub-second precision. Re-read a short
+        # overlap window so a recall in the same second as the prior poll can
+        # never be skipped; the client applies repeated recall events idempotently.
+        recalled_after = datetime.fromtimestamp(
+            max(0, recalled_after_ms - 5000) / 1000,
+            tz=timezone.utc,
+        ).replace(tzinfo=None)
+        recalled_rows = ChatMessage.query.filter(
+            pair_filter,
+            ChatMessage.id > cleared_through_id,
+            ~ChatMessage.id.in_(hidden_ids),
+            ChatMessage.recalled_at.isnot(None),
+            ChatMessage.recalled_at > recalled_after,
+            ChatMessage.recalled_at <= request_started_at,
+            ChatMessage.created_at >= retention_cutoff,
+        ).order_by(ChatMessage.recalled_at.asc()).all()
     previous_read_id = state.last_read_message_id or 0
     newly_delivered = [row for row in rows if row.recipient_id == user.id and row.id > previous_read_id]
     if newly_delivered:
@@ -3183,7 +3238,7 @@ def chat_messages_api(peer_id):
             ChatMessage.created_at >= retention_cutoff,
         ).first() is not None
     pinned_row = pinned_chat_message(user.id, peer.id, cleared_through_id, retention_cutoff)
-    context_rows = rows + ([pinned_row] if pinned_row and pinned_row not in rows else [])
+    context_rows = rows + recalled_rows + ([pinned_row] if pinned_row and pinned_row not in rows else [])
     viewer_preferences, reply_rows = chat_payload_context(context_rows, user.id)
     usernames = {user.id: user.username, peer.id: peer.username}
     db.session.commit()
@@ -3206,6 +3261,16 @@ def chat_messages_api(peer_id):
             viewer_preferences=viewer_preferences,
             reply_rows=reply_rows,
         ) for row in rows],
+        "recalled_items": [chat_message_payload(
+            row,
+            usernames,
+            viewer_id=user.id,
+            peer_last_read_message_id=peer_last_read_message_id,
+            peer_last_read_at=peer_last_read_at,
+            viewer_preferences=viewer_preferences,
+            reply_rows=reply_rows,
+        ) for row in recalled_rows],
+        "recall_cursor_ms": int(request_started_at.replace(tzinfo=timezone.utc).timestamp() * 1000),
         "pinned": (chat_message_payload(
             pinned_row,
             usernames,
@@ -3257,6 +3322,7 @@ def send_chat_message_api():
             ChatMessage.id == reply_to_id,
             chat_pair_filter(user.id, peer.id),
             ~ChatMessage.id.in_(chat_hidden_message_ids(user.id)),
+            ChatMessage.recalled_at.is_(None),
             ChatMessage.created_at >= utc_now_naive() - timedelta(days=CHAT_RETENTION_DAYS),
         ).first()
         if not reply_row:
@@ -3308,6 +3374,37 @@ def send_chat_message_api():
     })
 
 
+def recall_chat_message(row, user):
+    if row.sender_id != user.id:
+        return None, (jsonify({"ok": False, "error": "只能撤回自己发送的消息。"}), 403)
+    peer_id = row.recipient_id
+    if not row.recalled_at:
+        recalled_at = utc_now_naive()
+        row.recalled_at = recalled_at
+        row.recalled_by_id = user.id
+        row.body = encrypt_chat_text("")
+        row.encryption_version = CHAT_ENCRYPTION_VERSION
+        if row.attachment:
+            row.attachment = None
+        for preference in ChatMessagePreference.query.filter_by(message_id=row.id).all():
+            preference.hidden_at = None
+            preference.pinned_at = None
+            preference.updated_at = recalled_at
+        db.session.commit()
+    viewer_preferences, reply_rows = chat_payload_context([row], user.id)
+    usernames = {
+        user.id: user.username,
+        peer_id: db.session.get(UserAccount, peer_id).username,
+    }
+    return chat_message_payload(
+        row,
+        usernames,
+        viewer_id=user.id,
+        viewer_preferences=viewer_preferences,
+        reply_rows=reply_rows,
+    ), None
+
+
 @app.delete("/api/chat/messages/<int:message_id>")
 def delete_chat_message_api(message_id):
     if not valid_admin_csrf():
@@ -3316,12 +3413,35 @@ def delete_chat_message_api(message_id):
     row = chat_message_for_participant(message_id, user.id)
     if not row:
         return jsonify({"ok": False, "error": "消息不存在或无权操作。"}), 404
+    payload = request.get_json(silent=True) or {}
+    for_everyone = payload.get("for_everyone", False)
+    if not isinstance(for_everyone, bool):
+        return jsonify({"ok": False, "error": "删除选项无效。"}), 400
+    if for_everyone:
+        item, error = recall_chat_message(row, user)
+        if error:
+            return error
+        return jsonify({"ok": True, "message_id": row.id, "recalled": True, "item": item})
     preference = chat_message_preference(user.id, row.id, create=True)
     preference.hidden_at = utc_now_naive()
     preference.pinned_at = None
     preference.updated_at = utc_now_naive()
     db.session.commit()
     return jsonify({"ok": True, "message_id": row.id, "deleted_for_me": True})
+
+
+@app.post("/api/chat/messages/<int:message_id>/recall")
+def recall_chat_message_api(message_id):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    user = current_user()
+    row = chat_message_for_participant(message_id, user.id)
+    if not row:
+        return jsonify({"ok": False, "error": "消息不存在或无权操作。"}), 404
+    item, error = recall_chat_message(row, user)
+    if error:
+        return error
+    return jsonify({"ok": True, "message_id": row.id, "recalled": True, "item": item})
 
 
 @app.patch("/api/chat/messages/<int:message_id>/pin")
@@ -3332,6 +3452,8 @@ def pin_chat_message_api(message_id):
     row = chat_message_for_participant(message_id, user.id)
     if not row:
         return jsonify({"ok": False, "error": "消息不存在或无权操作。"}), 404
+    if row.recalled_at:
+        return jsonify({"ok": False, "error": "撤回提示不能置顶。"}), 400
     payload = request.get_json(silent=True) or {}
     pinned = payload.get("pinned")
     if not isinstance(pinned, bool):
@@ -8993,6 +9115,12 @@ with app.app_context():
         db.session.commit()
     if "reply_to_id" not in chat_message_columns:
         db.session.execute(text("ALTER TABLE chat_message ADD COLUMN reply_to_id INTEGER NULL"))
+        db.session.commit()
+    if "recalled_at" not in chat_message_columns:
+        db.session.execute(text("ALTER TABLE chat_message ADD COLUMN recalled_at DATETIME NULL"))
+        db.session.commit()
+    if "recalled_by_id" not in chat_message_columns:
+        db.session.execute(text("ALTER TABLE chat_message ADD COLUMN recalled_by_id INTEGER NULL"))
         db.session.commit()
     chat_attachment_columns = {column["name"] for column in inspect(db.engine).get_columns("chat_attachment")}
     if "encryption_version" not in chat_attachment_columns:

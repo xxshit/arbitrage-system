@@ -159,6 +159,86 @@ class ChatModuleTests(unittest.TestCase):
         self.assertTrue(alice_data["items"][1]["pinned"])
         self.assertIsNone(self.bob.get(f"/api/chat/messages/{self.alice_id}").get_json()["pinned"])
 
+    def test_sender_can_recall_for_both_sides_and_recipient_receives_the_update(self):
+        sent = self.alice.post(
+            "/api/chat/messages",
+            json={"recipient_id": self.bob_id, "body": "双方都不再显示的原文"},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        ).get_json()["item"]
+        initial = self.bob.get(f"/api/chat/messages/{self.alice_id}").get_json()
+        cursor = initial["recall_cursor_ms"]
+        recalled = self.alice.post(
+            f"/api/chat/messages/{sent['id']}/recall",
+            headers={"X-CSRF-Token": "alice-csrf"},
+        )
+        self.assertEqual(recalled.status_code, 200)
+        self.assertTrue(recalled.get_json()["item"]["recalled_by_me"])
+        poll = self.bob.get(
+            f"/api/chat/messages/{self.alice_id}?after_id={sent['id']}&recalled_after_ms={cursor}"
+        ).get_json()
+        self.assertEqual([item["id"] for item in poll["recalled_items"]], [sent["id"]])
+        self.assertFalse(poll["recalled_items"][0]["recalled_by_me"])
+        self.assertEqual(poll["recalled_items"][0]["body"], "")
+        alice_item = self.alice.get(f"/api/chat/messages/{self.bob_id}").get_json()["items"][-1]
+        bob_item = self.bob.get(f"/api/chat/messages/{self.alice_id}").get_json()["items"][-1]
+        self.assertTrue(alice_item["recalled"])
+        self.assertTrue(bob_item["recalled"])
+        with app.app_context():
+            stored = db.session.get(ChatMessage, sent["id"])
+            self.assertNotIn("双方都不再显示的原文", stored.body)
+            self.assertIsNotNone(stored.recalled_at)
+
+    def test_recipient_cannot_recall_a_message_they_did_not_send(self):
+        sent = self.alice.post(
+            "/api/chat/messages",
+            json={"recipient_id": self.bob_id, "body": "发送者权限"},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        ).get_json()["item"]
+        denied = self.bob.post(
+            f"/api/chat/messages/{sent['id']}/recall",
+            headers={"X-CSRF-Token": "bob-csrf"},
+        )
+        self.assertEqual(denied.status_code, 403)
+        self.assertIn("只能撤回自己", denied.get_json()["error"])
+
+    def test_delete_checkbox_can_recall_the_senders_message_for_everyone(self):
+        sent = self.alice.post(
+            "/api/chat/messages",
+            json={"recipient_id": self.bob_id, "body": "删除框同步撤回"},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        ).get_json()["item"]
+        response = self.alice.delete(
+            f"/api/chat/messages/{sent['id']}",
+            json={"for_everyone": True},
+            headers={"X-CSRF-Token": "alice-csrf"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["recalled"])
+        bob_item = self.bob.get(f"/api/chat/messages/{self.alice_id}").get_json()["items"][-1]
+        self.assertTrue(bob_item["recalled"])
+
+    def test_quoted_message_can_be_loaded_around_its_original_id(self):
+        with app.app_context():
+            rows = [
+                ChatMessage(
+                    sender_id=self.alice_id,
+                    recipient_id=self.bob_id,
+                    body=f"定位消息 {index}",
+                )
+                for index in range(130)
+            ]
+            db.session.add_all(rows)
+            db.session.commit()
+            target_id = rows[5].id
+        latest = self.bob.get(f"/api/chat/messages/{self.alice_id}").get_json()["items"]
+        self.assertNotIn(target_id, [item["id"] for item in latest])
+        around = self.bob.get(
+            f"/api/chat/messages/{self.alice_id}?around_id={target_id}"
+        )
+        self.assertEqual(around.status_code, 200)
+        around_ids = [item["id"] for item in around.get_json()["items"]]
+        self.assertIn(target_id, around_ids)
+
     def test_chat_timestamps_are_utc_plus_8_and_delivery_is_logged(self):
         sent_at = datetime.now(timezone.utc).replace(tzinfo=None)
         expected_full = (sent_at + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
@@ -555,10 +635,19 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn("reply_to_id:replyToId||null", script)
         self.assertIn("function deleteChatMessageForMe", script)
         self.assertIn("function toggleChatMessagePin", script)
+        self.assertIn("function recallChatMessageForEveryone", script)
+        self.assertIn("function applyUnavailableChatReference", script)
+        self.assertIn("function openChatActionConfirm", script)
+        self.assertIn("同时为“${peerName}”撤回", script)
+        self.assertIn("loadChatMessages('around',false,id)", script)
+        self.assertIn("recalled_after_ms", script)
+        self.assertIn("原消息已撤回", script)
         self.assertIn("id=\"chatMessageMenu\"", script)
         self.assertIn(".chat-message-menu", style)
         self.assertIn(".chat-pinned-bar", style)
         self.assertIn(".chat-reply-preview", style)
+        self.assertIn(".chat-confirm-overlay", style)
+        self.assertIn(".chat-recalled", style)
         self.assertIn("updateChatReadReceipts", script)
         self.assertIn("chatNavAttentionPending", script)
         self.assertIn("let chatSoundEnabled=", script)

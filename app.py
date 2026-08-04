@@ -1459,8 +1459,30 @@ def sync_funding_history(symbols):
 
     def fetch_history(symbol):
         recent_start = max(start_time, (latest_times.get(symbol) or start_time) - 24 * 60 * 60 * 1000)
-        url = "https://fapi.binance.com/fapi/v1/fundingRate?" + urlencode({"symbol": symbol, "startTime": recent_start, "endTime": end_time, "limit": 1000})
-        return symbol, get_json(url, timeout=4)
+        # Some cloud routes reject wide start/end queries and requests above 200 rows.
+        # Read stable 200-row pages backwards with endTime; four pages cover 30 days
+        # even when a contract settles hourly.
+        output = []
+        cursor_end = None
+        for _ in range(5):
+            params = {"symbol": symbol, "limit": 200}
+            if cursor_end is not None:
+                params["endTime"] = cursor_end
+            history = get_json(
+                "https://fapi.binance.com/fapi/v1/fundingRate?" + urlencode(params), timeout=4,
+            )
+            if not history:
+                break
+            timestamps = [int(item.get("fundingTime") or 0) for item in history]
+            output.extend(
+                item for item, funding_time in zip(history, timestamps)
+                if recent_start <= funding_time <= end_time
+            )
+            oldest = min((timestamp for timestamp in timestamps if timestamp), default=0)
+            if not oldest or oldest <= recent_start:
+                break
+            cursor_end = oldest - 1
+        return symbol, output
 
     if pending:
         with ThreadPoolExecutor(max_workers=20) as executor:
@@ -8713,6 +8735,101 @@ def gainers_losers():
     return jsonify({"period": period, "updated_at": snapshot["updated_at"], "rising": dedupe(rows, True), "falling": dedupe(rows, False)})
 
 
+DETAIL_FUNDING_EXCHANGES = ("Binance", "Bybit", "OKX")
+
+
+def parse_detail_funding_window(start_value=None, end_value=None, now=None):
+    """Return an inclusive Shanghai calendar-date window as millisecond bounds."""
+    today = (now or datetime.now(SHANGHAI_TZ)).astimezone(SHANGHAI_TZ).date()
+    default_start = today - timedelta(days=7)
+    try:
+        start_date = datetime.strptime(start_value, "%Y-%m-%d").date() if start_value else default_start
+        end_date = datetime.strptime(end_value, "%Y-%m-%d").date() if end_value else today
+    except (TypeError, ValueError) as exc:
+        raise ValueError("日期格式必须为 YYYY-MM-DD") from exc
+    if start_date > end_date:
+        raise ValueError("开始日期不能晚于结束日期")
+    start_at = datetime.combine(start_date, datetime.min.time(), tzinfo=SHANGHAI_TZ)
+    end_exclusive = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=SHANGHAI_TZ)
+    return (
+        int(start_at.timestamp() * 1000),
+        int(end_exclusive.timestamp() * 1000),
+        start_date.isoformat(),
+        end_date.isoformat(),
+    )
+
+
+def detail_funding_records(exchange, symbol, start_time, end_time):
+    """Read one exchange's immutable settled funding records from MySQL."""
+    if exchange == "Binance":
+        return FundingRateRecord.query.filter(
+            FundingRateRecord.symbol == symbol.replace("/", ""),
+            FundingRateRecord.funding_time >= start_time,
+            FundingRateRecord.funding_time < end_time,
+        ).order_by(FundingRateRecord.funding_time.asc()).all()
+    return ExchangeFundingRateRecord.query.filter(
+        ExchangeFundingRateRecord.exchange == exchange,
+        ExchangeFundingRateRecord.symbol == symbol,
+        ExchangeFundingRateRecord.funding_time >= start_time,
+        ExchangeFundingRateRecord.funding_time < end_time,
+    ).order_by(ExchangeFundingRateRecord.funding_time.asc()).all()
+
+
+def compose_detail_funding_events(long_records, short_records=None):
+    """Build oldest-first single-exchange rates or hedge net rates by settlement minute."""
+    events = {}
+
+    def add(records, side, sign):
+        for item in records:
+            funding_time = item.get("funding_time") if isinstance(item, dict) else item.funding_time
+            funding_rate = item.get("funding_rate") if isinstance(item, dict) else item.funding_rate
+            if funding_time is None or funding_rate is None:
+                continue
+            minute = int(funding_time) // 60_000
+            event = events.setdefault(minute, {
+                "funding_time": minute * 60_000,
+                "rate": 0.0,
+                "long_rate": None,
+                "short_rate": None,
+            })
+            rate = float(funding_rate)
+            event[side] = rate
+            event["rate"] += sign * rate
+
+    if short_records is None:
+        add(long_records, "short_rate", 1)
+    else:
+        add(long_records, "long_rate", -1)
+        add(short_records, "short_rate", 1)
+
+    output = []
+    for minute in sorted(events):
+        event = events[minute]
+        local_time = datetime.fromtimestamp(event["funding_time"] / 1000, tz=timezone.utc).astimezone(SHANGHAI_TZ)
+        output.append({
+            **event,
+            "time": local_time.strftime("%Y-%m-%d %H:%M"),
+            "date": local_time.strftime("%Y-%m-%d"),
+        })
+    return output
+
+
+def detail_funding_history_is_continuous(records, start_time, end_time, now=None, max_gap_hours=12):
+    """Reject totals built from a leg whose selected history has a material gap."""
+    timestamps = sorted({
+        int(item.get("funding_time") if isinstance(item, dict) else item.funding_time)
+        for item in records
+        if (item.get("funding_time") if isinstance(item, dict) else item.funding_time) is not None
+    })
+    if not timestamps:
+        return False
+    expected_end = min(int(end_time), int((now or datetime.now(SHANGHAI_TZ)).timestamp() * 1000))
+    max_gap = int(max_gap_hours * 60 * 60 * 1000)
+    if timestamps[0] - int(start_time) > max_gap or expected_end - timestamps[-1] > max_gap:
+        return False
+    return all(current - previous <= max_gap for previous, current in zip(timestamps, timestamps[1:]))
+
+
 @app.get("/api/symbol-detail")
 def symbol_detail():
     symbol = request.args.get("symbol", "").upper().replace("-", "/")
@@ -8720,6 +8837,18 @@ def symbol_detail():
         symbol = symbol.replace("USDT", "") + "/USDT"
     start = request.args.get("start")
     end = request.args.get("end")
+    funding_long_exchange = request.args.get("funding_long_exchange", "").strip()
+    funding_short_exchange = request.args.get("funding_short_exchange", "Binance").strip() or "Binance"
+    if funding_long_exchange and funding_long_exchange not in DETAIL_FUNDING_EXCHANGES:
+        return jsonify({"error": "不支持的做多交易所"}), 400
+    if funding_short_exchange not in DETAIL_FUNDING_EXCHANGES:
+        return jsonify({"error": "不支持的做空交易所"}), 400
+    if funding_long_exchange and funding_long_exchange == funding_short_exchange:
+        return jsonify({"error": "做多与做空交易所不能相同"}), 400
+    try:
+        funding_start_time, funding_end_time, start, end = parse_detail_funding_window(start, end)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     spot_rows = LatestMarketSnapshot.query.filter_by(symbol=symbol).all()
     dual_rows = LatestDualFuturesSnapshot.query.filter_by(symbol=symbol).all()
     spot = [{"exchange": row.long_exchange, "bid": row.long_bid, "ask": row.long_ask, "mid": (row.long_bid + row.long_ask) / 2, "volume_24h": row.spot_volume} for row in spot_rows]
@@ -8730,16 +8859,25 @@ def symbol_detail():
     bn_spot = next((row for row in spot_rows if row.long_exchange == "Binance"), None)
     if bn_spot:
         futures.setdefault("Binance", {"exchange": "Binance", "bid": bn_spot.short_bid, "ask": bn_spot.short_ask, "mid": (bn_spot.short_bid + bn_spot.short_ask) / 2, "basis": bn_spot.basis, "index": None, "volume_24h": bn_spot.futures_volume, "open_interest": bn_spot.futures_open_interest})
-    query = FundingRateRecord.query.filter_by(symbol=symbol.replace("/", ""))
-    try:
-        if start:
-            query = query.filter(FundingRateRecord.funding_time >= int(datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=SHANGHAI_TZ).timestamp() * 1000))
-        if end:
-            query = query.filter(FundingRateRecord.funding_time < int((datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=SHANGHAI_TZ) + timedelta(days=1)).timestamp() * 1000))
-    except ValueError:
-        pass
-    funding_rows = list(reversed(query.order_by(FundingRateRecord.funding_time.desc()).limit(500).all()))
-    funding = [{"time": datetime.fromtimestamp(row.funding_time / 1000, tz=timezone.utc).astimezone(SHANGHAI_TZ).strftime("%m-%d %H:%M"), "date": datetime.fromtimestamp(row.funding_time / 1000, tz=timezone.utc).astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d"), "rate": row.funding_rate} for row in funding_rows]
+    short_funding_rows = detail_funding_records(
+        funding_short_exchange, symbol, funding_start_time, funding_end_time,
+    )
+    long_funding_rows = detail_funding_records(
+        funding_long_exchange, symbol, funding_start_time, funding_end_time,
+    ) if funding_long_exchange else []
+    short_history_complete = detail_funding_history_is_continuous(
+        short_funding_rows, funding_start_time, funding_end_time,
+    )
+    long_history_complete = detail_funding_history_is_continuous(
+        long_funding_rows, funding_start_time, funding_end_time,
+    ) if funding_long_exchange else True
+    funding_complete = short_history_complete and long_history_complete
+    funding = compose_detail_funding_events(
+        long_funding_rows, short_funding_rows,
+    ) if funding_long_exchange and funding_complete else compose_detail_funding_events(short_funding_rows)
+    funding_mode = "difference" if funding_long_exchange else "single"
+    if funding_long_exchange and not funding_complete:
+        funding = []
     funding_daily = {}
     for item in funding:
         funding_daily[item["date"]] = funding_daily.get(item["date"], 0.0) + item["rate"]
@@ -8761,7 +8899,34 @@ def symbol_detail():
         for key, seconds in TREND_WINDOWS.items():
             previous = points.get(now_bucket - seconds)
             trends[key] = (current - previous) / previous * 100 if previous else None
-    return jsonify({"symbol": symbol, "spot": spot, "futures": sorted(futures.values(), key=lambda item: item["exchange"] != "Binance"), "funding": funding, "funding_total": sum(item["rate"] for item in funding), "funding_daily": funding_daily, "binance_index_components": json.loads(component.components_json) if component else [], "trends": trends})
+    funding_message = ""
+    if not funding_complete:
+        incomplete = []
+        if funding_long_exchange and not long_history_complete:
+            incomplete.append(funding_long_exchange)
+        if not short_history_complete:
+            incomplete.append(funding_short_exchange)
+        funding_message = "、".join(incomplete) + " 在所选日期的历史结算记录不完整，等待后台补齐"
+    return jsonify({
+        "symbol": symbol,
+        "spot": spot,
+        "futures": sorted(futures.values(), key=lambda item: item["exchange"] != "Binance"),
+        "funding": funding,
+        "funding_total": sum(item["rate"] for item in funding) if funding_complete else None,
+        "funding_daily": funding_daily,
+        "funding_mode": funding_mode,
+        "funding_long_exchange": funding_long_exchange,
+        "funding_short_exchange": funding_short_exchange,
+        "funding_complete": funding_complete,
+        "funding_message": funding_message,
+        "funding_start": start,
+        "funding_end": end,
+        "funding_actual_start": funding[0]["time"] if funding else None,
+        "funding_actual_end": funding[-1]["time"] if funding else None,
+        "funding_available_exchanges": list(DETAIL_FUNDING_EXCHANGES),
+        "binance_index_components": json.loads(component.components_json) if component else [],
+        "trends": trends,
+    })
 
 
 def positive_binance_funding_streak(symbol, minimum=0.005, periods=3):

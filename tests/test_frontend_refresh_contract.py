@@ -80,6 +80,32 @@ class FrontendRefreshContractTests(unittest.TestCase):
         source = function_source("applyGroupFrameClasses", "installGroupFrameObservers")
         self.assertIn("columns=prefix==='spot'?11:5", source)
 
+    def test_symbol_detail_funding_query_uses_dates_and_both_exchange_sides(self):
+        request_source = function_source("detailFundingRequest", "fundingEventLegs")
+        load_source = function_source("loadSymbolFunding", "openSymbolDetail")
+        self.assertIn("start,end", request_source)
+        self.assertIn("funding_long_exchange:longExchange", request_source)
+        self.assertIn("funding_short_exchange:shortExchange", request_source)
+        self.assertIn("detailFundingStart", load_source)
+        self.assertIn("detailFundingEnd", load_source)
+        self.assertIn("detailFundingLongExchange", load_source)
+        self.assertIn("detailFundingShortExchange", load_source)
+        self.assertIn("renderSymbolFunding(data)", load_source)
+
+    def test_symbol_detail_funding_refresh_updates_only_funding_panel(self):
+        source = function_source("loadSymbolFunding", "openSymbolDetail")
+        self.assertNotIn("modal.innerHTML", source)
+        self.assertNotIn("openSymbolDetail(", source)
+
+    def test_binance_history_backfill_avoids_cloud_blocked_time_parameters(self):
+        app_source = (Path(__file__).parents[1] / "app.py").read_text(encoding="utf-8")
+        start = app_source.index("def sync_funding_history")
+        end = app_source.index("def funding_statistics", start)
+        source = app_source[start:end]
+        self.assertIn('{"symbol": symbol, "limit": 200}', source)
+        self.assertIn('params["endTime"] = cursor_end', source)
+        self.assertNotIn('"startTime": recent_start', source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -302,13 +302,13 @@ aside{overflow-y:auto;scrollbar-width:thin;scrollbar-color:#315f82 #092b52}aside
 @media(max-width:1450px){#dual-futures .dual-redesign-table{min-width:1320px}#dual-futures .dual-redesign-table th:nth-child(3),#dual-futures .dual-redesign-table th:nth-child(4),.dual-redesign-table .dual-leg-cell{min-width:270px}.dual-redesign-table .dual-exchange-card dl>div{grid-template-columns:100px minmax(0,1fr)}.dual-redesign-table .dual-card-funding{grid-template-columns:100px minmax(0,1fr) auto auto auto auto}}
 
 /* 期多期空：资费差收进套利结果下方，标题右侧统一承载全部排序。 */
-#dual-futures .dual-title-group{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
-#dual-futures .dual-title-group .eyebrow{flex-basis:100%;margin-bottom:-5px}
-.dual-sort-picker{display:flex;align-items:center;gap:7px;padding:5px 7px;border:1px solid #c8d9e7;border-radius:9px;background:#f4f9fc;box-shadow:0 3px 10px rgba(41,77,99,.06)}
-.dual-sort-picker label{display:flex;align-items:center;gap:7px;color:#63798c;font-size:10px;font-weight:900}
-.dual-sort-picker select{min-width:150px;height:30px;padding:0 28px 0 9px;border:1px solid #b9cee0;border-radius:7px;background:#fff;color:#163d5b;font:800 11px "Segoe UI",Arial,sans-serif;outline:0;cursor:pointer}
-.dual-sort-picker select:focus{border-color:#4d9ed4;box-shadow:0 0 0 2px rgba(77,158,212,.14)}
-.dual-sort-picker button{height:30px;padding:0 10px;border-color:#9ec6df;border-radius:7px;background:#e7f4fc;color:#176a9c;font-size:10px;font-weight:900;white-space:nowrap}
+#dual-futures .dual-title-group,#spot-futures .spot-title-group{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+#dual-futures .dual-title-group .eyebrow,#spot-futures .spot-title-group .eyebrow{flex-basis:100%;margin-bottom:-5px}
+.dual-sort-picker,.spot-sort-picker{display:flex;align-items:center;gap:7px;padding:5px 7px;border:1px solid #c8d9e7;border-radius:9px;background:#f4f9fc;box-shadow:0 3px 10px rgba(41,77,99,.06)}
+.dual-sort-picker label,.spot-sort-picker label{display:flex;align-items:center;gap:7px;color:#63798c;font-size:10px;font-weight:900}
+.dual-sort-picker select,.spot-sort-picker select{min-width:150px;height:30px;padding:0 28px 0 9px;border:1px solid #b9cee0;border-radius:7px;background:#fff;color:#163d5b;font:800 11px "Segoe UI",Arial,sans-serif;outline:0;cursor:pointer}
+.dual-sort-picker select:focus,.spot-sort-picker select:focus{border-color:#4d9ed4;box-shadow:0 0 0 2px rgba(77,158,212,.14)}
+.dual-sort-picker button,.spot-sort-picker button{height:30px;padding:0 10px;border-color:#9ec6df;border-radius:7px;background:#e7f4fc;color:#176a9c;font-size:10px;font-weight:900;white-space:nowrap}
 #dual-futures .dual-redesign-table{min-width:1190px}
 #dual-futures .dual-redesign-table th:nth-child(1){width:150px}
 #dual-futures .dual-redesign-table th:nth-child(2){width:125px}
@@ -319,8 +319,8 @@ aside{overflow-y:auto;scrollbar-width:thin;scrollbar-color:#315f82 #092b52}aside
 .dual-result-stack{display:grid;gap:7px;align-content:start}
 .dual-result-stack .dual-funding-history{margin:0}
 .dual-result-header{min-height:22px;align-content:center}
-@media(max-width:1300px){#dual-futures .dual-redesign-table{min-width:1110px}#dual-futures .dual-redesign-table th:nth-child(3),#dual-futures .dual-redesign-table th:nth-child(4),.dual-redesign-table .dual-leg-cell{min-width:275px}#dual-futures .dual-redesign-table th:nth-child(5),.dual-redesign-table .dual-result-cell{min-width:260px}.dual-sort-picker select{min-width:135px}}
-@media(max-width:760px){#dual-futures .dual-title-group{align-items:flex-start}.dual-sort-picker{width:100%;box-sizing:border-box;flex-wrap:wrap}.dual-sort-picker label{flex:1 1 190px}.dual-sort-picker select{width:100%;min-width:0}}
+@media(max-width:1300px){#dual-futures .dual-redesign-table{min-width:1110px}#dual-futures .dual-redesign-table th:nth-child(3),#dual-futures .dual-redesign-table th:nth-child(4),.dual-redesign-table .dual-leg-cell{min-width:275px}#dual-futures .dual-redesign-table th:nth-child(5),.dual-redesign-table .dual-result-cell{min-width:260px}.dual-sort-picker select,.spot-sort-picker select{min-width:135px}}
+@media(max-width:760px){#dual-futures .dual-title-group,#spot-futures .spot-title-group{align-items:flex-start}.dual-sort-picker,.spot-sort-picker{width:100%;box-sizing:border-box;flex-wrap:wrap}.dual-sort-picker label,.spot-sort-picker label{flex:1 1 190px}.dual-sort-picker select,.spot-sort-picker select{width:100%;min-width:0}}
 
 /* Account-to-account direct chat. Per-user clear state lives in MySQL. */
 .nav-unread{float:right;min-width:19px;height:19px;padding:0 5px;border-radius:10px;background:#ff625d;color:#fff;font-size:10px;font-weight:900;line-height:19px;text-align:center}.nav-unread.hidden{display:none}

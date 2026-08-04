@@ -28,6 +28,29 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertIn("syncRenderedChildren", source)
         self.assertNotIn("replaceChildren", source)
 
+    def test_market_rows_are_reused_by_stable_exchange_path_key(self):
+        keyed_sync = function_source("syncKeyedRenderedChildren", "replaceHtmlKeepingExchangeLogos")
+        self.assertIn("row.dataset.renderKey", keyed_sync)
+        self.assertIn("currentRows.filter(row=>!row.dataset.renderKey)", keyed_sync)
+        self.assertIn("currentParent.insertBefore(row,cursor)", keyed_sync)
+        spot_rows = function_source("spotRows", "showMarketRefreshCountdown")
+        dual_rows = function_source("dualRowsCompact", "positionFloatingPopup")
+        self.assertIn('data-render-key="spot|${group.symbol}|${row.long_exchange}"', spot_rows)
+        self.assertIn('data-render-key="dual|${group.symbol}|${row.long_exchange}|${row.short_exchange}"', dual_rows)
+
+    def test_spot_sorting_uses_one_title_dropdown(self):
+        picker = function_source("spotSortPickerMarkup", "configureSpotLayoutShell")
+        shell = function_source("configureSpotLayoutShell", "updateSortHeaders")
+        self.assertIn('id="spotSortSelect"', picker)
+        self.assertIn("spotSortOptions.map", picker)
+        self.assertIn(".change-sort-controls", shell)
+        self.assertIn(".funding-sort-controls", shell)
+        self.assertIn(".sort-state-row", shell)
+        for key in (
+            "open_spread", "close_spread", "basis", "funding_30d", "change_7d",
+        ):
+            self.assertIn(key, APP_JS)
+
     def test_dual_liquidity_boxes_use_bounded_flexible_columns(self):
         self.assertIn('class="dual-liquidity-row"', APP_JS)
         self.assertIn(".dual-liquidity-row>dd{min-width:0;width:100%}", STYLE_CSS)

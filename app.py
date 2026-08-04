@@ -1252,7 +1252,14 @@ def scan_exchange_announcements():
 
 
 def announced_delisted_symbols():
-    return {item.symbol for item in ListingEvent.query.filter_by(event_type="下架").all()}
+    symbols = set()
+    for item in ListingEvent.query.filter_by(event_type="下架").all():
+        symbols.update({pair_slash(item.symbol), canonical_market_symbol(item.symbol)})
+    delisted_bases = {pair_base(symbol) for symbol in symbols}
+    for row in symbol_alias_rows():
+        if row.canonical_base.upper() in delisted_bases or row.alias_base.upper() in delisted_bases:
+            symbols.update({row.canonical_symbol, row.alias_symbol})
+    return {symbol for symbol in symbols if symbol}
 
 
 def mark_announced_delistings(groups):
@@ -7928,6 +7935,15 @@ def daily_report_listings():
     cutoff = datetime.now() - timedelta(days=30)
     events = ListingEvent.query.filter(ListingEvent.occurred_at >= cutoff).order_by(ListingEvent.occurred_at.desc()).limit(100).all()
     return jsonify({"events": [{"exchange": item.exchange, "symbol": item.symbol if "/" in item.symbol else (item.symbol[:-4] + "/USDT" if item.symbol.endswith("USDT") else item.symbol), "type": item.event_type, "title": item.title, "source_url": item.source_url, "occurred_at": item.occurred_at.strftime("%Y-%m-%d %H:%M UTC+8"), "effective_at": item.effective_at.strftime("%Y-%m-%d %H:%M UTC+8") if item.effective_at else None, "effective_time_status": item.effective_time_status or "pending", "details_checked_at": item.details_checked_at.strftime("%Y-%m-%d %H:%M UTC+8") if item.details_checked_at else None} for item in events], "automation_status": automation_statuses("announcement_scan")})
+
+
+@app.get("/api/market-metadata/delisted-symbols")
+def market_delisted_symbols():
+    symbols = sorted(announced_delisted_symbols())
+    return jsonify({
+        "symbols": symbols,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
 
 
 TOKEN_HEDGE_PROFILES = [

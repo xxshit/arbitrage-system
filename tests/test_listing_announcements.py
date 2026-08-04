@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime
+from pathlib import Path
 
 from app import (
     announcement_links,
@@ -70,6 +71,17 @@ class ListingAnnouncementTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["event_type"], "下架")
         self.assertEqual(rows[0]["url"], "https://www.bitget.com/support/articles/12560603887528")
+
+    def test_market_pages_share_delisting_warnings_and_stable_exchange_icons(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "static" / "app.js").read_text(encoding="utf-8")
+        styles = (root / "static" / "style.css").read_text(encoding="utf-8")
+        self.assertIn("/api/market-metadata/delisted-symbols", script)
+        self.assertIn("replaceHtmlKeepingExchangeLogos(byId('spotFuturesRows')", script)
+        self.assertIn("replaceHtmlKeepingExchangeLogos(byId('dualFuturesRows')", script)
+        self.assertIn("data-market-symbol", script)
+        self.assertIn(".delisting-symbol::before", styles)
+        self.assertIn('content:"▲"', styles)
 
 
 if __name__ == "__main__":

@@ -1298,6 +1298,7 @@ AUTOMATION_LABELS = {
     "transfer_network_sync": "充提网络同步",
     "index_component_sync": "指数成分同步",
     "chat_retention_cleanup": "协作记录过期清理",
+    "trend_horizon_validation": "AKE多周期趋势验证",
 }
 
 
@@ -8583,6 +8584,8 @@ def daily_report_thoughts():
                 item["trade_status"] = "已停止盯盘 / 历史复盘"
         if item["symbol"] == "AKE/USDT":
             item["horizon_validations"] = trend_horizon_payload("AKE/USDT")
+            item["horizon_summary"] = trend_horizon_summary_payload("AKE/USDT")
+            item["horizon_automation"] = automation_payload("trend_horizon_validation")
             if item["horizon_validations"]:
                 current_plan = item["horizon_validations"]
                 anchor = current_plan[0]["anchor_price"]
@@ -9472,7 +9475,7 @@ def validation_candles(symbol, limit=None, sync=True):
 def validation_auto_metrics(symbol):
     rows = TradeValidationCandle.query.filter_by(
         symbol=symbol, interval=TRADE_VALIDATION_INTERVAL
-    ).order_by(TradeValidationCandle.bucket_at.desc()).limit(60).all()
+    ).order_by(TradeValidationCandle.bucket_at.desc()).limit(864).all()
     rows = list(reversed(rows))
     if len(rows) < 30:
         return None
@@ -9487,6 +9490,9 @@ def validation_auto_metrics(symbol):
 
     cvd_1h = true_cvd(rows[-12:])
     cvd_30m = true_cvd(rows[-6:])
+    cvd_4h = true_cvd(rows[-48:]) if len(rows) >= 48 else None
+    cvd_24h = true_cvd(rows[-288:]) if len(rows) >= 288 else None
+    cvd_3d = true_cvd(rows[-864:]) if len(rows) >= 864 else None
     recent_30m_volume = sum(volumes[-6:])
     prior_30m_volume = sum(volumes[-12:-6])
     recent_1h_volume = sum(volumes[-12:])
@@ -9495,6 +9501,7 @@ def validation_auto_metrics(symbol):
     atr = sum(high - low for high, low in zip(highs[-14:], lows[-14:])) / 14
     raw_symbol = symbol.replace("/", "")
     oi_1h = ratio_1h = oi_4h = ratio_4h = None
+    oi_24h = ratio_24h = oi_3d = ratio_3d = None
     try:
         oi = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 49}), timeout=5)
         ratios = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "5m", "limit": 49}), timeout=5)
@@ -9506,6 +9513,16 @@ def validation_auto_metrics(symbol):
             ratio_values = [float(item.get("longShortRatio", 0) or 0) for item in ratios]
             ratio_1h = percent_delta(ratio_values[-1], ratio_values[-13])
             ratio_4h = percent_delta(ratio_values[-1], ratio_values[0]) if len(ratio_values) >= 49 else None
+        hourly_oi = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "1h", "limit": 73}), timeout=5)
+        hourly_ratios = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "1h", "limit": 73}), timeout=5)
+        if isinstance(hourly_oi, list) and len(hourly_oi) >= 25:
+            hourly_oi_values = [float(item.get("sumOpenInterest", 0) or 0) for item in hourly_oi]
+            oi_24h = percent_delta(hourly_oi_values[-1], hourly_oi_values[-25])
+            oi_3d = percent_delta(hourly_oi_values[-1], hourly_oi_values[0]) if len(hourly_oi_values) >= 73 else None
+        if isinstance(hourly_ratios, list) and len(hourly_ratios) >= 25:
+            hourly_ratio_values = [float(item.get("longShortRatio", 0) or 0) for item in hourly_ratios]
+            ratio_24h = percent_delta(hourly_ratio_values[-1], hourly_ratio_values[-25])
+            ratio_3d = percent_delta(hourly_ratio_values[-1], hourly_ratio_values[0]) if len(hourly_ratio_values) >= 73 else None
     except Exception:
         pass
     return {
@@ -9517,8 +9534,13 @@ def validation_auto_metrics(symbol):
         "price_30m": percent_delta(closes[-1], closes[-7]) or 0,
         "price_1h": percent_delta(closes[-1], closes[-13]) or 0,
         "price_4h": percent_delta(closes[-1], closes[-49]) if len(closes) >= 49 else 0,
+        "price_24h": percent_delta(closes[-1], closes[-289]) if len(closes) >= 289 else None,
+        "price_3d": percent_delta(closes[-1], closes[-864]) if len(closes) >= 864 else None,
         "cvd_30m": cvd_30m,
         "cvd_1h": cvd_1h,
+        "cvd_4h": cvd_4h,
+        "cvd_24h": cvd_24h,
+        "cvd_3d": cvd_3d,
         "volume_1h": recent_1h_volume,
         "volume_ratio_30m": recent_30m_volume / prior_30m_volume if prior_30m_volume > 0 else None,
         "volume_ratio_1h": recent_1h_volume / prior_1h_volume if prior_1h_volume > 0 else None,
@@ -9527,6 +9549,10 @@ def validation_auto_metrics(symbol):
         "oi_4h": oi_4h,
         "ratio_1h": ratio_1h,
         "ratio_4h": ratio_4h,
+        "oi_24h": oi_24h,
+        "oi_3d": oi_3d,
+        "ratio_24h": ratio_24h,
+        "ratio_3d": ratio_3d,
     }
 
 
@@ -9542,6 +9568,181 @@ def horizon_move_pct(direction, price, anchor):
         return 0.0
     raw = percent_delta(price, anchor) or 0.0
     return raw if direction == "long" else -raw
+
+
+def trend_horizon_outcome(plan):
+    """Return a conservative result without rewriting the original hypothesis."""
+    first_hit = getattr(plan, "first_hit", None)
+    if first_hit == "take_profit":
+        return "correct"
+    if first_hit == "hard_stop":
+        return "wrong"
+    if first_hit == "ambiguous_same_candle":
+        return "inconclusive"
+    if getattr(plan, "status", "active") != "completed":
+        return "pending"
+    move = horizon_move_pct(
+        getattr(plan, "direction", "long"),
+        getattr(plan, "latest_price", None),
+        getattr(plan, "anchor_price", None),
+    )
+    if move >= 0.75:
+        return "correct"
+    if move <= -0.75:
+        return "wrong"
+    return "unresolved"
+
+
+def trend_horizon_statistics(rows):
+    result = {
+        "total": len(rows),
+        "correct": 0,
+        "wrong": 0,
+        "inconclusive": 0,
+        "unresolved": 0,
+        "pending": 0,
+        "accuracy": None,
+        "avg_mfe": 0.0,
+        "avg_mae": 0.0,
+    }
+    for row in rows:
+        outcome = trend_horizon_outcome(row)
+        result[outcome] = result.get(outcome, 0) + 1
+    decided = result["correct"] + result["wrong"]
+    result["accuracy"] = round(result["correct"] / decided * 100, 1) if decided else None
+    if rows:
+        result["avg_mfe"] = round(sum(float(getattr(row, "max_favorable_pct", 0) or 0) for row in rows) / len(rows), 2)
+        result["avg_mae"] = round(sum(float(getattr(row, "max_adverse_pct", 0) or 0) for row in rows) / len(rows), 2)
+    return result
+
+
+def ake_horizon_calibration(horizon):
+    rows = TrendHorizonValidation.query.filter_by(
+        symbol="AKE/USDT", horizon=horizon, status="completed"
+    ).order_by(TrendHorizonValidation.anchor_at.desc()).limit(12).all()
+    stats = trend_horizon_statistics(rows)
+    stats["stop_recovery_count"] = sum(
+        row.path_state in {"stop_then_recovery", "stop_then_target"} for row in rows
+    )
+    stats["near_target_reversal_count"] = sum(
+        row.path_state == "near_target_then_reversal" for row in rows
+    )
+    return stats
+
+
+def _metric_direction_score(price_change, cvd_value, oi_change, ratio_change):
+    score = 0.0
+    reasons = []
+    if price_change is not None:
+        price_weight = min(16.0, max(4.0, abs(float(price_change)) * 2.2))
+        score += price_weight if price_change > 0 else (-price_weight if price_change < 0 else 0)
+        reasons.append(f"价格 {price_change:+.2f}%")
+    if cvd_value is not None:
+        cvd_weight = 11.0
+        score += cvd_weight if cvd_value > 0 else (-cvd_weight if cvd_value < 0 else 0)
+        reasons.append(f"CVD{'上涨' if cvd_value > 0 else '下跌' if cvd_value < 0 else '持平'}")
+    if oi_change is not None:
+        reasons.append(f"实际仓位 {oi_change:+.2f}%")
+    if ratio_change is not None:
+        reasons.append(f"人数比 {ratio_change:+.2f}%")
+    if oi_change is not None and ratio_change is not None:
+        if oi_change > 0.35 and ratio_change < -0.45:
+            score += 18.0
+            reasons.append("偏多犄角成立")
+        elif oi_change > 0.35 and ratio_change > 0.45:
+            score -= 7.0
+            reasons.append("追多账户与仓位同增，需防拥挤或诱多")
+        elif oi_change < -0.75:
+            score *= 0.78
+            reasons.append("仓位去杠杆，趋势确定度降低")
+    return score, reasons
+
+
+def build_ake_horizon_definitions(price, atr, support, resistance, metrics, calibrations):
+    horizon_inputs = {
+        "short": {
+            "price": ((metrics.get("price_30m") or 0) + (metrics.get("price_1h") or 0)) / 2,
+            "cvd": metrics.get("cvd_1h"),
+            "oi": metrics.get("oi_1h"),
+            "ratio": metrics.get("ratio_1h"),
+            "target_atr": 1.05,
+            "soft_atr": 1.35,
+            "hard_atr": 2.20,
+            "recent_high": metrics.get("high_30m"),
+            "recent_low": metrics.get("low_30m"),
+        },
+        "medium": {
+            "price": metrics.get("price_4h"),
+            "cvd": metrics.get("cvd_4h"),
+            "oi": metrics.get("oi_4h"),
+            "ratio": metrics.get("ratio_4h"),
+            "target_atr": 3.20,
+            "soft_atr": 2.80,
+            "hard_atr": 4.40,
+            "recent_high": resistance,
+            "recent_low": support,
+        },
+        "long": {
+            "price": metrics.get("price_3d") if metrics.get("price_3d") is not None else metrics.get("price_24h"),
+            "cvd": metrics.get("cvd_3d") if metrics.get("cvd_3d") is not None else metrics.get("cvd_24h"),
+            "oi": metrics.get("oi_3d") if metrics.get("oi_3d") is not None else metrics.get("oi_24h"),
+            "ratio": metrics.get("ratio_3d") if metrics.get("ratio_3d") is not None else metrics.get("ratio_24h"),
+            "target_atr": 6.50,
+            "soft_atr": 5.20,
+            "hard_atr": 8.20,
+            "recent_high": resistance,
+            "recent_low": support,
+        },
+    }
+    definitions = {}
+    for horizon, values in horizon_inputs.items():
+        score, reasons = _metric_direction_score(
+            values["price"], values["cvd"], values["oi"], values["ratio"]
+        )
+        direction = "long" if score >= 0 else "short"
+        calibration = calibrations.get(horizon) or {}
+        accuracy = calibration.get("accuracy")
+        confidence = 50.0 + min(30.0, abs(score) * 0.72)
+        if accuracy is not None:
+            confidence += max(-8.0, min(6.0, (accuracy - 50.0) * 0.16))
+        confidence = round(max(45.0, min(84.0, confidence)), 1)
+        target_atr = values["target_atr"]
+        hard_atr = values["hard_atr"]
+        calibration_notes = []
+        if calibration.get("near_target_reversal_count", 0):
+            target_atr *= 0.90
+            calibration_notes.append("历史出现接近目标后反转，本批止盈收近10%")
+        if calibration.get("stop_recovery_count", 0):
+            hard_atr *= 1.10
+            calibration_notes.append("历史出现扫损后恢复，本批硬止损放宽10%")
+        recent_high = float(values.get("recent_high") or price)
+        recent_low = float(values.get("recent_low") or price)
+        if direction == "long":
+            take_profit = max(price + atr * target_atr, resistance * 1.003 if resistance > price else 0)
+            soft_stop = min(price - atr * values["soft_atr"], recent_low * 0.998 if recent_low < price else price)
+            hard_stop = min(price - atr * hard_atr, support * 0.995 if support < price else price)
+            invalidation = "价格有效跌破结构硬止损，且CVD与实际仓位数量同步转弱，才确认本周期偏多假设失效。"
+            direction_text = "偏多"
+        else:
+            take_profit = min(price - atr * target_atr, support * 0.997 if 0 < support < price else price)
+            soft_stop = max(price + atr * values["soft_atr"], recent_high * 1.002 if recent_high > price else price)
+            hard_stop = max(price + atr * hard_atr, resistance * 1.005 if resistance > price else price)
+            invalidation = "价格有效站上结构硬止损，且CVD与实际仓位数量同步转强，才确认本周期偏空假设失效。"
+            direction_text = "偏空"
+        reason_text = "、".join(reasons) if reasons else "当前周期有效数据不足"
+        calibration_text = "；" + "；".join(calibration_notes) if calibration_notes else ""
+        definitions[horizon] = {
+            "direction": direction,
+            "confidence": confidence,
+            "tp": max(float(take_profit), price * 0.20),
+            "soft": max(float(soft_stop), price * 0.10),
+            "hard": max(float(hard_stop), price * 0.10),
+            "hypothesis": f"{TREND_HORIZON_META[horizon]['window']} 独立立案：{reason_text}，综合暂定{direction_text}，不允许被更短周期单根K线直接改写{calibration_text}。",
+            "invalid": invalidation,
+            "score": round(score, 2),
+            "calibration": calibration,
+        }
+    return definitions
 
 
 def trend_horizon_event(plan, event_type, observed_at, price=None, detail=None):
@@ -9577,9 +9778,19 @@ def trend_horizon_review_text(plan, final=False):
         extra = "；先按预期运行后又反转，需检讨止盈是否过远或是否错过数据先行转弱"
     elif plan.path_state == "near_target_then_reversal":
         extra = "；曾接近目标但未到达便反转，需检查目标设置和移动保护规则"
+    outcome_text = ""
+    if final:
+        outcome_labels = {
+            "correct": "方向与路径判定有效",
+            "wrong": "方向或失效边界错误",
+            "inconclusive": "同根K线无法确认先后，不计准确率",
+            "unresolved": "周期内波动不足，暂不计准确率",
+            "pending": "仍在验证",
+        }
+        outcome_text = f"；结果：{outcome_labels.get(trend_horizon_outcome(plan), '等待归因')}"
     return (
         f"{prefix}：{path}；最大有利 {plan.max_favorable_pct:+.2f}%，"
-        f"最大不利 {plan.max_adverse_pct:+.2f}%{extra}。"
+        f"最大不利 {plan.max_adverse_pct:+.2f}%{extra}{outcome_text}。"
     )
 
 
@@ -9684,7 +9895,9 @@ def create_ake_horizon_template(force=False):
             row.status = "replaced"
             row.final_review = "由更新后的当前结构重新定价，旧批次停止继续验证。"
     sync_trade_validation_candles("AKE/USDT")
-    metrics = validation_auto_metrics("AKE/USDT") or {}
+    metrics = validation_auto_metrics("AKE/USDT")
+    if not metrics:
+        raise RuntimeError("AKE 最近K线不足，暂不建立没有证据的多周期计划")
     snapshot = thought_snapshot("AKE/USDT")
     price = float(snapshot.get("last") or metrics.get("price") or 0)
     if price <= 0:
@@ -9692,6 +9905,7 @@ def create_ake_horizon_template(force=False):
     atr = max(float(metrics.get("atr") or 0), price * 0.025)
     support = float(snapshot.get("support") or metrics.get("low_1h") or price * 0.94)
     resistance = float(snapshot.get("resistance") or metrics.get("high_1h") or price * 1.08)
+    calibrations = {horizon: ake_horizon_calibration(horizon) for horizon in TREND_HORIZON_META}
     evidence = {
         "anchor_price": price,
         "support": support,
@@ -9700,35 +9914,13 @@ def create_ake_horizon_template(force=False):
         "basis": snapshot.get("basis"),
         "validation": snapshot.get("validation") or {},
         "metrics": metrics,
+        "calibrations": calibrations,
         "captured_at": now.strftime("%Y-%m-%d %H:%M:%S"),
     }
     batch_key = f"AKE-{now.strftime('%Y%m%d%H%M%S')}"
-    definitions = {
-        "short": {
-            "direction": "short", "confidence": 68,
-            "tp": min(support * 0.992, price - atr * 0.85),
-            "soft": max(float(metrics.get("high_30m") or 0), price + atr * 1.25),
-            "hard": max(float(metrics.get("high_1h") or 0), price + atr * 2.15),
-            "hypothesis": "30MIN/1H 价格与主动成交同步转弱，持仓回落且人数比回升，短线先按反弹后的弱势延续验证；但5MIN仍可能反抽，因此只把收回近30MIN高点视作软警戒。",
-            "invalid": "连续5分钟收盘站稳硬止损上方，并伴随CVD转正、持仓恢复，才确认短线看空失效。",
-        },
-        "medium": {
-            "direction": "short", "confidence": 58,
-            "tp": min(price * 0.90, support - atr * 1.25),
-            "soft": max(resistance * 0.985, price + atr * 2.6),
-            "hard": max(resistance * 1.02, price + atr * 4.0),
-            "hypothesis": "2H/4H仍保留正CVD和此前涨幅，不能把一小时回落机械外推；但OI退潮、人数比结构走坏，暂按高位换手后的中线震荡偏空验证，置信度低于短线。",
-            "invalid": "4H价格重新放量创新高，且OI与CVD同步恢复，说明去杠杆后重新吸筹，中线偏空假设被推翻。",
-        },
-        "long": {
-            "direction": "short", "confidence": 52,
-            "tp": min(price * 0.78, support - atr * 3.2),
-            "soft": max(resistance, price + atr * 4.8),
-            "hard": max(resistance * 1.10, price + atr * 7.0),
-            "hypothesis": "1D-3D仍是大涨后的高位结构，长期趋势尚未确认反转；仅以OI明显退潮和高位换手作为低置信度派发假设，验证未来1-3天是否逐步回吐，而不是现在就认定必跌。",
-            "invalid": "日内放量突破当前结构高点，随后回踩缩量且OI/CVD重新共振上行，则派发假设失效，改按新一轮主升评估。",
-        },
-    }
+    definitions = build_ake_horizon_definitions(
+        price, atr, support, resistance, metrics, calibrations
+    )
     for horizon, item in definitions.items():
         meta = TREND_HORIZON_META[horizon]
         row = TrendHorizonValidation(
@@ -9753,6 +9945,52 @@ def create_ake_horizon_template(force=False):
         db.session.add(row)
     db.session.commit()
     return batch_key
+
+
+def ensure_ake_horizon_validation():
+    active = TrendHorizonValidation.query.filter_by(symbol="AKE/USDT", status="active").order_by(
+        TrendHorizonValidation.anchor_at.desc()
+    ).first()
+    if active:
+        return active.batch_key, False
+    batch_key = create_ake_horizon_template()
+    return batch_key, True
+
+
+def trend_horizon_summary_payload(symbol):
+    completed = TrendHorizonValidation.query.filter_by(symbol=symbol, status="completed").order_by(
+        TrendHorizonValidation.anchor_at.desc()
+    ).all()
+    overall = trend_horizon_statistics(completed)
+    per_horizon = {
+        horizon: trend_horizon_statistics([row for row in completed if row.horizon == horizon])
+        for horizon in TREND_HORIZON_META
+    }
+    batches = []
+    rows = TrendHorizonValidation.query.filter_by(symbol=symbol).order_by(
+        TrendHorizonValidation.anchor_at.desc(), TrendHorizonValidation.id
+    ).all()
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row.batch_key, []).append(row)
+    for batch_key, batch_rows in list(grouped.items())[:6]:
+        first = batch_rows[0]
+        batches.append({
+            "batch_key": batch_key,
+            "anchor_at": first.anchor_at.strftime("%Y-%m-%d %H:%M"),
+            "anchor_price": first.anchor_price,
+            "status": "active" if any(row.status == "active" for row in batch_rows) else "completed",
+            "plans": [{
+                "horizon": row.horizon,
+                "label": TREND_HORIZON_META.get(row.horizon, {}).get("label", row.horizon),
+                "direction": row.direction,
+                "outcome": trend_horizon_outcome(row),
+                "mfe": row.max_favorable_pct,
+                "mae": row.max_adverse_pct,
+                "review": row.final_review or row.interim_review,
+            } for row in batch_rows],
+        })
+    return {"overall": overall, "per_horizon": per_horizon, "batches": batches}
 
 
 def trend_horizon_payload(symbol):
@@ -9790,6 +10028,7 @@ def trend_horizon_payload(symbol):
             "hypothesis": row.hypothesis,
             "invalidation_rule": row.invalidation_rule,
             "status": row.status,
+            "outcome": trend_horizon_outcome(row),
             "first_hit": row.first_hit,
             "first_hit_at": row.first_hit_at.strftime("%m-%d %H:%M") if row.first_hit_at else None,
             "first_hit_price": row.first_hit_price,
@@ -10476,7 +10715,9 @@ def background_trend_horizon_validation():
         try:
             with app.app_context():
                 mark_automation_status("trend_horizon_validation", "started")
+                ensure_ake_horizon_validation()
                 refresh_trend_horizon_validations()
+                ensure_ake_horizon_validation()
                 mark_automation_status("trend_horizon_validation", "success")
         except Exception as exc:
             with app.app_context():

@@ -1,5 +1,6 @@
 .env
 .chat_encryption.key
+.local_web_disabled
 cloud-backup.local.json
 cloud-access.local.json
 .venv/

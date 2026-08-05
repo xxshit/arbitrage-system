@@ -15,6 +15,7 @@ from html.parser import HTMLParser
 from functools import wraps
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 
@@ -10862,5 +10863,8 @@ def start_background_workers():
 
 
 if __name__ == "__main__":
+    if Path(__file__).with_name(".local_web_disabled").exists():
+        print("ArbiScope local website is disabled on this machine.")
+        raise SystemExit(0)
     start_background_workers()
     app.run(host=os.getenv("APP_HOST", "127.0.0.1"), port=int(os.getenv("APP_PORT", "5000")), debug=False)

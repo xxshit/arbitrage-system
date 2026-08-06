@@ -137,6 +137,15 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertIn("人数比 / 20", INDEX_HTML)
         self.assertIn("CVD / 25", INDEX_HTML)
 
+    def test_dashboard_places_oi_market_cap_ranking_beside_momentum(self):
+        source = function_source("loadDashboard", "dailyTrendItem")
+        self.assertIn("renderOiMarketCapOpportunities", source)
+        self.assertIn("oi_market_cap_opportunities", source)
+        self.assertIn('class="opportunity-signal-grid"', INDEX_HTML)
+        self.assertIn('id="oiMarketCapOpportunities"', INDEX_HTML)
+        self.assertIn("三所合约 OI 名义价值 / CoinGecko 流通市值", INDEX_HTML)
+        self.assertIn("grid-template-columns:minmax(0,1fr) minmax(0,1fr)", STYLE_CSS)
+
     def test_gainers_rows_include_structure_score(self):
         shell = function_source("renderGainersShell", "gainersItem")
         row = function_source("gainersItem", "loadGainers")

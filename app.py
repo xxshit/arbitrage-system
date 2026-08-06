@@ -4353,6 +4353,16 @@ DASHBOARD_OPPORTUNITY_CACHE = {"ts": 0, "items": []}
 MOMENTUM_SCORE_CACHE = {"ts": 0, "items": [], "by_symbol": {}}
 MOMENTUM_SCORE_CACHE_SECONDS = 5 * 60
 MOMENTUM_SCORE_LOCK = threading.Lock()
+OI_MARKET_CAP_CACHE = {"ts": 0, "items": [], "updated_at": None, "coverage": 0, "error": None}
+OI_MARKET_CAP_CACHE_SECONDS = 15 * 60
+OI_MARKET_CAP_LOCK = threading.Lock()
+OI_MARKET_CAP_MIN_RATIO = 0.35
+OI_MARKET_CAP_MIN_OI_USD = 100_000
+COINGECKO_MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
+RWA_MARKET_DATA_KEYWORDS = (
+    "tokenized stock", "tokenized etf", "robinhood tokenized", "dinari tokenized",
+    "backpack securities", "stock token", "xstock",
+)
 
 
 def major_market_window_metrics(klines, oi_rows, ratio_rows, candle_count):
@@ -4700,6 +4710,170 @@ def load_momentum_scores():
         MOMENTUM_SCORE_LOCK.release()
 
 
+def add_open_interest_candidate(candidates, symbol, exchange, open_interest, price=None):
+    canonical = canonical_market_symbol(symbol)
+    if is_rwa_stock_pair(canonical):
+        return
+    try:
+        oi_value = float(open_interest or 0)
+    except (TypeError, ValueError):
+        oi_value = 0
+    if not math.isfinite(oi_value) or oi_value <= 0:
+        return
+    item = candidates.setdefault(canonical, {"symbol": canonical, "exchange_oi": {}, "price": None})
+    item["exchange_oi"][exchange] = max(item["exchange_oi"].get(exchange, 0), oi_value)
+    try:
+        price_value = float(price or 0)
+    except (TypeError, ValueError):
+        price_value = 0
+    if math.isfinite(price_value) and price_value > 0 and (exchange == "Binance" or item["price"] is None):
+        item["price"] = price_value
+
+
+def open_interest_market_candidates(limit=100):
+    candidates = {}
+    spot_snapshot = load_latest_market_snapshot()
+    for group in (spot_snapshot or {}).get("symbols", []):
+        for row in group.get("rows", []):
+            bid, ask = row.get("short_bid"), row.get("short_ask")
+            price = (float(bid) + float(ask)) / 2 if bid and ask else None
+            add_open_interest_candidate(
+                candidates, group["symbol"], "Binance", row.get("futures_open_interest"), price,
+            )
+    dual_snapshot = load_latest_dual_futures_snapshot()
+    for group in (dual_snapshot or {}).get("symbols", []):
+        for row in group.get("rows", []):
+            for side in ("long", "short"):
+                exchange = row.get(f"{side}_exchange")
+                if exchange not in {"Binance", "Bybit", "OKX"}:
+                    continue
+                bid, ask = row.get(f"{side}_bid"), row.get(f"{side}_ask")
+                price = (float(bid) + float(ask)) / 2 if bid and ask else None
+                add_open_interest_candidate(
+                    candidates, group["symbol"], exchange, row.get(f"{side}_open_interest"), price,
+                )
+    items = []
+    for item in candidates.values():
+        item["total_open_interest"] = sum(item["exchange_oi"].values())
+        if item["price"] and item["total_open_interest"] >= OI_MARKET_CAP_MIN_OI_USD:
+            items.append(item)
+    return sorted(items, key=lambda item: item["total_open_interest"], reverse=True)[:limit]
+
+
+def fetch_coingecko_market_rows(symbols):
+    rows = []
+    unique_symbols = sorted({str(symbol).lower() for symbol in symbols if symbol})
+    for start in range(0, len(unique_symbols), 50):
+        chunk = unique_symbols[start:start + 50]
+        url = COINGECKO_MARKETS_URL + "?" + urlencode({
+            "vs_currency": "usd",
+            "symbols": ",".join(chunk),
+            "include_tokens": "all",
+            "per_page": 250,
+            "page": 1,
+            "sparkline": "false",
+        })
+        payload = get_json(url, timeout=10)
+        if isinstance(payload, list):
+            rows.extend(payload)
+    return rows
+
+
+def is_rwa_market_record(record):
+    identity = f"{record.get('id', '')} {record.get('name', '')}".lower()
+    return any(keyword in identity for keyword in RWA_MARKET_DATA_KEYWORDS)
+
+
+def match_market_cap_record(candidate, market_rows, max_price_error=0.25):
+    base = pair_base(candidate["symbol"])
+    price = float(candidate.get("price") or 0)
+    matches = []
+    for row in market_rows:
+        if str(row.get("symbol", "")).upper() != base or is_rwa_market_record(row):
+            continue
+        current_price = float(row.get("current_price") or 0)
+        market_cap = float(row.get("market_cap") or 0)
+        if price <= 0 or current_price <= 0 or market_cap <= 0:
+            continue
+        price_error = abs(current_price / price - 1)
+        if price_error <= max_price_error:
+            matches.append((price_error, row))
+    # A symbol and similar price can still refer to two projects. Exclude ambiguity instead of guessing.
+    if len(matches) != 1:
+        return None
+    price_error, row = matches[0]
+    return {**row, "price_match_error": price_error}
+
+
+def open_interest_market_cap_label(ratio):
+    if ratio >= 1:
+        return "持仓高于市值"
+    if ratio >= 0.8:
+        return "接近 1:1"
+    if ratio >= 0.5:
+        return "持仓偏高"
+    return "接近观察"
+
+
+def rank_open_interest_market_cap(candidates, market_rows, limit=10, min_ratio=OI_MARKET_CAP_MIN_RATIO):
+    ranked = []
+    for candidate in candidates:
+        market = match_market_cap_record(candidate, market_rows)
+        if not market:
+            continue
+        market_cap = float(market["market_cap"])
+        ratio = candidate["total_open_interest"] / market_cap
+        if ratio < min_ratio:
+            continue
+        ranked.append({
+            "symbol": candidate["symbol"],
+            "ratio": round(ratio, 4),
+            "ratio_percent": round(ratio * 100, 1),
+            "label": open_interest_market_cap_label(ratio),
+            "total_open_interest": round(candidate["total_open_interest"], 2),
+            "exchange_oi": {key: round(value, 2) for key, value in sorted(candidate["exchange_oi"].items())},
+            "market_cap": round(market_cap, 2),
+            "market_cap_rank": market.get("market_cap_rank"),
+            "circulating_supply": market.get("circulating_supply"),
+            "market_name": market.get("name"),
+            "market_data_id": market.get("id"),
+            "price_match_error": round(float(market["price_match_error"]) * 100, 2),
+            "market_updated_at": market.get("last_updated"),
+        })
+    ranked.sort(key=lambda item: (item["ratio"], item["total_open_interest"]), reverse=True)
+    return ranked[:limit]
+
+
+def load_open_interest_market_cap_opportunities():
+    now_ts = time.time()
+    if OI_MARKET_CAP_CACHE["ts"] and now_ts - OI_MARKET_CAP_CACHE["ts"] < OI_MARKET_CAP_CACHE_SECONDS:
+        return OI_MARKET_CAP_CACHE
+    if not OI_MARKET_CAP_LOCK.acquire(blocking=False):
+        return OI_MARKET_CAP_CACHE
+    try:
+        candidates = open_interest_market_candidates()
+        symbols = [pair_base(item["symbol"]) for item in candidates]
+        try:
+            market_rows = fetch_coingecko_market_rows(symbols)
+            items = rank_open_interest_market_cap(candidates, market_rows)
+            OI_MARKET_CAP_CACHE.update({
+                "ts": now_ts,
+                "items": items,
+                "updated_at": datetime.now().strftime("%H:%M:%S"),
+                "coverage": sum(match_market_cap_record(item, market_rows) is not None for item in candidates),
+                "error": None,
+            })
+        except Exception as error:
+            # Keep the last valid ranking; a reference-data outage must not blank the live board.
+            OI_MARKET_CAP_CACHE.update({
+                "ts": now_ts,
+                "error": f"{type(error).__name__}: 市值数据暂时不可用",
+            })
+        return OI_MARKET_CAP_CACHE
+    finally:
+        OI_MARKET_CAP_LOCK.release()
+
+
 def live_dashboard_opportunities():
     now_ts = time.time()
     if DASHBOARD_OPPORTUNITY_CACHE["items"] and now_ts - DASHBOARD_OPPORTUNITY_CACHE["ts"] < 15:
@@ -4750,12 +4924,17 @@ def live_dashboard_opportunities():
 def dashboard():
     items = live_dashboard_opportunities()
     momentum = load_momentum_scores()
+    oi_market_cap = load_open_interest_market_cap_opportunities()
     active = Strategy.query.filter_by(enabled=True).count()
     return jsonify({
         "majors": fetch_major_market_overview(),
         "opportunities": items,
         "momentum_opportunities": momentum["items"],
         "momentum_updated_at": momentum["items"][0]["evaluated_at"] if momentum["items"] else None,
+        "oi_market_cap_opportunities": oi_market_cap["items"],
+        "oi_market_cap_updated_at": oi_market_cap["updated_at"],
+        "oi_market_cap_coverage": oi_market_cap["coverage"],
+        "oi_market_cap_error": oi_market_cap["error"],
         "summary": {
             "active_strategies": active,
             "best_spread": items[0]["spread"] if items else 0,

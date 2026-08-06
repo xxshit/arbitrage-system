@@ -861,6 +861,28 @@ def pair_slash(symbol):
     return f"{compact[:-4]}/USDT" if compact.endswith("USDT") else str(symbol or "").upper()
 
 
+CONTRACT_MULTIPLIER_PREFIXES = ("1000000", "10000", "1000")
+
+
+def delisting_base_candidates(symbol):
+    """Treat multiplier contracts such as 1000SATS as the announced SATS asset."""
+    base = pair_base(symbol)
+    candidates = {base} if base else set()
+    for prefix in CONTRACT_MULTIPLIER_PREFIXES:
+        if base.startswith(prefix) and len(base) > len(prefix):
+            candidates.add(base[len(prefix):])
+            break
+    return candidates
+
+
+def delisting_base_keys(symbols):
+    return set().union(*(delisting_base_candidates(symbol) for symbol in symbols)) if symbols else set()
+
+
+def symbol_has_delisting_warning(symbol, delisted_symbols):
+    return bool(delisting_base_candidates(symbol) & delisting_base_keys(delisted_symbols))
+
+
 def is_spot_contract_symbol_mismatch(symbol, exchange):
     return (compact_pair(symbol), exchange) in SPOT_CONTRACT_SYMBOL_MISMATCHES
 
@@ -1276,17 +1298,26 @@ def announced_delisted_symbols():
     symbols = set()
     for item in ListingEvent.query.filter_by(event_type="下架").all():
         symbols.update({pair_slash(item.symbol), canonical_market_symbol(item.symbol)})
-    delisted_bases = {pair_base(symbol) for symbol in symbols}
+    delisted_bases = delisting_base_keys(symbols)
     for row in symbol_alias_rows():
-        if row.canonical_base.upper() in delisted_bases or row.alias_base.upper() in delisted_bases:
+        alias_bases = delisting_base_candidates(row.canonical_base) | delisting_base_candidates(row.alias_base)
+        if alias_bases & delisted_bases:
             symbols.update({row.canonical_symbol, row.alias_symbol})
     return {symbol for symbol in symbols if symbol}
 
 
 def mark_announced_delistings(groups):
     delisted = announced_delisted_symbols()
+    delisted_bases = delisting_base_keys(delisted)
     for group in groups:
-        group["delisting_announced"] = group["symbol"] in delisted
+        group["delisting_announced"] = bool(delisting_base_candidates(group["symbol"]) & delisted_bases)
+
+
+def mark_delisting_items(items):
+    delisted_bases = delisting_base_keys(announced_delisted_symbols())
+    for item in items:
+        item["delisting_announced"] = bool(delisting_base_candidates(item.get("symbol")) & delisted_bases)
+    return items
 
 
 AUTOMATION_LABELS = {
@@ -9043,6 +9074,7 @@ def gainers_losers():
         seen_dual_symbols.add(item.symbol)
     rows = [row for row in rows if row["change"] is not None]
     momentum = load_momentum_scores()
+    mark_delisting_items(rows)
     for row in rows:
         scored = momentum["by_symbol"].get(canonical_market_symbol(row["symbol"]))
         row["score"] = scored["score"] if scored else None
@@ -9355,6 +9387,8 @@ def simple_arbitrage_thinking():
                 # must also have remained positive across recent periods.
                 if row["open_spread"] > 0 and (row.get("funding_difference") or 0) > 0.005 and positive_binance_funding_streak(group["symbol"], minimum=0, periods=3):
                     dual_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": row["short_exchange"], "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_difference"], "funding_current": row.get("funding_difference"), "funding_previous": stats.get("previous"), "funding_24h": stats.get("day_1"), "funding_3d": stats.get("day_3"), "long_is_spot": False, "short_is_spot": False, "long_interval": row.get("long_funding_interval_hours"), "short_interval": row.get("short_funding_interval_hours"), "long_open_interest": row.get("long_open_interest"), "short_open_interest": row.get("short_open_interest"), "long_volume": row.get("long_volume"), "short_volume": row.get("short_volume")})
+    mark_delisting_items(spot_simple)
+    mark_delisting_items(dual_simple)
     return jsonify({"spot_simple": sorted(spot_simple, key=lambda item: item["open_spread"], reverse=True), "dual_simple": sorted(dual_simple, key=lambda item: item["open_spread"], reverse=True)})
 
 
@@ -9468,6 +9502,7 @@ def funding_trend_arbitrage():
             item["level"] = "重点盯盘"
         else:
             item["level"] = "观察"
+    mark_delisting_items(candidates)
     return jsonify({"updated_at": snapshot["updated_at"], "items": candidates})
 
 

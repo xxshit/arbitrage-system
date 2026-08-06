@@ -4,8 +4,10 @@ from pathlib import Path
 
 from app import (
     announcement_links,
+    delisting_base_candidates,
     parse_announcement_effective_at,
     parse_announcement_published_at,
+    symbol_has_delisting_warning,
 )
 
 
@@ -80,8 +82,18 @@ class ListingAnnouncementTests(unittest.TestCase):
         self.assertIn("replaceHtmlKeepingExchangeLogos(byId('spotFuturesRows')", script)
         self.assertIn("replaceHtmlKeepingExchangeLogos(byId('dualFuturesRows')", script)
         self.assertIn("data-market-symbol", script)
+        self.assertIn("data-delisting-announced", script)
+        self.assertIn("delistingAssetBases", script)
+        self.assertIn("delistingSymbolClass(item.symbol,item.delisting_announced)", script)
+        self.assertIn("rememberServerDelistings(simpleThinkingCache.spot_simple)", script)
         self.assertIn(".delisting-symbol::before", styles)
-        self.assertIn('content:"▲"', styles)
+        self.assertIn('content:"⚠"', styles)
+
+    def test_multiplier_contract_uses_the_underlying_delisting_warning(self):
+        self.assertEqual(delisting_base_candidates("1000SATS/USDT"), {"1000SATS", "SATS"})
+        self.assertTrue(symbol_has_delisting_warning("1000SATS/USDT", {"SATS/USDT"}))
+        self.assertTrue(symbol_has_delisting_warning("SATS/USDT", {"1000SATS/USDT"}))
+        self.assertFalse(symbol_has_delisting_warning("SATSSTOCK/USDT", {"SATS/USDT"}))
 
 
 if __name__ == "__main__":

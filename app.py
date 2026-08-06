@@ -4063,6 +4063,9 @@ def daily_trends_page():
 MAJOR_MARKET_CACHE = {"ts": 0, "items": []}
 MAJOR_MARKET_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 DASHBOARD_OPPORTUNITY_CACHE = {"ts": 0, "items": []}
+MOMENTUM_SCORE_CACHE = {"ts": 0, "items": [], "by_symbol": {}}
+MOMENTUM_SCORE_CACHE_SECONDS = 5 * 60
+MOMENTUM_SCORE_LOCK = threading.Lock()
 
 
 def major_market_window_metrics(klines, oi_rows, ratio_rows, candle_count):
@@ -4210,6 +4213,206 @@ def fetch_dashboard_symbol_quotes(raw_symbol):
     return raw_symbol[:-4] + "/USDT", quotes
 
 
+def momentum_positive_score(value, full_score_value, points):
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return max(0.0, min(numeric / full_score_value, 1.0)) * points
+
+
+def score_momentum_structure(metrics):
+    required = (
+        "price_change_30m", "price_change_4h", "price_change_24h",
+        "oi_change_30m", "oi_change_4h",
+        "ratio_change_30m", "ratio_change_4h",
+        "cvd_ratio_30m", "cvd_ratio_4h",
+    )
+    if any(metrics.get(key) is None for key in required):
+        return None
+    # Initial ranking heuristic: each component is capped so one extreme metric
+    # cannot erase missing confirmation from the other three structures.
+    price = sum((
+        momentum_positive_score(metrics["price_change_30m"], 5, 8),
+        momentum_positive_score(metrics["price_change_4h"], 20, 14),
+        momentum_positive_score(metrics["price_change_24h"], 60, 8),
+    ))
+    open_interest = sum((
+        momentum_positive_score(metrics["oi_change_30m"], 3, 10),
+        momentum_positive_score(metrics["oi_change_4h"], 12, 15),
+    ))
+    ratio = sum((
+        momentum_positive_score(-metrics["ratio_change_30m"], 5, 8),
+        momentum_positive_score(-metrics["ratio_change_4h"], 15, 12),
+    ))
+    cvd = sum((
+        momentum_positive_score(metrics["cvd_ratio_30m"], 20, 10),
+        momentum_positive_score(metrics["cvd_ratio_4h"], 20, 15),
+    ))
+    components = {
+        "price": round(price, 1),
+        "open_interest": round(open_interest, 1),
+        "ratio": round(ratio, 1),
+        "cvd": round(cvd, 1),
+    }
+    return {"score": round(min(sum(components.values()), 100.0), 1), "components": components}
+
+
+def momentum_cvd_ratio(klines):
+    quote_volume = sum(float(row[7]) for row in klines)
+    if quote_volume <= 0:
+        return None
+    cvd = sum(2 * float(row[10]) - float(row[7]) for row in klines)
+    return cvd / quote_volume * 100
+
+
+def fetch_momentum_structure(candidate):
+    raw_symbol = candidate["symbol"].replace("/", "")
+    try:
+        klines = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({
+            "symbol": raw_symbol, "interval": "30m", "limit": 10,
+        }), timeout=5)
+        oi_rows = get_json("https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({
+            "symbol": raw_symbol, "period": "30m", "limit": 9,
+        }), timeout=5)
+        ratio_rows = get_json("https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({
+            "symbol": raw_symbol, "period": "30m", "limit": 9,
+        }), timeout=5)
+        now_ms = int(time.time() * 1000)
+        closed = [row for row in klines if len(row) > 10 and int(row[6]) < now_ms]
+        if len(closed) < 8 or len(oi_rows) < 9 or len(ratio_rows) < 9:
+            return None
+        recent = closed[-8:]
+        oi_values = [float(row.get("sumOpenInterest", 0) or 0) for row in oi_rows[-9:]]
+        ratio_values = [float(row.get("longShortRatio", 0) or 0) for row in ratio_rows[-9:]]
+        metrics = {
+            "price_change_30m": percent_delta(float(recent[-1][4]), float(recent[-1][1])),
+            "price_change_4h": percent_delta(float(recent[-1][4]), float(recent[0][1])),
+            "price_change_24h": candidate.get("change_24h"),
+            "oi_change_30m": percent_delta(oi_values[-1], oi_values[-2]),
+            "oi_change_4h": percent_delta(oi_values[-1], oi_values[0]),
+            "ratio_change_30m": percent_delta(ratio_values[-1], ratio_values[-2]),
+            "ratio_change_4h": percent_delta(ratio_values[-1], ratio_values[0]),
+            "cvd_ratio_30m": momentum_cvd_ratio(recent[-1:]),
+            "cvd_ratio_4h": momentum_cvd_ratio(recent),
+        }
+        scored = score_momentum_structure(metrics)
+        if not scored:
+            return None
+        return {**candidate, **metrics, **scored}
+    except Exception:
+        return None
+
+
+def momentum_price_candidate_score(item):
+    windows = (
+        ("change_5m", 5, 10), ("change_15m", 8, 10),
+        ("change_30m", 12, 15), ("change_1h", 18, 15),
+        ("change_4h", 35, 20), ("change_12h", 60, 15),
+        ("change_24h", 100, 15),
+    )
+    return round(sum(momentum_positive_score(item.get(key), target, points) or 0 for key, target, points in windows), 2)
+
+
+def momentum_price_candidates(limit=20):
+    candidates = {}
+    snapshot = load_latest_market_snapshot()
+    if snapshot:
+        enrich_price_changes(snapshot["symbols"])
+        for group in snapshot["symbols"]:
+            if is_rwa_stock_pair(group["symbol"]):
+                continue
+            row = group["rows"][0]
+            item = {
+                "symbol": group["symbol"],
+                "price": contract_mid_price(group),
+                "volume_24h": row.get("futures_volume"),
+                **{key: row.get(key) for key in TREND_WINDOWS},
+            }
+            item["candidate_score"] = momentum_price_candidate_score(item)
+            candidates[canonical_market_symbol(item["symbol"])] = item
+    dual_snapshot = load_latest_dual_futures_snapshot()
+    if dual_snapshot:
+        enrich_dual_futures_price_changes(dual_snapshot["symbols"])
+        for group in dual_snapshot["symbols"]:
+            if is_rwa_stock_pair(group["symbol"]):
+                continue
+            row = next((item for item in group["rows"] if item["long_exchange"] == "Binance" or item["short_exchange"] == "Binance"), None)
+            if not row:
+                continue
+            side = "long" if row["long_exchange"] == "Binance" else "short"
+            item = {
+                "symbol": group["symbol"],
+                "price": (row[f"{side}_ask"] + row[f"{side}_bid"]) / 2,
+                "volume_24h": row.get(f"{side}_volume"),
+                **{key: row.get(f"{side}_{key}") for key in TREND_WINDOWS},
+            }
+            item["candidate_score"] = momentum_price_candidate_score(item)
+            canonical = canonical_market_symbol(item["symbol"])
+            if canonical not in candidates or item["candidate_score"] > candidates[canonical]["candidate_score"]:
+                candidates[canonical] = item
+    return sorted(
+        (item for item in candidates.values() if item["candidate_score"] > 0),
+        key=lambda item: item["candidate_score"], reverse=True,
+    )[:limit]
+
+
+def momentum_score_label(score):
+    if score >= 75:
+        return "强势共振"
+    if score >= 60:
+        return "结构较好"
+    if score >= 45:
+        return "上涨观察"
+    return "结构偏弱"
+
+
+def momentum_score_reason(item):
+    reasons = []
+    reasons.append("30M/4H同步上涨" if item["price_change_30m"] > 0 and item["price_change_4h"] > 0 else "涨势尚未形成双周期共振")
+    reasons.append("持仓增加" if item["oi_change_4h"] > 0 else "持仓退出")
+    reasons.append("人数比下降" if item["ratio_change_4h"] < 0 else "人数比上升")
+    reasons.append("CVD主动买入" if item["cvd_ratio_4h"] > 0 else "CVD偏卖出")
+    return " · ".join(reasons)
+
+
+def load_momentum_scores():
+    now_ts = time.time()
+    if MOMENTUM_SCORE_CACHE["ts"] and now_ts - MOMENTUM_SCORE_CACHE["ts"] < MOMENTUM_SCORE_CACHE_SECONDS:
+        return MOMENTUM_SCORE_CACHE
+    if not MOMENTUM_SCORE_LOCK.acquire(blocking=False):
+        return MOMENTUM_SCORE_CACHE
+    try:
+        candidates = momentum_price_candidates()
+        scored = []
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(fetch_momentum_structure, item) for item in candidates]
+            for future in as_completed(futures):
+                try:
+                    item = future.result()
+                except Exception:
+                    item = None
+                if item:
+                    item["label"] = momentum_score_label(item["score"])
+                    item["reason"] = momentum_score_reason(item)
+                    item["evaluated_at"] = datetime.now().strftime("%H:%M:%S")
+                    scored.append(item)
+        scored.sort(key=lambda item: (item["score"], item["candidate_score"]), reverse=True)
+        if scored:
+            MOMENTUM_SCORE_CACHE.update({
+                "ts": now_ts,
+                "items": scored[:10],
+                "by_symbol": {canonical_market_symbol(item["symbol"]): item for item in scored},
+            })
+        else:
+            MOMENTUM_SCORE_CACHE["ts"] = now_ts
+        return MOMENTUM_SCORE_CACHE
+    finally:
+        MOMENTUM_SCORE_LOCK.release()
+
+
 def live_dashboard_opportunities():
     now_ts = time.time()
     if DASHBOARD_OPPORTUNITY_CACHE["items"] and now_ts - DASHBOARD_OPPORTUNITY_CACHE["ts"] < 15:
@@ -4259,10 +4462,13 @@ def live_dashboard_opportunities():
 @app.get("/api/dashboard")
 def dashboard():
     items = live_dashboard_opportunities()
+    momentum = load_momentum_scores()
     active = Strategy.query.filter_by(enabled=True).count()
     return jsonify({
         "majors": fetch_major_market_overview(),
         "opportunities": items,
+        "momentum_opportunities": momentum["items"],
+        "momentum_updated_at": momentum["items"][0]["evaluated_at"] if momentum["items"] else None,
         "summary": {
             "active_strategies": active,
             "best_spread": items[0]["spread"] if items else 0,
@@ -8731,6 +8937,11 @@ def gainers_losers():
             rows.append({"symbol": item.symbol, "change": (current - previous) / previous * 100, "price": current, "volume_24h": volume})
         seen_dual_symbols.add(item.symbol)
     rows = [row for row in rows if row["change"] is not None]
+    momentum = load_momentum_scores()
+    for row in rows:
+        scored = momentum["by_symbol"].get(canonical_market_symbol(row["symbol"]))
+        row["score"] = scored["score"] if scored else None
+        row["score_label"] = scored["label"] if scored else None
     def dedupe(items, reverse=False):
         best = {}
         for row in items:
@@ -8739,7 +8950,13 @@ def gainers_losers():
             if current is None or (row["change"] > current["change"] if reverse else row["change"] < current["change"]):
                 best[key] = row
         return sorted(best.values(), key=lambda row: row["change"], reverse=reverse)[:50]
-    return jsonify({"period": period, "updated_at": snapshot["updated_at"], "rising": dedupe(rows, True), "falling": dedupe(rows, False)})
+    return jsonify({
+        "period": period,
+        "updated_at": snapshot["updated_at"],
+        "score_updated_at": momentum["items"][0]["evaluated_at"] if momentum["items"] else None,
+        "rising": dedupe(rows, True),
+        "falling": dedupe(rows, False),
+    })
 
 
 DETAIL_FUNDING_EXCHANGES = ("Binance", "Bybit", "OKX")

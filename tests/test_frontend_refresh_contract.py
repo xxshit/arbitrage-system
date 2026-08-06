@@ -4,6 +4,7 @@ from pathlib import Path
 
 APP_JS = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
 STYLE_CSS = (Path(__file__).parents[1] / "static" / "style.css").read_text(encoding="utf-8")
+INDEX_HTML = (Path(__file__).parents[1] / "templates" / "index.html").read_text(encoding="utf-8")
 
 
 def function_source(name, next_name):
@@ -103,6 +104,23 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertIn('class="interval-badge detail-interval', source)
         self.assertIn("intervalClass(hours)", source)
         self.assertIn("待同步", source)
+
+    def test_dashboard_renders_top_ten_momentum_scores(self):
+        source = function_source("loadDashboard", "dailyTrendItem")
+        self.assertIn("renderMomentumOpportunities", source)
+        self.assertIn("momentum_opportunities", source)
+        self.assertIn('id="momentumOpportunities"', INDEX_HTML)
+        self.assertIn("涨势 / 30", INDEX_HTML)
+        self.assertIn("持仓 / 25", INDEX_HTML)
+        self.assertIn("人数比 / 20", INDEX_HTML)
+        self.assertIn("CVD / 25", INDEX_HTML)
+
+    def test_gainers_rows_include_structure_score(self):
+        shell = function_source("renderGainersShell", "gainersItem")
+        row = function_source("gainersItem", "loadGainers")
+        self.assertIn("结构分", shell)
+        self.assertIn("item.score", row)
+        self.assertIn("gainer-score", row)
 
     def test_binance_history_backfill_avoids_cloud_blocked_time_parameters(self):
         app_source = (Path(__file__).parents[1] / "app.py").read_text(encoding="utf-8")

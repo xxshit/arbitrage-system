@@ -16,6 +16,7 @@ from functools import wraps
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlencode, urljoin
 from urllib.request import Request, urlopen
 
@@ -812,6 +813,7 @@ COIN_ALIASES = {}
 CONTRACT_SPOT_ALIASES = {
     "1000XECUSDT": {"spot_symbol": "XECUSDT", "multiplier": 1000, "canonical": "XEC/USDT"},
 }
+SYMBOL_ALIAS_CACHE = {"rows": None, "expires_at": 0.0}
 SEEDED_SYMBOL_ALIASES = [
     {
         "canonical_symbol": "XEC/USDT",
@@ -822,6 +824,26 @@ SEEDED_SYMBOL_ALIASES = [
         "market_type": "contract",
         "multiplier": 1000,
         "note": "倍率合约：1 张 1000XEC 合约对应 1000 枚 XEC 标的。",
+    },
+    {
+        "canonical_symbol": "PLAY/USDT",
+        "alias_symbol": "PLAYSOUT/USDT",
+        "canonical_base": "PLAY",
+        "alias_base": "PLAYSOUT",
+        "exchange": "Bybit",
+        "market_type": "contract",
+        "multiplier": 1,
+        "note": "已核验：Bybit 将 PLAYSOUTUSDT 标注为 PlaysOut，官网 playsout.com；与 Binance PLAYUSDT 实时价格按 1:1 对齐。",
+    },
+    {
+        "canonical_symbol": "SKYAI/USDT",
+        "alias_symbol": "SKYAI1/USDT",
+        "canonical_base": "SKYAI",
+        "alias_base": "SKYAI1",
+        "exchange": "Bybit",
+        "market_type": "contract",
+        "multiplier": 1,
+        "note": "已核验：Bybit 将 SKYAI1USDT 的标的标注为 SKYAI，官网 skyai.pro；与 Binance SKYAIUSDT 实时价格按 1:1 对齐。",
     },
 ]
 SPOT_CONTRACT_SYMBOL_MISMATCHES = {
@@ -836,17 +858,6 @@ SPOT_CONTRACT_SYMBOL_MISMATCHES = {
 }
 
 
-def contract_spot_alias(symbol):
-    return CONTRACT_SPOT_ALIASES.get(symbol, {"spot_symbol": symbol, "multiplier": 1, "canonical": f"{symbol[:-4]}/USDT"})
-
-
-def canonical_market_symbol(symbol):
-    compact = symbol.upper().replace("/", "")
-    if compact in CONTRACT_SPOT_ALIASES:
-        return CONTRACT_SPOT_ALIASES[compact]["canonical"]
-    return f"{compact[:-4]}/USDT" if compact.endswith("USDT") else symbol.upper()
-
-
 def compact_pair(symbol):
     return str(symbol or "").upper().replace("/", "").replace("-", "").replace("_", "")
 
@@ -859,6 +870,79 @@ def pair_base(symbol):
 def pair_slash(symbol):
     compact = compact_pair(symbol)
     return f"{compact[:-4]}/USDT" if compact.endswith("USDT") else str(symbol or "").upper()
+
+
+def alias_scope_matches(row, exchange=None, market_type=None):
+    row_exchange = str(getattr(row, "exchange", "ANY") or "ANY").upper()
+    row_market = str(getattr(row, "market_type", "all") or "all").lower()
+    exchange_matches = not exchange or row_exchange == "ANY" or row_exchange == str(exchange).upper()
+    market_matches = not market_type or row_market in {"any", "all"} or row_market == str(market_type).lower()
+    return exchange_matches and market_matches
+
+
+def resolve_symbol_alias(symbol, exchange=None, market_type=None, rows=None):
+    """Return the canonical compact pair and the alias contract multiplier."""
+    compact = compact_pair(symbol)
+    rows = symbol_alias_rows() if rows is None else rows
+    for row in rows:
+        if not alias_scope_matches(row, exchange, market_type):
+            continue
+        canonical = compact_pair(row.canonical_symbol)
+        if compact == compact_pair(row.alias_symbol):
+            multiplier = float(row.multiplier or 1)
+            return canonical, multiplier if multiplier > 0 else 1.0
+        if compact == canonical:
+            return canonical, 1.0
+    static = CONTRACT_SPOT_ALIASES.get(compact)
+    if static:
+        return compact_pair(static["canonical"]), float(static.get("multiplier") or 1)
+    return compact, 1.0
+
+
+def contract_spot_alias(symbol):
+    canonical, multiplier = resolve_symbol_alias(symbol, "Binance", "contract")
+    return {"spot_symbol": canonical, "multiplier": multiplier, "canonical": pair_slash(canonical)}
+
+
+def canonical_market_symbol(symbol, exchange=None, market_type=None, rows=None):
+    canonical, _ = resolve_symbol_alias(symbol, exchange, market_type, rows)
+    return pair_slash(canonical)
+
+
+def normalize_contract_aliases(contracts, exchange, rows=None):
+    """Index one exchange's contracts by canonical pair and normalize multiplier prices."""
+    rows = symbol_alias_rows() if rows is None else rows
+    normalized = {}
+    for raw_symbol, contract in contracts.items():
+        canonical, multiplier = resolve_symbol_alias(raw_symbol, exchange, "contract", rows)
+        item = dict(contract)
+        if multiplier != 1:
+            for key in ("ask", "bid", "mark", "index"):
+                if item.get(key) is not None:
+                    item[key] = float(item[key]) / multiplier
+        item["source_symbol"] = raw_symbol
+        item["alias_multiplier"] = multiplier
+        current = normalized.get(canonical)
+        if current is None or raw_symbol == canonical:
+            normalized[canonical] = item
+    return normalized
+
+
+def market_alias_candidates(symbol, exchange, market_type, rows=None):
+    """List raw symbols that may represent one canonical market on an exchange."""
+    rows = symbol_alias_rows() if rows is None else rows
+    canonical, _ = resolve_symbol_alias(symbol, exchange, market_type, rows)
+    candidates = [(canonical, 1.0)]
+    for row in rows:
+        if not alias_scope_matches(row, exchange, market_type):
+            continue
+        if compact_pair(row.canonical_symbol) != canonical:
+            continue
+        candidate = compact_pair(row.alias_symbol)
+        multiplier = float(row.multiplier or 1)
+        if candidate and candidate not in {item[0] for item in candidates}:
+            candidates.append((candidate, multiplier if multiplier > 0 else 1.0))
+    return candidates
 
 
 CONTRACT_MULTIPLIER_PREFIXES = ("1000000", "10000", "1000")
@@ -888,19 +972,31 @@ def is_spot_contract_symbol_mismatch(symbol, exchange):
 
 
 def symbol_alias_rows():
+    if SYMBOL_ALIAS_CACHE["rows"] is not None and time.time() < SYMBOL_ALIAS_CACHE["expires_at"]:
+        return SYMBOL_ALIAS_CACHE["rows"]
     rows = []
     try:
-        rows = SymbolAlias.query.filter_by(verified=True).all()
+        rows = [SimpleNamespace(
+            canonical_symbol=row.canonical_symbol,
+            alias_symbol=row.alias_symbol,
+            canonical_base=row.canonical_base,
+            alias_base=row.alias_base,
+            exchange=row.exchange,
+            market_type=row.market_type,
+            multiplier=row.multiplier,
+            verified=True,
+            note=row.note,
+        ) for row in SymbolAlias.query.filter_by(verified=True).all()]
     except Exception:
         rows = []
-    if rows:
-        return rows
+    if not rows:
+        rows = [SimpleNamespace(**item, verified=True) for item in SEEDED_SYMBOL_ALIASES]
+    SYMBOL_ALIAS_CACHE.update({"rows": rows, "expires_at": time.time() + 30})
+    return rows
 
-    class SeedAlias:
-        def __init__(self, data):
-            self.__dict__.update(data)
-            self.verified = True
-    return [SeedAlias(item) for item in SEEDED_SYMBOL_ALIASES]
+
+def invalidate_symbol_alias_cache():
+    SYMBOL_ALIAS_CACHE.update({"rows": None, "expires_at": 0.0})
 
 
 def symbol_alias_candidates(symbol):
@@ -943,6 +1039,7 @@ def seed_symbol_aliases():
             existing.updated_at = datetime.now()
         else:
             db.session.add(SymbolAlias(verified=True, **data))
+    invalidate_symbol_alias_cache()
 
 
 def get_json(url, timeout=4):
@@ -2753,6 +2850,7 @@ def spot_futures_snapshot():
             spot_volumes["Bitget"][item.get("symbol")] = float(item.get("usdtVolume", 0) or 0)
 
     rows_by_symbol = []
+    alias_rows = symbol_alias_rows()
     symbols = sorted(item["symbol"] for item in results["futures_info"].get("symbols", []) if item.get("status") == "TRADING" and item.get("contractType") == "PERPETUAL" and item.get("quoteAsset") == "USDT")
     refresh_binance_open_interest(symbols)
     oi_finished_at = time.perf_counter()
@@ -2760,24 +2858,38 @@ def spot_futures_snapshot():
         futures_book, funding_item = futures_books.get(symbol), funding.get(symbol)
         if not futures_book or not funding_item:
             continue
-        alias = contract_spot_alias(symbol)
+        canonical_symbol, contract_multiplier = resolve_symbol_alias(symbol, "Binance", "contract", alias_rows)
+        alias = {
+            "spot_symbol": canonical_symbol,
+            "multiplier": contract_multiplier,
+            "canonical": pair_slash(canonical_symbol),
+        }
         spot_symbol = alias["spot_symbol"]
         multiplier = alias["multiplier"]
         rows = []
         for exchange in ("Binance", "Gate", "Bitget"):
             if is_spot_contract_symbol_mismatch(symbol, exchange):
                 continue
-            raw_book = spot_books[exchange].get(spot_symbol)
-            book = {"ask": raw_book["ask"] * multiplier, "bid": raw_book["bid"] * multiplier} if raw_book and multiplier != 1 else raw_book
+            raw_book = None
+            raw_spot_symbol = spot_symbol
+            spot_multiplier = 1.0
+            for candidate, candidate_multiplier in market_alias_candidates(spot_symbol, exchange, "spot", alias_rows):
+                if spot_books[exchange].get(candidate):
+                    raw_spot_symbol = candidate
+                    spot_multiplier = candidate_multiplier
+                    raw_book = spot_books[exchange][candidate]
+                    break
+            price_factor = multiplier / spot_multiplier
+            book = {"ask": raw_book["ask"] * price_factor, "bid": raw_book["bid"] * price_factor} if raw_book and price_factor != 1 else raw_book
             if not book:
                 continue
             open_spread = (futures_book["bid"] - book["ask"]) / book["ask"] * 100
             close_spread = (futures_book["ask"] - book["bid"]) / book["bid"] * 100
             contract_basis = (float(funding_item["markPrice"]) - float(funding_item["indexPrice"])) / float(funding_item["indexPrice"]) * 100
             oi_contracts = BINANCE_OPEN_INTEREST_CACHE.get(symbol, {}).get("contracts")
-            rows.append({"long_exchange": exchange, "long_ask": book["ask"], "long_bid": book["bid"], "short_exchange": "Binance 合约", "short_bid": futures_book["bid"], "short_ask": futures_book["ask"], "basis": contract_basis, "funding_rate": float(funding_item["lastFundingRate"]) * 100, "funding_interval_hours": intervals.get(symbol, 8), "next_funding_time": datetime.fromtimestamp(int(funding_item["nextFundingTime"]) / 1000, tz=timezone.utc).astimezone().strftime("%m-%d %H:%M"), "spot_volume": spot_volumes[exchange].get(spot_symbol), "futures_volume": futures_volumes.get(symbol), "futures_open_interest": oi_contracts * float(funding_item.get("markPrice", 0) or 0) if oi_contracts is not None else None, "open_spread": open_spread, "close_spread": close_spread})
+            rows.append({"long_exchange": exchange, "long_ask": book["ask"], "long_bid": book["bid"], "short_exchange": "Binance 合约", "short_bid": futures_book["bid"], "short_ask": futures_book["ask"], "basis": contract_basis, "funding_rate": float(funding_item["lastFundingRate"]) * 100, "funding_interval_hours": intervals.get(symbol, 8), "next_funding_time": datetime.fromtimestamp(int(funding_item["nextFundingTime"]) / 1000, tz=timezone.utc).astimezone().strftime("%m-%d %H:%M"), "spot_volume": spot_volumes[exchange].get(raw_spot_symbol), "futures_volume": futures_volumes.get(symbol), "futures_open_interest": oi_contracts * float(funding_item.get("markPrice", 0) or 0) if oi_contracts is not None else None, "open_spread": open_spread, "close_spread": close_spread})
         if rows:
-            rows_by_symbol.append({"symbol": f"{symbol[:-4]}/USDT", "rows": rows})
+            rows_by_symbol.append({"symbol": alias["canonical"], "rows": rows})
     rows_finished_at = time.perf_counter()
     evaluate_alerts(rows_by_symbol)
     alerts_finished_at = time.perf_counter()
@@ -2889,10 +3001,15 @@ def dual_futures_snapshot():
         cached_funding = OKX_FUNDING_CACHE.get(contract["okx_inst_id"], {})
         contract.update({key: cached_funding.get(key) for key in ("funding_rate", "funding_interval_hours", "next_funding_time")})
 
-    contracts = {"Binance": binance, "Bybit": bybit, "OKX": okx}
+    alias_rows = symbol_alias_rows()
+    contracts = {
+        "Binance": normalize_contract_aliases(binance, "Binance", alias_rows),
+        "Bybit": normalize_contract_aliases(bybit, "Bybit", alias_rows),
+        "OKX": normalize_contract_aliases(okx, "OKX", alias_rows),
+    }
     paths = (("Bybit", "Binance"), ("OKX", "Binance"), ("Bybit", "OKX"))
     groups = []
-    all_symbols = sorted(set(binance) | set(bybit) | set(okx))
+    all_symbols = sorted(set().union(*(set(items) for items in contracts.values())))
     for symbol in all_symbols:
         rows = []
         for long_exchange, short_exchange in paths:
@@ -2923,7 +3040,7 @@ def dual_futures_snapshot():
                 "close_spread": (short_contract["ask"] - long_contract["bid"]) / long_contract["bid"] * 100,
             })
         if rows:
-            groups.append({"symbol": f"{symbol[:-4]}/USDT", "rows": rows})
+            groups.append({"symbol": pair_slash(symbol), "rows": rows})
     enrich_next_funding_net(groups)
     evaluate_dual_alerts(groups)
     captured_at = datetime.now()
@@ -3229,6 +3346,142 @@ def account_chat_nav_rule_payload(user):
         "automation": None,
         "account_scoped": True,
     }
+
+
+SYMBOL_ALIAS_EXCHANGES = {item.upper(): item for item in ("ANY", "Binance", "Bybit", "OKX", "Gate", "Bitget")}
+SYMBOL_ALIAS_MARKETS = {"all": "通用", "contract": "合约", "spot": "现货"}
+
+
+def normalize_alias_base(value):
+    compact = compact_pair(value)
+    if compact.endswith("USDT"):
+        compact = compact[:-4]
+    if not re.fullmatch(r"[A-Z0-9]{1,20}", compact):
+        raise ValueError("币名只能使用 1-20 位英文字母或数字。")
+    return compact
+
+
+def seeded_symbol_alias_keys():
+    return {
+        (item["alias_symbol"], item["exchange"], item["market_type"])
+        for item in SEEDED_SYMBOL_ALIASES
+    }
+
+
+def symbol_alias_payload(row):
+    key = (row.alias_symbol, row.exchange, row.market_type)
+    return {
+        "id": row.id,
+        "canonical_symbol": row.canonical_symbol,
+        "alias_symbol": row.alias_symbol,
+        "canonical_base": row.canonical_base,
+        "alias_base": row.alias_base,
+        "exchange": row.exchange,
+        "market_type": row.market_type,
+        "market_label": SYMBOL_ALIAS_MARKETS.get(row.market_type, row.market_type),
+        "multiplier": row.multiplier,
+        "verified": bool(row.verified),
+        "note": row.note,
+        "seeded": key in seeded_symbol_alias_keys(),
+        "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
+        "updated_at": row.updated_at.strftime("%Y-%m-%d %H:%M:%S") if row.updated_at else None,
+    }
+
+
+@app.get("/api/symbol-aliases")
+def list_symbol_aliases():
+    rows = SymbolAlias.query.filter_by(verified=True).order_by(
+        SymbolAlias.canonical_base, SymbolAlias.alias_base, SymbolAlias.exchange
+    ).all()
+    return jsonify({
+        "items": [symbol_alias_payload(row) for row in rows],
+        "is_admin": current_user().role == "admin",
+        "exchanges": list(SYMBOL_ALIAS_EXCHANGES.values()),
+        "markets": [{"value": key, "label": label} for key, label in SYMBOL_ALIAS_MARKETS.items()],
+    })
+
+
+@app.post("/api/symbol-aliases")
+@admin_required
+def create_symbol_alias():
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    body = request.get_json(silent=True) or {}
+    try:
+        canonical_base = normalize_alias_base(body.get("canonical_base"))
+        alias_base = normalize_alias_base(body.get("alias_base"))
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    try:
+        multiplier = float(body.get("multiplier", 1) or 1)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "请输入有效的数量倍率。"}), 400
+    if canonical_base == alias_base:
+        return jsonify({"ok": False, "error": "标准币名和另一名称不能相同。"}), 400
+    if not 0 < multiplier <= 1_000_000:
+        return jsonify({"ok": False, "error": "倍率需要大于 0 且不超过 1000000。"}), 400
+    exchange = SYMBOL_ALIAS_EXCHANGES.get(str(body.get("exchange", "ANY")).strip().upper())
+    market_type = str(body.get("market_type", "all")).strip().lower()
+    if not exchange:
+        return jsonify({"ok": False, "error": "请选择系统支持的交易所。"}), 400
+    if market_type not in SYMBOL_ALIAS_MARKETS:
+        return jsonify({"ok": False, "error": "请选择通用、合约或现货市场。"}), 400
+    note = str(body.get("note", "")).strip()
+    if len(note) > 255:
+        return jsonify({"ok": False, "error": "确认依据不能超过 255 个字符。"}), 400
+    canonical_symbol = f"{canonical_base}/USDT"
+    alias_symbol = f"{alias_base}/USDT"
+    row = SymbolAlias.query.filter_by(
+        alias_symbol=alias_symbol, exchange=exchange, market_type=market_type
+    ).first()
+    if row and row.canonical_symbol != canonical_symbol:
+        return jsonify({"ok": False, "error": f"{alias_symbol} 在这个范围已关联到 {row.canonical_symbol}，请先删除原记录。"}), 409
+    now = datetime.now()
+    if row:
+        row.canonical_base = canonical_base
+        row.alias_base = alias_base
+        row.multiplier = multiplier
+        row.verified = True
+        row.note = note or "管理员在运行规则中手工确认。"
+        row.updated_at = now
+    else:
+        row = SymbolAlias(
+            canonical_symbol=canonical_symbol,
+            alias_symbol=alias_symbol,
+            canonical_base=canonical_base,
+            alias_base=alias_base,
+            exchange=exchange,
+            market_type=market_type,
+            multiplier=multiplier,
+            verified=True,
+            note=note or "管理员在运行规则中手工确认。",
+            created_at=now,
+            updated_at=now,
+        )
+        db.session.add(row)
+    db.session.commit()
+    invalidate_symbol_alias_cache()
+    SPOT_FUTURES_CACHE["snapshot"] = None
+    DUAL_FUTURES_CACHE["snapshot"] = None
+    return jsonify({"ok": True, "item": symbol_alias_payload(row)})
+
+
+@app.delete("/api/symbol-aliases/<int:alias_id>")
+@admin_required
+def delete_symbol_alias(alias_id):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    row = db.session.get(SymbolAlias, alias_id)
+    if not row:
+        return jsonify({"ok": False, "error": "这条配对记录不存在。"}), 404
+    if (row.alias_symbol, row.exchange, row.market_type) in seeded_symbol_alias_keys():
+        return jsonify({"ok": False, "error": "内置核验记录不能删除。"}), 400
+    db.session.delete(row)
+    db.session.commit()
+    invalidate_symbol_alias_cache()
+    SPOT_FUTURES_CACHE["snapshot"] = None
+    DUAL_FUTURES_CACHE["snapshot"] = None
+    return jsonify({"ok": True})
 
 
 @app.get("/api/runtime-rules")

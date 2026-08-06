@@ -97,6 +97,13 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertNotIn("modal.innerHTML", source)
         self.assertNotIn("openSymbolDetail(", source)
 
+    def test_symbol_detail_contract_exchange_shows_interval_badge(self):
+        source = function_source("detailExchange", "detailRows")
+        self.assertIn("funding_interval_hours", source)
+        self.assertIn('class="interval-badge detail-interval', source)
+        self.assertIn("intervalClass(hours)", source)
+        self.assertIn("待同步", source)
+
     def test_binance_history_backfill_avoids_cloud_blocked_time_parameters(self):
         app_source = (Path(__file__).parents[1] / "app.py").read_text(encoding="utf-8")
         start = app_source.index("def sync_funding_history")

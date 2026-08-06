@@ -8837,6 +8837,47 @@ def detail_funding_history_is_continuous(records, start_time, end_time, now=None
     return all(current - previous <= max_gap for previous, current in zip(timestamps, timestamps[1:]))
 
 
+def build_symbol_detail_futures(spot_rows, dual_rows):
+    futures = {}
+    for row in dual_rows:
+        futures.setdefault(row.long_exchange, {
+            "exchange": row.long_exchange,
+            "bid": row.long_bid,
+            "ask": row.long_ask,
+            "mid": (row.long_bid + row.long_ask) / 2,
+            "basis": row.long_basis,
+            "index": row.long_index,
+            "volume_24h": row.long_volume,
+            "open_interest": row.long_open_interest,
+            "funding_interval_hours": row.long_funding_interval_hours,
+        })
+        futures.setdefault(row.short_exchange, {
+            "exchange": row.short_exchange,
+            "bid": row.short_bid,
+            "ask": row.short_ask,
+            "mid": (row.short_bid + row.short_ask) / 2,
+            "basis": row.short_basis,
+            "index": row.short_index,
+            "volume_24h": row.short_volume,
+            "open_interest": row.short_open_interest,
+            "funding_interval_hours": row.short_funding_interval_hours,
+        })
+    bn_spot = next((row for row in spot_rows if row.long_exchange == "Binance"), None)
+    if bn_spot:
+        futures.setdefault("Binance", {
+            "exchange": "Binance",
+            "bid": bn_spot.short_bid,
+            "ask": bn_spot.short_ask,
+            "mid": (bn_spot.short_bid + bn_spot.short_ask) / 2,
+            "basis": bn_spot.basis,
+            "index": None,
+            "volume_24h": bn_spot.futures_volume,
+            "open_interest": bn_spot.futures_open_interest,
+            "funding_interval_hours": bn_spot.funding_interval_hours,
+        })
+    return futures
+
+
 @app.get("/api/symbol-detail")
 def symbol_detail():
     symbol = request.args.get("symbol", "").upper().replace("-", "/")
@@ -8859,13 +8900,7 @@ def symbol_detail():
     spot_rows = LatestMarketSnapshot.query.filter_by(symbol=symbol).all()
     dual_rows = LatestDualFuturesSnapshot.query.filter_by(symbol=symbol).all()
     spot = [{"exchange": row.long_exchange, "bid": row.long_bid, "ask": row.long_ask, "mid": (row.long_bid + row.long_ask) / 2, "volume_24h": row.spot_volume} for row in spot_rows]
-    futures = {}
-    for row in dual_rows:
-        futures.setdefault(row.long_exchange, {"exchange": row.long_exchange, "bid": row.long_bid, "ask": row.long_ask, "mid": (row.long_bid + row.long_ask) / 2, "basis": row.long_basis, "index": row.long_index, "volume_24h": row.long_volume, "open_interest": row.long_open_interest})
-        futures.setdefault(row.short_exchange, {"exchange": row.short_exchange, "bid": row.short_bid, "ask": row.short_ask, "mid": (row.short_bid + row.short_ask) / 2, "basis": row.short_basis, "index": row.short_index, "volume_24h": row.short_volume, "open_interest": row.short_open_interest})
-    bn_spot = next((row for row in spot_rows if row.long_exchange == "Binance"), None)
-    if bn_spot:
-        futures.setdefault("Binance", {"exchange": "Binance", "bid": bn_spot.short_bid, "ask": bn_spot.short_ask, "mid": (bn_spot.short_bid + bn_spot.short_ask) / 2, "basis": bn_spot.basis, "index": None, "volume_24h": bn_spot.futures_volume, "open_interest": bn_spot.futures_open_interest})
+    futures = build_symbol_detail_futures(spot_rows, dual_rows)
     short_funding_rows = detail_funding_records(
         funding_short_exchange, symbol, funding_start_time, funding_end_time,
     )

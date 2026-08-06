@@ -1,6 +1,7 @@
 import os
 import unittest
 from datetime import datetime
+from types import SimpleNamespace
 
 
 os.environ["DATABASE_URL"] = "sqlite://"
@@ -8,6 +9,7 @@ os.environ["SECRET_KEY"] = "symbol-detail-funding-test-secret"
 
 from app import (
     SHANGHAI_TZ,
+    build_symbol_detail_futures,
     compose_detail_funding_events,
     detail_funding_history_is_continuous,
     parse_detail_funding_window,
@@ -19,6 +21,27 @@ def settled_at(year, month, day, hour):
 
 
 class SymbolDetailFundingTests(unittest.TestCase):
+    def test_contract_detail_keeps_each_exchange_funding_interval(self):
+        spot_rows = [SimpleNamespace(
+            long_exchange="Binance", short_bid=1.0, short_ask=1.2,
+            basis=0.1, futures_volume=1000, futures_open_interest=500,
+            funding_interval_hours=8,
+        )]
+        dual_rows = [SimpleNamespace(
+            long_exchange="Bybit", long_bid=1.0, long_ask=1.1,
+            long_basis=0.2, long_index=1.0, long_volume=800,
+            long_open_interest=400, long_funding_interval_hours=1,
+            short_exchange="OKX", short_bid=1.2, short_ask=1.3,
+            short_basis=0.3, short_index=1.1, short_volume=900,
+            short_open_interest=450, short_funding_interval_hours=4,
+        )]
+
+        futures = build_symbol_detail_futures(spot_rows, dual_rows)
+
+        self.assertEqual(futures["Binance"]["funding_interval_hours"], 8)
+        self.assertEqual(futures["Bybit"]["funding_interval_hours"], 1)
+        self.assertEqual(futures["OKX"]["funding_interval_hours"], 4)
+
     def test_selected_calendar_dates_become_inclusive_shanghai_window(self):
         start, end, start_label, end_label = parse_detail_funding_window("2026-08-01", "2026-08-02")
 

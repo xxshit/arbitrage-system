@@ -784,6 +784,7 @@ RUNTIME_RULE_DEFAULTS = [
     {"rule_key": "dual_market_refresh", "category": "实时行情", "label": "期多期空行情刷新", "schedule_type": "interval", "value": "5", "unit": "秒", "min_value": 2, "max_value": 60, "description": "拉取 Binance、Bybit、OKX 合约盘口和套利路径。"},
     {"rule_key": "browser_alert_refresh", "category": "页面显示", "label": "报警弹窗读取", "schedule_type": "interval", "value": "5", "unit": "秒", "min_value": 2, "max_value": 60, "description": "网页只读取服务器已经确认的报警，不重新请求交易所。"},
     {"rule_key": "thought_watch_scan", "category": "走势盯盘", "label": "思路分析盯盘", "schedule_type": "interval", "value": "300", "unit": "秒", "min_value": 60, "max_value": 14400, "description": "扫描思路分析中已加入盯盘的币；仅在出现新结构或判断变化时推送。"},
+    {"rule_key": "hei_watch_scan", "category": "走势盯盘", "label": "HEI 风险快速盯盘", "schedule_type": "interval", "value": "30", "unit": "秒", "min_value": 15, "max_value": 300, "description": "仅在 HEI 已启用盯盘时快速复核基差、5MIN 涨跌和成交量异动；同一根K线与同一基差区间去重。"},
     {"rule_key": "sudden_pump_scan", "category": "趋势筛选", "label": "全市场 5MIN 急涨扫描", "schedule_type": "interval", "value": "10", "unit": "秒", "min_value": 5, "max_value": 60, "description": "轻量读取本地5分钟价格桶；候选出现后才向 Binance 复核，捕捉短周期突然点火。"},
     {"rule_key": "sudden_pump_threshold", "category": "趋势筛选", "label": "5MIN 急涨触发阈值", "schedule_type": "threshold", "value": "15", "unit": "%", "min_value": 5, "max_value": 50, "description": "单根5MIN涨幅达到阈值进入急涨提醒；盘中信号连续确认两次，已收盘信号直接确认。"},
     {"rule_key": "early_trend_scan", "category": "趋势筛选", "label": "全市场五根 30MIN 扫描", "schedule_type": "interval", "value": "1800", "unit": "秒", "min_value": 900, "max_value": 7200, "description": "每根 30MIN K线收盘后扫描全市场；只使用已收盘K线，识别启动前蓄势和五根强启动。"},
@@ -1295,6 +1296,7 @@ AUTOMATION_LABELS = {
     "intraday_sudden_pump_scan": "5MIN急涨全市场扫描",
     "daily_lark_trend_push": "日报趋势推送",
     "thought_analysis_push": "思路分析盯盘推送",
+    "hei_risk_watch": "HEI 基差与5MIN风险监控",
     "turnover_basis_watch": "SOON/ZAMA基差换手监控",
     "transfer_network_sync": "充提网络同步",
     "index_component_sync": "指数成分同步",
@@ -3165,6 +3167,7 @@ def runtime_rule_payload(row):
         "daily_trend_push": "daily_lark_trend_push",
         "announcement_scan": "announcement_scan",
         "thought_watch_scan": "thought_analysis_push",
+        "hei_watch_scan": "hei_risk_watch",
         "index_component_sync": "index_component_sync",
         "transfer_network_sync": "transfer_network_sync",
     }.get(row.rule_key)
@@ -4730,6 +4733,8 @@ def fetch_t_micro_metrics(raw_symbol):
             "ratio_value": ratio_value,
             "high": high,
             "low": low,
+            "bucket_at": int(rows[-1][0]),
+            "bar_closed": int(rows[-1][6]) < int(time.time() * 1000),
         }
 
     recent_12 = k5[-12:] if len(k5) >= 12 else k5
@@ -5966,7 +5971,7 @@ def thought_snapshot(symbol):
             return {"price_change": price_change, "oi_change": oi_change, "position_quantity_change": quantity_change, "ratio_change": ratio_change, "cvd": cvd_value, "volume": volume, "volume_ratio": volume_ratio}
         index_price = float(premium.get("indexPrice", 0) or 0)
         mark_price = float(premium.get("markPrice", 0) or 0)
-        micro_validation = fetch_t_micro_metrics(raw_symbol) if symbol in {"T/USDT", "AKE/USDT", "ERA/USDT", "SOON/USDT", "ZAMA/USDT"} else {}
+        micro_validation = fetch_t_micro_metrics(raw_symbol) if symbol in {"T/USDT", "AKE/USDT", "ERA/USDT", "SOON/USDT", "ZAMA/USDT", "HEI/USDT"} else {}
         orderbook_wall = fetch_ake_orderbook_wall(raw_symbol) if symbol == "AKE/USDT" else {}
         market_context = thought_market_context(symbol) or {}
         validation = {"30m": window_metrics(1), "1h": window_metrics(2), "2h": window_metrics(4), "4h": window_metrics(8)}
@@ -6225,6 +6230,52 @@ def tlm_trap_short_direction(analysis):
         return "tlm_trap_short"
     if recent_bounce and cvd_selling and ratio_chasing_long and (funding_deep_negative or basis_negative):
         return "tlm_trap_short"
+    return None
+
+
+HEI_BAR_DIRECTIONS = {
+    "hei_5m_selloff", "hei_5m_spike", "hei_sell_volume", "hei_buy_volume",
+}
+HEI_BASIS_DIRECTIONS = {"hei_basis_discount", "hei_basis_premium"}
+HEI_RISK_DIRECTIONS = HEI_BAR_DIRECTIONS | HEI_BASIS_DIRECTIONS
+
+
+def hei_risk_direction(analysis):
+    """Fast HEI risk watch; the chain-transfer claim remains a user hypothesis."""
+    if analysis.get("symbol") != "HEI/USDT" or analysis.get("source") != "live":
+        return None
+    micro = analysis.get("micro_validation") or {}
+    m5 = micro.get("5m") or {}
+    m15 = micro.get("15m") or {}
+
+    def number(row, key):
+        value = row.get(key)
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    price_5m = number(m5, "price_change")
+    price_15m = number(m15, "price_change")
+    if (price_5m is not None and price_5m <= -3.0) or (price_15m is not None and price_15m <= -7.0):
+        return "hei_5m_selloff"
+    if (price_5m is not None and price_5m >= 4.0) or (price_15m is not None and price_15m >= 7.0):
+        return "hei_5m_spike"
+
+    volume_rows = [row for row in (m5, m15) if number(row, "volume_ratio") is not None]
+    hottest = max(volume_rows, key=lambda row: number(row, "volume_ratio"), default={})
+    if hottest and number(hottest, "volume_ratio") >= 2.5:
+        cvd = number(hottest, "cvd")
+        if cvd is not None and cvd < 0:
+            return "hei_sell_volume"
+        if cvd is not None and cvd > 0:
+            return "hei_buy_volume"
+
+    basis = analysis.get("basis")
+    if basis is not None and basis <= -0.30:
+        return "hei_basis_discount"
+    if basis is not None and basis >= 0.30:
+        return "hei_basis_premium"
     return None
 
 
@@ -6511,8 +6562,10 @@ def thought_push_direction(analysis):
     # AKE/ERA are high-frequency narrative watches. A temporary exchange timeout
     # must not let a stale DB fallback flip their direction and generate a false
     # "new idea" push. Wait for the next complete live snapshot instead.
-    if symbol in {"AKE/USDT", "ERA/USDT", "SOON/USDT", "ZAMA/USDT"} and analysis.get("source") != "live":
+    if symbol in {"AKE/USDT", "ERA/USDT", "SOON/USDT", "ZAMA/USDT", "HEI/USDT"} and analysis.get("source") != "live":
         return None
+    if symbol == "HEI/USDT":
+        return hei_risk_direction(analysis)
     t_direction = t_micro_direction(analysis)
     if t_direction:
         return t_direction
@@ -6598,6 +6651,23 @@ def thought_signal_key(analysis, direction):
     last = analysis.get("last") or 0
     resistance = analysis.get("resistance") or 0
     support = analysis.get("support") or 0
+    if direction in HEI_BAR_DIRECTIONS:
+        bucket_at = ((analysis.get("micro_validation") or {}).get("5m") or {}).get("bucket_at")
+        if bucket_at is None:
+            bucket_at = int(time.time() // 300 * 300 * 1000)
+        return f"{direction}-{int(bucket_at)}"
+    if direction in HEI_BASIS_DIRECTIONS:
+        basis = analysis.get("basis") or 0
+        magnitude = abs(basis)
+        if magnitude >= 2.0:
+            zone = "200-plus"
+        elif magnitude >= 1.0:
+            zone = "100-200"
+        elif magnitude >= 0.6:
+            zone = "060-100"
+        else:
+            zone = "030-060"
+        return f"{direction}-{zone}"
     if direction in {
         "soon_basis_negative_watch", "soon_funding_follow_watch", "soon_turnover_short_ready",
         "zama_basis_negative_watch", "zama_funding_follow_watch", "zama_turnover_short_ready",
@@ -6934,6 +7004,8 @@ def thought_ake_has_new_information(previous, metrics):
 def thought_push_has_new_information(previous, metrics):
     if previous is None:
         return True
+    if metrics.get("symbol") == "HEI/USDT" and metrics.get("direction") in HEI_RISK_DIRECTIONS:
+        return previous.direction != metrics["direction"] or previous.signal_key != metrics["signal_key"]
     if metrics.get("direction") in TURNOVER_THOUGHT_DIRECTIONS:
         return thought_turnover_has_new_information(previous, metrics)
     if previous.direction != metrics["direction"]:
@@ -6952,6 +7024,10 @@ def thought_push_has_new_information(previous, metrics):
 def thought_push_trigger_reason(previous, metrics):
     if previous is None:
         return "首次形成可推送结构"
+    if metrics.get("symbol") == "HEI/USDT" and metrics.get("direction") in HEI_RISK_DIRECTIONS:
+        if previous.direction != metrics["direction"]:
+            return f"HEI 风险类型改变：{previous.direction} → {metrics['direction']}"
+        return "HEI 出现新的5MIN异常K线或进入新的基差风险区间"
     reasons = []
     if previous.direction != metrics["direction"]:
         reasons.append(f"方向改变：{previous.direction} → {metrics['direction']}")
@@ -7578,6 +7654,33 @@ def thought_window_line(validation, label, key):
     )
 
 
+def thought_lark_hei_message(analysis, direction):
+    micro = analysis.get("micro_validation") or {}
+    validation = analysis.get("validation") or {}
+    labels = {
+        "hei_5m_selloff": ("5MIN 急跌预警", "短线抛压突然增强"),
+        "hei_5m_spike": ("5MIN 急涨预警", "快速拉升，防止冲高换手"),
+        "hei_sell_volume": ("卖出量能异动", "放量且主动卖出占优"),
+        "hei_buy_volume": ("买入量能异动", "放量且主动买入占优，构成立即出货的反证"),
+        "hei_basis_discount": ("负基差扩大", "合约贴水进入风险区"),
+        "hei_basis_premium": ("正基差扩大", "合约溢价进入风险区，警惕追涨或逼空"),
+    }
+    title, judgement = labels[direction]
+    return "\n".join([
+        "短线方向：重点风险观察",
+        f"HEI思路盯盘：{title}",
+        f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"价格：{lark_price_value(analysis.get('last'))}，BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}，BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        t_micro_line(micro, "5MIN", "5m"),
+        t_micro_line(micro, "15MIN", "15m"),
+        thought_window_line(validation, "30MIN", "30m"),
+        f"盘口判断：{judgement}。继续结合持仓、人数比和 CVD 判断是新增抛压、获利换手，还是短时波动。",
+        "用户假设：观察到链上地址向交易所转币，担心主力准备出货；系统尚未独立核验地址归属与转账目的，本提醒只用实时盘口验证或反驳该假设。",
+        thought_key_zone(analysis),
+        "COINGLASS：https://www.coinglass.com/tv/zh/Binance_HEIUSDT",
+    ])
+
+
 def thought_primary_position_evidence(analysis):
     """Build a data-driven position thesis instead of a repeated slogan."""
     validation = analysis.get("validation") or {}
@@ -7924,6 +8027,8 @@ def thought_lark_message(analysis, direction):
         return thought_lark_zama_message(analysis, direction)
     if direction in {"era_squeeze_probe", "era_squeeze_confirmed", "era_bounce_stall_short"}:
         return thought_lark_era_message(analysis, direction)
+    if direction in HEI_RISK_DIRECTIONS:
+        return thought_lark_hei_message(analysis, direction)
     if direction in AKE_STRUCTURE_DIRECTIONS:
         return thought_lark_ake_structure_message(analysis, direction)
     if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
@@ -10961,6 +11066,23 @@ def background_thought_analysis_push():
         time.sleep(runtime_interval("thought_watch_scan", 300))
 
 
+def background_hei_risk_watch():
+    """Poll only HEI at short intervals while the user keeps it active."""
+    time.sleep(25)
+    while True:
+        try:
+            with app.app_context():
+                mark_automation_status("hei_risk_watch", "started")
+                if "HEI/USDT" in active_thought_symbols():
+                    send_thought_analysis_push(only_symbols={"HEI/USDT"})
+                mark_automation_status("hei_risk_watch", "success")
+        except Exception as exc:
+            with app.app_context():
+                db.session.rollback()
+                mark_automation_status("hei_risk_watch", "error", exc)
+        time.sleep(runtime_interval("hei_watch_scan", 30))
+
+
 def background_trend_horizon_validation():
     """价格路径每分钟检查；K线只在出现新5分钟收盘时增量写入 MySQL。"""
     time.sleep(35)
@@ -11109,6 +11231,7 @@ def start_background_workers():
     threading.Thread(target=background_intraday_early_trend_scan, daemon=True, name="intraday-early-trend-scan").start()
     threading.Thread(target=background_transfer_network_sync, daemon=True, name="transfer-network-sync").start()
     threading.Thread(target=background_thought_analysis_push, daemon=True, name="thought-analysis-push").start()
+    threading.Thread(target=background_hei_risk_watch, daemon=True, name="hei-risk-watch").start()
     threading.Thread(target=background_trend_horizon_validation, daemon=True, name="trend-horizon-validation").start()
     threading.Thread(target=background_chat_retention_cleanup, daemon=True, name="chat-retention-cleanup").start()
     threading.Thread(target=background_turnover_basis_watch, daemon=True, name="turnover-basis-watch").start()

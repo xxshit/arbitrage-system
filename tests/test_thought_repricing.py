@@ -10,9 +10,11 @@ from app import (
     app,
     classify_early_trend_stage,
     estimated_position_quantity_change,
+    hei_risk_direction,
     position_quantity_change,
     send_early_trend_stage_push,
     thought_lark_ake_structure_message,
+    thought_lark_hei_message,
     thought_primary_position_evidence,
     thought_push_direction,
     thought_push_has_new_information,
@@ -49,6 +51,56 @@ class ThoughtRepricingTests(unittest.TestCase):
 
     def test_historical_wall_does_not_drive_live_direction(self):
         self.assertIsNone(ake_orderbook_wall_direction(self.analysis))
+
+    @staticmethod
+    def hei_analysis(price_5m=0.2, price_15m=0.4, volume_ratio=1.0, cvd=10, basis=0.0):
+        return {
+            "symbol": "HEI/USDT",
+            "source": "live",
+            "last": 0.35,
+            "support": 0.32,
+            "resistance": 0.38,
+            "basis": basis,
+            "funding_rate": -0.03,
+            "validation": {
+                "30m": {"price_change": -1.0, "oi_change": 2.0, "ratio_change": 1.0, "cvd": -100, "volume_ratio": 1.2},
+            },
+            "micro_validation": {
+                "5m": {"price_change": price_5m, "volume_ratio": volume_ratio, "cvd": cvd, "bucket_at": 1_700_000_000_000},
+                "15m": {"price_change": price_15m, "volume_ratio": 1.1, "cvd": cvd},
+            },
+        }
+
+    def test_hei_fast_watch_detects_5m_selloff(self):
+        analysis = self.hei_analysis(price_5m=-3.2)
+        self.assertEqual(hei_risk_direction(analysis), "hei_5m_selloff")
+        self.assertEqual(thought_push_direction(analysis), "hei_5m_selloff")
+
+    def test_hei_fast_watch_detects_volume_and_basis_risk(self):
+        self.assertEqual(
+            hei_risk_direction(self.hei_analysis(volume_ratio=2.6, cvd=-100)),
+            "hei_sell_volume",
+        )
+        self.assertEqual(
+            hei_risk_direction(self.hei_analysis(basis=-0.31)),
+            "hei_basis_discount",
+        )
+        self.assertIsNone(hei_risk_direction(self.hei_analysis()))
+
+    def test_hei_bar_dedupes_same_bucket_but_allows_next_bucket(self):
+        analysis = self.hei_analysis(price_5m=-4.0)
+        current_key = thought_signal_key(analysis, "hei_5m_selloff")
+        previous = SimpleNamespace(direction="hei_5m_selloff", signal_key=current_key)
+        metrics = {"symbol": "HEI/USDT", "direction": "hei_5m_selloff", "signal_key": current_key}
+        self.assertFalse(thought_push_has_new_information(previous, metrics))
+        metrics["signal_key"] = "hei_5m_selloff-1700000300000"
+        self.assertTrue(thought_push_has_new_information(previous, metrics))
+
+    def test_hei_message_keeps_chain_transfer_as_unverified_hypothesis(self):
+        with app.app_context():
+            message = thought_lark_hei_message(self.hei_analysis(price_5m=-4.0), "hei_5m_selloff")
+        self.assertIn("用户假设", message)
+        self.assertIn("尚未独立核验地址归属与转账目的", message)
 
     def test_notional_oi_is_adjusted_for_price_repricing(self):
         self.assertAlmostEqual(estimated_position_quantity_change(100, 100), 0.0)

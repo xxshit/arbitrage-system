@@ -97,6 +97,28 @@ class FrontendRefreshContractTests(unittest.TestCase):
         source = function_source("loadSymbolFunding", "openSymbolDetail")
         self.assertNotIn("modal.innerHTML", source)
         self.assertNotIn("openSymbolDetail(", source)
+        self.assertIn("requestId=++symbolFundingRequest", source)
+        self.assertIn("requestId===symbolFundingRequest", source)
+
+    def test_symbol_detail_funding_defaults_and_exchange_options(self):
+        options = function_source("detailFundingExchangeOptions", "detailFundingExchangeCode")
+        modal = function_source("openSymbolDetail", "closeSymbolDetail")
+        self.assertIn("['Bybit','BY'],['OKX','OK'],['Binance','BN']", options)
+        self.assertIn("[['','无']]", options)
+        self.assertIn("priorLong=''", modal)
+        self.assertIn("priorShort='Binance'", modal)
+        self.assertIn("openRequest=++symbolFundingRequest", modal)
+        self.assertIn("openRequest!==symbolFundingRequest", modal)
+        self.assertIn('id="detailFundingLongExchange" onchange="loadSymbolFunding()"', modal)
+        self.assertIn('id="detailFundingShortExchange" onchange="loadSymbolFunding()"', modal)
+        self.assertIn("做空交易所", modal)
+        self.assertIn("grid-template-columns:90px 90px 180px 180px auto", STYLE_CSS)
+
+    def test_symbol_detail_single_mode_only_labels_short_funding(self):
+        source = function_source("renderSymbolFunding", "fetchSymbolDetail")
+        self.assertIn("做空 · 单所资费", source)
+        self.assertIn("仅显示做空端原始资费", source)
+        self.assertIn("净值按空端资费－多端资费计算", source)
 
     def test_symbol_detail_contract_exchange_shows_interval_badge(self):
         source = function_source("detailExchange", "detailRows")

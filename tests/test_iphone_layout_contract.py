@@ -29,7 +29,7 @@ class IPhoneLayoutContractTests(unittest.TestCase):
         self.assertIn('id="mobileNavToggle"', INDEX_HTML)
         self.assertIn('id="mobileNavBackdrop"', INDEX_HTML)
         self.assertIn('id="appSidebar"', INDEX_HTML)
-        toggle = function_source("toggleMobileNav", "showMobileChatPeers")
+        toggle = function_source("toggleMobileNav", "syncMobileChatLayoutState")
         self.assertIn("mobile-nav-open", toggle)
         self.assertIn("aria-expanded", toggle)
         self.assertIn("aria-hidden", toggle)
@@ -50,8 +50,29 @@ class IPhoneLayoutContractTests(unittest.TestCase):
 
     def test_iphone_inputs_avoid_focus_zoom_and_chat_tracks_keyboard(self):
         self.assertIn('select,textarea{font-size:16px!important}', STYLE_CSS)
-        self.assertIn("window.visualViewport?.addEventListener('resize',syncMobileViewportHeight)", APP_JS)
+        self.assertIn("window.visualViewport?.addEventListener('resize',()=>{syncMobileViewportHeight();syncMobileChatLayoutState()})", APP_JS)
         self.assertIn("height:calc(var(--mobile-viewport-height,100dvh) - 158px", STYLE_CSS)
+
+    def test_home_screen_chat_requires_and_recovers_audio_activation(self):
+        self.assertIn('id="chatAudioGate"', INDEX_HTML)
+        self.assertIn('onclick="activateChatAudio()"', INDEX_HTML)
+        self.assertIn("function isStandaloneWebApp", APP_JS)
+        self.assertIn("function ensureSignalAudioContext", APP_JS)
+        self.assertIn("function activateChatAudio", APP_JS)
+        self.assertIn("chatSoundPending=true", APP_JS)
+        self.assertIn("document.addEventListener('touchend',primeSignalAudio", APP_JS)
+        foreground = function_source("chatConversationIsForeground", "announceIncomingChatMessage")
+        self.assertIn("mobile-conversation-open", foreground)
+
+    def test_portrait_chat_owns_the_visual_viewport(self):
+        self.assertIn("@media(max-width:760px) and (orientation:portrait)", STYLE_CSS)
+        self.assertIn("body.mobile-chat-view main>header", STYLE_CSS)
+        self.assertIn("body.mobile-chat-view #chat.active{display:grid", STYLE_CSS)
+        self.assertIn("body.mobile-chat-conversation #chat.active{grid-template-rows:auto minmax(0,1fr)}", STYLE_CSS)
+        self.assertIn("body.mobile-chat-conversation #chat>.panel-title{display:none!important}", STYLE_CSS)
+        self.assertIn(".chat-shell.mobile-conversation-open .chat-conversation{display:flex;flex-direction:column}", STYLE_CSS)
+        self.assertIn("body.mobile-chat-view #chat .chat-messages{flex:1 1 auto}", STYLE_CSS)
+        self.assertIn("body.mobile-chat-view #chat .chat-shell{height:100%;min-height:0!important", STYLE_CSS)
 
     def test_mobile_opportunity_boards_collapse_without_page_overflow(self):
         self.assertIn(".opportunity-signal-grid .momentum-table-head,.oi-market-table-head{display:none}", STYLE_CSS)

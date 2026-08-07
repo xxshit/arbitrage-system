@@ -137,6 +137,16 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertIn("人数比 / 20", INDEX_HTML)
         self.assertIn("CVD / 25", INDEX_HTML)
 
+    def test_momentum_board_marks_ratio_rise_and_selling_cvd_red(self):
+        direction = function_source("momentumDirectionClass", "momentumReasonMarkup")
+        row = function_source("momentumOpportunityItem", "renderMomentumOpportunities")
+        self.assertIn("type==='ratio'?value>0:value<=0", direction)
+        self.assertIn("momentumDirectionClass(item,'ratio')", row)
+        self.assertIn("momentumDirectionClass(item,'cvd')", row)
+        self.assertIn("momentumReasonMarkup(item)", row)
+        self.assertIn(".momentum-components .risk-negative b", STYLE_CSS)
+        self.assertIn(".momentum-row>p .risk-negative", STYLE_CSS)
+
     def test_dashboard_places_oi_market_cap_ranking_beside_momentum(self):
         source = function_source("loadDashboard", "dailyTrendItem")
         self.assertIn("renderOiMarketCapOpportunities", source)

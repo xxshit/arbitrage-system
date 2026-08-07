@@ -157,7 +157,12 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertIn("oi_market_cap_opportunities", source)
         self.assertIn('class="opportunity-signal-grid"', INDEX_HTML)
         self.assertIn('id="oiMarketCapOpportunities"', INDEX_HTML)
-        self.assertIn("三所合约 OI 名义价值 / CoinGecko 流通市值", INDEX_HTML)
+        self.assertIn("CMC 为主、CG 备用", INDEX_HTML)
+        self.assertIn("按当前合约价重算", INDEX_HTML)
+        self.assertIn("参考市值", INDEX_HTML)
+        self.assertIn("oiMarketCapMeta", APP_JS)
+        self.assertIn("market_cap_warning", APP_JS)
+        self.assertIn("market-source-warning", STYLE_CSS)
         self.assertIn("grid-template-columns:minmax(0,1fr) minmax(0,1fr)", STYLE_CSS)
 
     def test_gainers_rows_include_structure_score(self):

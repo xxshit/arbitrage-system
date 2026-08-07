@@ -4354,11 +4354,12 @@ MOMENTUM_SCORE_CACHE = {"ts": 0, "items": [], "by_symbol": {}}
 MOMENTUM_SCORE_CACHE_SECONDS = 5 * 60
 MOMENTUM_SCORE_LOCK = threading.Lock()
 OI_MARKET_CAP_CACHE = {"ts": 0, "items": [], "updated_at": None, "coverage": 0, "error": None}
-OI_MARKET_CAP_CACHE_SECONDS = 15 * 60
+OI_MARKET_CAP_CACHE_SECONDS = 5 * 60
 OI_MARKET_CAP_LOCK = threading.Lock()
 OI_MARKET_CAP_MIN_RATIO = 0.35
 OI_MARKET_CAP_MIN_OI_USD = 100_000
 COINGECKO_MARKETS_URL = "https://api.coingecko.com/api/v3/coins/markets"
+COINMARKETCAP_QUOTES_URL = "https://pro-api.coinmarketcap.com/public-api/v3/cryptocurrency/quotes/latest"
 RWA_MARKET_DATA_KEYWORDS = (
     "tokenized stock", "tokenized etf", "robinhood tokenized", "dinari tokenized",
     "backpack securities", "stock token", "xstock",
@@ -4775,7 +4776,40 @@ def fetch_coingecko_market_rows(symbols):
         })
         payload = get_json(url, timeout=10)
         if isinstance(payload, list):
-            rows.extend(payload)
+            rows.extend({**row, "source": "CoinGecko", "source_id": row.get("id")} for row in payload)
+    return rows
+
+
+def fetch_coinmarketcap_market_rows(symbols):
+    rows = []
+    unique_symbols = sorted({str(symbol).upper() for symbol in symbols if symbol})
+    for start in range(0, len(unique_symbols), 50):
+        chunk = unique_symbols[start:start + 50]
+        url = COINMARKETCAP_QUOTES_URL + "?" + urlencode({
+            "symbol": ",".join(chunk),
+            "convert": "USD",
+            "skip_invalid": "true",
+        })
+        payload = get_json(url, timeout=10)
+        for row in payload.get("data", []) if isinstance(payload, dict) else []:
+            usd_quote = next((quote for quote in row.get("quote", []) if quote.get("symbol") == "USD"), None)
+            if not usd_quote:
+                continue
+            rows.append({
+                "id": f"cmc:{row.get('id')}",
+                "source": "CoinMarketCap",
+                "source_id": row.get("id"),
+                "symbol": str(row.get("symbol", "")).lower(),
+                "name": row.get("name"),
+                "current_price": usd_quote.get("price"),
+                "market_cap": usd_quote.get("market_cap"),
+                "market_cap_rank": row.get("cmc_rank"),
+                "circulating_supply": row.get("circulating_supply"),
+                "total_supply": row.get("total_supply"),
+                "max_supply": row.get("max_supply"),
+                "fully_diluted_valuation": usd_quote.get("fully_diluted_market_cap"),
+                "last_updated": usd_quote.get("last_updated") or row.get("last_updated"),
+            })
     return rows
 
 
@@ -4805,6 +4839,13 @@ def match_market_cap_record(candidate, market_rows, max_price_error=0.25):
     return {**row, "price_match_error": price_error}
 
 
+def current_market_cap(candidate, market):
+    price = float(candidate.get("price") or 0)
+    circulating_supply = float(market.get("circulating_supply") or 0)
+    reported_market_cap = float(market.get("market_cap") or 0)
+    return price * circulating_supply if price > 0 and circulating_supply > 0 else reported_market_cap
+
+
 def open_interest_market_cap_label(ratio):
     if ratio >= 1:
         return "持仓高于市值"
@@ -4815,16 +4856,21 @@ def open_interest_market_cap_label(ratio):
     return "接近观察"
 
 
-def rank_open_interest_market_cap(candidates, market_rows, limit=10, min_ratio=OI_MARKET_CAP_MIN_RATIO):
+def rank_open_interest_market_cap(candidates, market_rows, comparison_rows=None, limit=10, min_ratio=OI_MARKET_CAP_MIN_RATIO):
     ranked = []
     for candidate in candidates:
-        market = match_market_cap_record(candidate, market_rows)
+        primary_market = match_market_cap_record(candidate, market_rows)
+        fallback_market = match_market_cap_record(candidate, comparison_rows or [])
+        market = primary_market or fallback_market
         if not market:
             continue
-        market_cap = float(market["market_cap"])
+        market_cap = current_market_cap(candidate, market)
         ratio = candidate["total_open_interest"] / market_cap
         if ratio < min_ratio:
             continue
+        comparison = fallback_market if primary_market else None
+        comparison_market_cap = current_market_cap(candidate, comparison) if comparison else None
+        difference_percent = abs(comparison_market_cap / market_cap - 1) * 100 if comparison_market_cap and market_cap else None
         ranked.append({
             "symbol": candidate["symbol"],
             "ratio": round(ratio, 4),
@@ -4833,12 +4879,18 @@ def rank_open_interest_market_cap(candidates, market_rows, limit=10, min_ratio=O
             "total_open_interest": round(candidate["total_open_interest"], 2),
             "exchange_oi": {key: round(value, 2) for key, value in sorted(candidate["exchange_oi"].items())},
             "market_cap": round(market_cap, 2),
+            "reported_market_cap": round(float(market.get("market_cap") or 0), 2),
             "market_cap_rank": market.get("market_cap_rank"),
             "circulating_supply": market.get("circulating_supply"),
             "market_name": market.get("name"),
             "market_data_id": market.get("id"),
+            "market_source": market.get("source") or "CoinGecko",
             "price_match_error": round(float(market["price_match_error"]) * 100, 2),
             "market_updated_at": market.get("last_updated"),
+            "alternate_market_cap": round(comparison_market_cap, 2) if comparison_market_cap else None,
+            "alternate_market_source": comparison.get("source") if comparison else None,
+            "market_cap_difference_percent": round(difference_percent, 1) if difference_percent is not None else None,
+            "market_cap_warning": difference_percent is not None and difference_percent >= 25,
         })
     ranked.sort(key=lambda item: (item["ratio"], item["total_open_interest"]), reverse=True)
     return ranked[:limit]
@@ -4854,14 +4906,32 @@ def load_open_interest_market_cap_opportunities():
         candidates = open_interest_market_candidates()
         symbols = [pair_base(item["symbol"]) for item in candidates]
         try:
-            market_rows = fetch_coingecko_market_rows(symbols)
-            items = rank_open_interest_market_cap(candidates, market_rows)
+            source_errors = []
+            try:
+                primary_rows = fetch_coinmarketcap_market_rows(symbols)
+            except Exception as error:
+                primary_rows = []
+                source_errors.append(f"CoinMarketCap {type(error).__name__}")
+            try:
+                comparison_rows = fetch_coingecko_market_rows(symbols)
+            except Exception as error:
+                comparison_rows = []
+                source_errors.append(f"CoinGecko {type(error).__name__}")
+            if not primary_rows and not comparison_rows:
+                raise RuntimeError("市值主源和备用源均不可用")
+            market_rows = primary_rows or comparison_rows
+            alternate_rows = comparison_rows if primary_rows else []
+            items = rank_open_interest_market_cap(candidates, market_rows, alternate_rows)
             OI_MARKET_CAP_CACHE.update({
                 "ts": now_ts,
                 "items": items,
                 "updated_at": datetime.now().strftime("%H:%M:%S"),
-                "coverage": sum(match_market_cap_record(item, market_rows) is not None for item in candidates),
-                "error": None,
+                "coverage": sum(
+                    match_market_cap_record(item, market_rows) is not None
+                    or match_market_cap_record(item, alternate_rows) is not None
+                    for item in candidates
+                ),
+                "error": "；".join(source_errors) if source_errors else None,
             })
         except Exception as error:
             # Keep the last valid ranking; a reference-data outage must not blank the live board.

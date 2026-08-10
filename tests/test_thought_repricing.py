@@ -192,6 +192,37 @@ class ThoughtRepricingTests(unittest.TestCase):
         self.assertEqual(signal["stage_key"], "prelaunch")
         self.assertLess(signal["cvd_change_5"], 0)
 
+    def test_strong_focus_uses_forty_percent_five_bar_threshold(self):
+        start = 1_700_000_000_000
+
+        def build_signal(last_close):
+            closed = []
+            for index in range(20):
+                closed.append([start + index * 1_800_000, 100, 101, 99, 100, 0, 0, 100, 0, 0, 50])
+            recent_closes = [105, 112, 120, 130, last_close]
+            open_price = 100
+            for offset, close in enumerate(recent_closes, start=20):
+                closed.append([
+                    start + offset * 1_800_000,
+                    open_price,
+                    close * 1.002,
+                    open_price * 0.998,
+                    close,
+                    0,
+                    0,
+                    100,
+                    0,
+                    0,
+                    60,
+                ])
+                open_price = close
+            oi_rows = [{"sumOpenInterest": value} for value in (100, 104, 108, 112, 116)]
+            ratio_rows = [{"longShortRatio": value} for value in (1.0, 0.96, 0.92, 0.88, 0.84)]
+            return classify_early_trend_stage(closed, oi_rows, ratio_rows)
+
+        self.assertEqual(build_signal(140)["signal_type"], "strong_focus")
+        self.assertIsNone(build_signal(139.9))
+
     def test_loose_prelaunch_candidate_never_sends_lark(self):
         with patch("app.urlopen") as mocked_urlopen:
             self.assertFalse(send_early_trend_stage_push([{

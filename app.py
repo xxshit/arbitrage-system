@@ -760,6 +760,7 @@ INDEX_COMPONENT_REFRESH_SECONDS = 5 * 60
 FUNDING_HISTORY_SYNC_SECONDS = 60
 PRICE_BACKFILL_SYNC_SECONDS = 2 * 60
 PRICE_HISTORY_BUCKET_SECONDS = 5 * 60
+EARLY_TREND_STRONG_PRICE_THRESHOLD = 40.0
 PRICE_HISTORY_RETENTION_SECONDS = 8 * 24 * 60 * 60
 TRADE_VALIDATION_CANDLE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 TRADE_VALIDATION_CHART_SECONDS = 3 * 24 * 60 * 60
@@ -5406,7 +5407,7 @@ def classify_early_trend_stage(closed, oi_rows, ratio_rows):
     cvd_up = cvd_change > 0
 
     # 用户指定的强看多入口：不是逐根相加，而是第一根开盘到第五根收盘的整体涨幅。
-    if price_change >= 50 and horn and cvd_up:
+    if price_change >= EARLY_TREND_STRONG_PRICE_THRESHOLD and horn and cvd_up:
         latest = recent[-1]
         body_high = max(float(latest[1]), float(latest[4]))
         upper_wick = percent_delta(float(latest[2]), body_high) or 0
@@ -9162,7 +9163,7 @@ def early_trend_thought_item(row):
         "user_mistakes": ["强看多假设不等于可以忽略追高风险；阶段越靠后，越需要防高位换手。"],
         "assistant_mistakes": ["不能再用统一结构分决定去留；本条由5根整体涨幅、CVD与犄角条件直接触发。"],
         "thesis_win_rate": {"wins": 0, "losses": 0, "pending": 1, "rate": 0.0, "note": "新信号待盯盘验证，暂不计胜负。"},
-        "my_thesis": "你的判断：最近5根30分钟K线整体涨幅超过50%，同期CVD上涨，持仓上涨而多空人数比下跌时，属于强看多重点；同时要用前置K线判断启动阶段。",
+        "my_thesis": "你的判断：最近5根30分钟K线整体涨幅达到40%，同期CVD上涨，持仓上涨而多空人数比下跌时，属于强看多重点；同时要用前置K线判断启动阶段。",
         "assistant_thesis": ("我的判断：该组合已经确认趋势启动，不能再叫启动前；重点是区分首次点火、第二段加速和后段过热。" if strong else
             "我的判断：价格尚未明显启动，但持仓、人数比和CVD已经先行，属于启动前蓄势观察；仍需等待价格与成交量确认。"),
         "challenge_points": ["5根整体涨幅按第一根开盘到第五根收盘计算，不把每根百分比机械相加。"],

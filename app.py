@@ -11526,19 +11526,19 @@ def background_intraday_early_trend_scan():
     last_slot = None
     time.sleep(25)
     while True:
-        interval = int(runtime_interval("early_trend_scan", 1800))
-        slot = int(time.time()) // interval
-        if slot != last_slot:
-            try:
+        try:
+            interval = int(runtime_interval("early_trend_scan", 1800))
+            slot = int(time.time()) // interval
+            if slot != last_slot:
                 with app.app_context():
                     mark_automation_status("intraday_early_trend_scan", "started")
                     scan_intraday_early_trends()
                     mark_automation_status("intraday_early_trend_scan", "success")
                 last_slot = slot
-            except Exception as exc:
-                with app.app_context():
-                    db.session.rollback()
-                    mark_automation_status("intraday_early_trend_scan", "error", exc)
+        except Exception as exc:
+            with app.app_context():
+                db.session.rollback()
+                mark_automation_status("intraday_early_trend_scan", "error", exc)
         time.sleep(20)
 
 

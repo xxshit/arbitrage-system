@@ -3,7 +3,9 @@ from types import SimpleNamespace
 
 from app import (
     TREND_HORIZON_META,
+    ake_horizons_needing_validation,
     build_ake_horizon_definitions,
+    current_ake_horizon_rows,
     horizon_move_pct,
     trend_horizon_outcome,
     trend_horizon_review_text,
@@ -23,6 +25,21 @@ class TrendHorizonValidationTests(unittest.TestCase):
         self.assertEqual(TREND_HORIZON_META["long"]["window"], "1D-3D")
         self.assertLess(TREND_HORIZON_META["short"]["expire_minutes"], TREND_HORIZON_META["medium"]["expire_minutes"])
         self.assertLess(TREND_HORIZON_META["medium"]["expire_minutes"], TREND_HORIZON_META["long"]["expire_minutes"])
+
+    def test_each_horizon_renews_without_waiting_for_long_plan(self):
+        active = [SimpleNamespace(horizon="long")]
+        self.assertEqual(ake_horizons_needing_validation(active), ["short", "medium"])
+
+    def test_current_payload_can_combine_active_horizons_from_different_batches(self):
+        rows = [
+            SimpleNamespace(horizon="short", status="active", batch_key="new-short"),
+            SimpleNamespace(horizon="medium", status="active", batch_key="new-medium"),
+            SimpleNamespace(horizon="long", status="active", batch_key="old-long"),
+            SimpleNamespace(horizon="short", status="completed", batch_key="old-batch"),
+        ]
+        selected = current_ake_horizon_rows(rows)
+        self.assertEqual([row.horizon for row in selected], ["short", "medium", "long"])
+        self.assertEqual([row.batch_key for row in selected], ["new-short", "new-medium", "old-long"])
 
     def test_review_keeps_stop_then_recovery_as_a_learning_case(self):
         plan = SimpleNamespace(

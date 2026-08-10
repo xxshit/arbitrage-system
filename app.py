@@ -10781,8 +10781,34 @@ def refresh_trend_horizon_validations(symbol=None, sync=True):
     return len(plans)
 
 
-def create_ake_horizon_template(force=False):
-    active = TrendHorizonValidation.query.filter_by(symbol="AKE/USDT", status="active").all()
+def ake_horizons_needing_validation(active_rows):
+    active_horizons = {row.horizon for row in active_rows}
+    return [horizon for horizon in TREND_HORIZON_META if horizon not in active_horizons]
+
+
+def current_ake_horizon_rows(rows):
+    active_by_horizon = {}
+    for row in rows:
+        if row.status == "active" and row.horizon not in active_by_horizon:
+            active_by_horizon[row.horizon] = row
+    if active_by_horizon:
+        return [active_by_horizon[horizon] for horizon in TREND_HORIZON_META if horizon in active_by_horizon]
+    if not rows:
+        return []
+    latest_batch = rows[0].batch_key
+    return [row for row in rows if row.batch_key == latest_batch]
+
+
+def create_ake_horizon_template(force=False, horizons=None):
+    horizons = list(horizons or TREND_HORIZON_META)
+    invalid_horizons = [horizon for horizon in horizons if horizon not in TREND_HORIZON_META]
+    if invalid_horizons:
+        raise ValueError(f"未知AKE验证周期：{', '.join(invalid_horizons)}")
+    active = TrendHorizonValidation.query.filter(
+        TrendHorizonValidation.symbol == "AKE/USDT",
+        TrendHorizonValidation.status == "active",
+        TrendHorizonValidation.horizon.in_(horizons),
+    ).all()
     if active and not force:
         return active[0].batch_key
     now = datetime.now(SHANGHAI_TZ).replace(tzinfo=None)
@@ -10801,7 +10827,7 @@ def create_ake_horizon_template(force=False):
     atr = max(float(metrics.get("atr") or 0), price * 0.025)
     support = float(snapshot.get("support") or metrics.get("low_1h") or price * 0.94)
     resistance = float(snapshot.get("resistance") or metrics.get("high_1h") or price * 1.08)
-    calibrations = {horizon: ake_horizon_calibration(horizon) for horizon in TREND_HORIZON_META}
+    calibrations = {horizon: ake_horizon_calibration(horizon) for horizon in horizons}
     evidence = {
         "anchor_price": price,
         "support": support,
@@ -10817,7 +10843,8 @@ def create_ake_horizon_template(force=False):
     definitions = build_ake_horizon_definitions(
         price, atr, support, resistance, metrics, calibrations
     )
-    for horizon, item in definitions.items():
+    for horizon in horizons:
+        item = definitions[horizon]
         meta = TREND_HORIZON_META[horizon]
         row = TrendHorizonValidation(
             batch_key=batch_key,
@@ -10846,10 +10873,11 @@ def create_ake_horizon_template(force=False):
 def ensure_ake_horizon_validation():
     active = TrendHorizonValidation.query.filter_by(symbol="AKE/USDT", status="active").order_by(
         TrendHorizonValidation.anchor_at.desc()
-    ).first()
-    if active:
-        return active.batch_key, False
-    batch_key = create_ake_horizon_template()
+    ).all()
+    missing_horizons = ake_horizons_needing_validation(active)
+    if not missing_horizons:
+        return active[0].batch_key, False
+    batch_key = create_ake_horizon_template(horizons=missing_horizons)
     return batch_key, True
 
 
@@ -10893,10 +10921,9 @@ def trend_horizon_payload(symbol):
     rows = TrendHorizonValidation.query.filter_by(symbol=symbol).order_by(
         TrendHorizonValidation.anchor_at.desc(), TrendHorizonValidation.id
     ).all()
+    rows = current_ake_horizon_rows(rows) if symbol == "AKE/USDT" else rows
     if not rows:
         return []
-    latest_batch = rows[0].batch_key
-    rows = [row for row in rows if row.batch_key == latest_batch]
     events_by_plan = {}
     plan_ids = [row.id for row in rows]
     if plan_ids:

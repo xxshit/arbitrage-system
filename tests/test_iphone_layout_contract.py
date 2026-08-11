@@ -61,8 +61,10 @@ class IPhoneLayoutContractTests(unittest.TestCase):
         self.assertIn("function activateChatAudio", APP_JS)
         self.assertIn("chatSoundPending=true", APP_JS)
         self.assertIn("document.addEventListener('touchend',primeSignalAudio", APP_JS)
-        foreground = function_source("chatConversationIsForeground", "announceIncomingChatMessage")
-        self.assertIn("mobile-conversation-open", foreground)
+        announcement = function_source("announceIncomingChatMessage", "observeIncomingChatMessages")
+        self.assertIn("playChatSound()", announcement)
+        self.assertNotIn("if(!chatConversationIsForeground", announcement)
+        self.assertIn("relevant=chatSoundEnabled||isStandaloneWebApp()||isAppleTouchDevice()", APP_JS)
 
     def test_portrait_chat_owns_the_visual_viewport(self):
         self.assertIn("@media(max-width:760px) and (orientation:portrait)", STYLE_CSS)

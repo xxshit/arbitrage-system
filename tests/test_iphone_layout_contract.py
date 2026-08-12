@@ -51,6 +51,15 @@ class IPhoneLayoutContractTests(unittest.TestCase):
     def test_iphone_inputs_avoid_focus_zoom_and_chat_tracks_keyboard(self):
         self.assertIn('select,textarea{font-size:16px!important}', STYLE_CSS)
         self.assertIn("window.visualViewport?.addEventListener('resize',()=>{syncMobileViewportHeight();syncMobileChatLayoutState()})", APP_JS)
+        self.assertIn("window.visualViewport?.addEventListener('scroll',syncMobileViewportHeight)", APP_JS)
+        self.assertIn("mobileViewportBaseline-height>120", APP_JS)
+        self.assertIn("mobile&&chatActive&&composerFocused", APP_JS)
+        self.assertIn("document.body.classList.toggle('mobile-chat-keyboard',keyboardOpen)", APP_JS)
+        self.assertIn("document.addEventListener('focusin'", APP_JS)
+        self.assertIn("--mobile-viewport-offset-top", STYLE_CSS)
+        self.assertIn("body.mobile-chat-keyboard{position:fixed;top:var(--mobile-viewport-offset-top,0px)", STYLE_CSS)
+        self.assertIn("body.mobile-chat-keyboard main{position:absolute;inset:0;height:100%", STYLE_CSS)
+        self.assertIn("body.mobile-chat-keyboard #chat .chat-composer{flex:0 0 auto;padding-bottom:6px}", STYLE_CSS)
         self.assertIn("height:calc(var(--mobile-viewport-height,100dvh) - 158px", STYLE_CSS)
 
     def test_home_screen_chat_requires_and_recovers_audio_activation(self):

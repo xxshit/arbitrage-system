@@ -277,7 +277,9 @@ async function loadTokenHedgeProfiles(){const target=byId('tokenHedgeProfiles');
 function isDailyView(viewId){return ['daily-trends','daily-thoughts','daily-listings'].includes(viewId)}
 function updateSidebarSubnav(viewId){document.querySelectorAll('aside .nav-sub').forEach(item=>item.classList.add('hidden'));document.querySelectorAll('aside nav a[data-subnav]').forEach(item=>item.classList.remove('expanded'));if(viewId==='spot-futures'){document.querySelector('aside .spot-period-nav')?.classList.remove('hidden');document.querySelector('aside nav a[data-subnav="spot-period-nav"]')?.classList.add('expanded')}if(isDailyView(viewId)){document.querySelector('aside .daily-nav')?.classList.remove('hidden');document.querySelector('aside nav a[data-subnav="daily-nav"]')?.classList.add('expanded')}}
 function updateSidebarActive(link,viewId){document.querySelectorAll('nav a[data-view]').forEach(item=>{const parentSpot=item.dataset.subnav==='spot-period-nav'&&viewId==='spot-futures';const parentDaily=item.dataset.subnav==='daily-nav'&&isDailyView(viewId);item.classList.toggle('active',item===link||parentSpot||parentDaily)})}
-function syncMobileViewportHeight(){const height=window.visualViewport?.height||window.innerHeight;document.documentElement.style.setProperty('--mobile-viewport-height',`${Math.round(height)}px`)}
+let mobileViewportBaseline=Math.max(window.innerHeight,window.visualViewport?.height||0)
+function syncMobileViewportHeight(){const viewport=window.visualViewport,height=viewport?.height||window.innerHeight,offsetTop=viewport?.offsetTop||0,composerFocused=Boolean(document.activeElement?.closest?.('#chatComposer')),chatActive=byId('chat')?.classList.contains('active'),mobile=window.innerWidth<=760;if(!composerFocused)mobileViewportBaseline=Math.max(window.innerHeight,height);const keyboardOpen=mobile&&chatActive&&composerFocused&&mobileViewportBaseline-height>120;document.documentElement.style.setProperty('--mobile-viewport-height',`${Math.round(height)}px`);document.documentElement.style.setProperty('--mobile-viewport-offset-top',`${Math.round(offsetTop)}px`);document.body.classList.toggle('mobile-chat-keyboard',keyboardOpen)}
+function scheduleMobileViewportSync(){syncMobileViewportHeight();requestAnimationFrame(syncMobileViewportHeight);setTimeout(syncMobileViewportHeight,180)}
 function updateMobileViewTitle(link,viewId){const title=byId('mobileViewTitle'),source=link||document.querySelector(`aside nav a[data-view="${viewId}"]`);if(!title||!source)return;title.textContent=source.textContent.replace(/\s+/g,' ').trim()}
 function toggleMobileNav(force){const sidebar=byId('appSidebar'),button=byId('mobileNavToggle'),backdrop=byId('mobileNavBackdrop');if(!sidebar||!button)return;const open=typeof force==='boolean'?force:!document.body.classList.contains('mobile-nav-open');document.body.classList.toggle('mobile-nav-open',open);button.setAttribute('aria-expanded',String(open));button.setAttribute('aria-label',open?'关闭导航':'打开导航');backdrop?.setAttribute('aria-hidden',String(!open))}
 function syncMobileChatLayoutState(){const open=window.innerWidth<=760&&byId('chat')?.classList.contains('active')&&byId('chat')?.querySelector('.chat-shell')?.classList.contains('mobile-conversation-open');document.body.classList.toggle('mobile-chat-conversation',Boolean(open))}
@@ -453,7 +455,11 @@ window.addEventListener('pageshow',event=>{refreshChatAudioState();syncChatAfter
 window.addEventListener('pagehide',()=>{signalAudioPrimed=false;updateChatAudioGate()});
 window.addEventListener('online',syncChatAfterWake);
 window.addEventListener('resize',()=>{syncMobileViewportHeight();syncMobileChatLayoutState();if(window.innerWidth>1180)toggleMobileNav(false)});
+window.addEventListener('orientationchange',()=>{mobileViewportBaseline=0;scheduleMobileViewportSync()});
 window.visualViewport?.addEventListener('resize',()=>{syncMobileViewportHeight();syncMobileChatLayoutState()});
+window.visualViewport?.addEventListener('scroll',syncMobileViewportHeight);
+document.addEventListener('focusin',event=>{if(event.target.closest?.('#chatComposer'))scheduleMobileViewportSync()});
+document.addEventListener('focusout',event=>{if(event.target.closest?.('#chatComposer'))setTimeout(syncMobileViewportHeight,180)});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')toggleMobileNav(false)});
 document.addEventListener('pointerdown',primeSignalAudio,true);
 document.addEventListener('touchend',primeSignalAudio,{capture:true,passive:true});

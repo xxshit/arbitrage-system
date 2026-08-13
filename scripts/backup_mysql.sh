@@ -93,3 +93,7 @@ find "$DAILY_DIR" -type f -name "${DATABASE_NAME}-*.sql.gz.sha256" -mtime +90 -d
 
 SIZE="$(du -h "$FINAL_PATH" | awk '{print $1}')"
 echo "Backup completed: ${FINAL_PATH} (${SIZE})"
+
+if [[ -x /usr/local/sbin/arbitrage-refresh-backup-export ]]; then
+  /usr/local/sbin/arbitrage-refresh-backup-export
+fi

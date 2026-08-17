@@ -377,6 +377,7 @@ aside nav>a[data-view="token-hedge"]{order:11}aside nav>a[data-view="strategies"
 .mobile-appbar,.mobile-nav-backdrop,.chat-mobile-back{display:none}
 button,a,input,select,textarea{touch-action:manipulation}
 .chat-audio-gate{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 10px;padding:9px 11px;border:1px solid #efc46e;border-radius:7px;background:#fff7df;color:#6f4e0a}.chat-audio-gate.hidden{display:none}.chat-audio-gate>span{display:flex;align-items:center;gap:8px;min-width:0}.chat-audio-gate i{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:#f5d58d;color:#70500e;font-style:normal}.chat-audio-gate b{font-size:11px}.chat-audio-gate button{min-width:82px;border-color:#d39b32;background:#fffdf5;color:#805700}
+.chat-push-gate{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 10px;padding:9px 11px;border:1px solid #86cdb4;border-radius:7px;background:#ecfaf4;color:#155e4a}.chat-push-gate.hidden,.chat-push-gate button.hidden{display:none}.chat-push-gate>span{display:flex;align-items:center;gap:8px;min-width:0}.chat-push-gate i{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:#bfe9d8;color:#08735a;font-size:9px;font-style:normal}.chat-push-gate b{font-size:11px;line-height:1.45}.chat-push-gate button{min-width:82px;border-color:#58ac8d;background:#f7fffb;color:#087055}.chat-push-gate button:disabled{cursor:not-allowed;opacity:.6}
 
 @media(max-width:1180px){
   .mobile-appbar{position:fixed;z-index:80;inset:0 0 auto;display:grid;grid-template-columns:44px minmax(0,1fr) 16px;align-items:center;gap:10px;height:calc(58px + env(safe-area-inset-top));padding:env(safe-area-inset-top) max(14px,env(safe-area-inset-right)) 0 max(10px,env(safe-area-inset-left));border-bottom:1px solid #245174;background:#092b52eF;color:#fff;box-shadow:0 6px 18px rgba(8,35,60,.18);backdrop-filter:blur(12px)}
@@ -418,7 +419,7 @@ button,a,input,select,textarea{touch-action:manipulation}
   body.mobile-chat-view main>header,body.mobile-chat-view main>.metrics,body.mobile-chat-view .tips-panel{display:none!important}
   body.mobile-chat-view #chat.active{display:grid;grid-template-rows:auto auto minmax(0,1fr);height:100%;min-height:0;overflow:hidden}
   body.mobile-chat-view #chat>.panel-title{margin:0 0 9px}
-  body.mobile-chat-view #chat .chat-audio-gate{margin-bottom:8px}
+  body.mobile-chat-view #chat .chat-audio-gate,body.mobile-chat-view #chat .chat-push-gate{margin-bottom:8px}
   body.mobile-chat-view #chat .chat-shell{height:100%;min-height:0!important;margin:0}
   body.mobile-chat-conversation #chat.active{grid-template-rows:auto minmax(0,1fr)}
   body.mobile-chat-conversation #chat>.panel-title{display:none!important}

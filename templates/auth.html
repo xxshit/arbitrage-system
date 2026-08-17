@@ -5,8 +5,10 @@
   <meta name="theme-color" content="#092b52">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ArbiScope">
   <title>{{ '登录' if mode == 'login' else '邀请码注册' }} | ArbiScope</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260807-ios-chat-audio">
+  <link rel="manifest" href="{{ url_for('web_app_manifest') }}?v=20260815-web-push">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260815-web-push">
 </head>
 <body class="auth-page">
   <main class="auth-shell">

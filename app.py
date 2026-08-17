@@ -11,18 +11,24 @@ import click
 import math
 import io
 import base64
+import struct
 from html.parser import HTMLParser
 from functools import wraps
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlencode, urljoin
+from urllib.parse import urlencode, urljoin, urlparse
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from flask import Flask, g, has_app_context, jsonify, redirect, render_template, request, send_file, session, url_for
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import and_, case, func, inspect, or_, text, tuple_
@@ -43,12 +49,79 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes", "on"}
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
+CHAT_PUSH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="chat-web-push")
 
 CHAT_RETENTION_DAYS = 7
 CHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 CHAT_ENCRYPTION_VERSION = 1
 CHAT_TEXT_AAD = b"ArbiScope/chat-message/v1"
 CHAT_IMAGE_AAD = b"ArbiScope/chat-image/v1"
+WEB_PUSH_SUBSCRIPTION_AAD = b"ArbiScope/web-push-subscription/v1"
+WEB_PUSH_ENDPOINT_HOST_SUFFIXES = (
+    "push.apple.com",
+    "fcm.googleapis.com",
+    "push.services.mozilla.com",
+    "notify.windows.com",
+)
+WEB_APP_MANIFEST = {
+    "name": "ArbiScope 套利监控中心",
+    "short_name": "ArbiScope",
+    "description": "私有套利监控、趋势研判与协作记录",
+    "id": "/",
+    "start_url": "/#dashboard",
+    "scope": "/",
+    "display": "standalone",
+    "background_color": "#f4f1e8",
+    "theme_color": "#092b52",
+    "lang": "zh-CN",
+}
+SERVICE_WORKER_SOURCE = """const ARBISCOPE_SERVICE_WORKER_VERSION = '20260815-web-push';
+
+self.addEventListener('install', () => self.skipWaiting());
+
+self.addEventListener('activate', event => {
+  event.waitUntil(self.clients.claim());
+});
+
+self.addEventListener('push', event => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch (error) {
+    payload = {};
+  }
+  if (payload.type !== 'chat-message') return;
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({type: 'window', includeUncontrolled: true});
+    const visibleWindow = windows.find(client => client.visibilityState === 'visible' && client.focused);
+    if (visibleWindow) {
+      visibleWindow.postMessage({type: 'chat-push-received', message_id: payload.message_id || 0});
+      return;
+    }
+    await self.registration.showNotification(payload.title || 'ArbiScope 有新协作消息', {
+      body: payload.body || '打开协作记录查看内容',
+      tag: payload.tag || 'arbiscope-chat-message',
+      renotify: true,
+      data: {url: payload.url || '/#chat'},
+    });
+  })());
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const data = event.notification.data || {};
+  const targetUrl = new URL(data.url || '/#chat', self.location.origin).href;
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({type: 'window', includeUncontrolled: true});
+    for (const client of windows) {
+      if (new URL(client.url).origin !== self.location.origin) continue;
+      await client.navigate(targetUrl);
+      return client.focus();
+    }
+    return self.clients.openWindow(targetUrl);
+  })());
+});
+"""
 CHAT_IMAGE_SIGNATURES = (
     (b"\x89PNG\r\n\x1a\n", "png", "image/png"),
     (b"\xff\xd8\xff", "jpg", "image/jpeg"),
@@ -647,6 +720,20 @@ class ChatMessagePreference(db.Model):
     __table_args__ = (
         db.UniqueConstraint("user_id", "message_id", name="uq_chat_message_preference_user_message"),
     )
+
+
+class ChatPushSubscription(db.Model):
+    """Encrypted per-device Web Push subscription for one account."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    endpoint_hash = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    subscription_data = db.Column(db.Text, nullable=False)
+    encryption_version = db.Column(db.SmallInteger, nullable=False, default=CHAT_ENCRYPTION_VERSION)
+    user_agent = db.Column(db.String(255))
+    failure_count = db.Column(db.Integer, nullable=False, default=0)
+    last_success_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False)
+    updated_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, onupdate=utc_now_naive)
 
 
 class InviteCode(db.Model):
@@ -3171,7 +3258,7 @@ def admin_required(view):
 
 @app.before_request
 def require_account_login():
-    if request.endpoint == "static" or request.path in {"/login", "/register", "/api/auth/login", "/api/auth/register"}:
+    if request.endpoint in {"static", "service_worker", "web_app_manifest"} or request.path in {"/login", "/register", "/api/auth/login", "/api/auth/register"}:
         return None
     user_id = session.get("user_id")
     token = session.get("auth_token")
@@ -3193,6 +3280,24 @@ def login_page():
     if session.get("user_id"):
         return redirect("/")
     return render_template("auth.html", mode="login")
+
+
+@app.get("/service-worker.js")
+def service_worker():
+    response = app.response_class(SERVICE_WORKER_SOURCE, mimetype="application/javascript")
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Service-Worker-Allowed"] = "/"
+    return response
+
+
+@app.get("/manifest.webmanifest")
+def web_app_manifest():
+    response = app.response_class(
+        json.dumps(WEB_APP_MANIFEST, ensure_ascii=False, separators=(",", ":")),
+        mimetype="application/manifest+json",
+    )
+    response.headers["Cache-Control"] = "public, max-age=3600"
+    return response
 
 
 @app.get("/register")
@@ -3262,6 +3367,13 @@ def logout_api():
     token = session.get("auth_token")
     user = db.session.get(UserAccount, user_id) if user_id else None
     if user and token and user.active_session_hash == session_digest(token):
+        payload = request.get_json(silent=True) or {}
+        push_endpoint = str(payload.get("push_endpoint", "")).strip()
+        if push_endpoint:
+            ChatPushSubscription.query.filter_by(
+                user_id=user.id,
+                endpoint_hash=web_push_endpoint_hash(push_endpoint),
+            ).delete(synchronize_session=False)
         user.active_session_hash = None
         db.session.commit()
     session.clear()
@@ -3600,6 +3712,8 @@ def set_user_active(user_id):
     changed_at = datetime.now()
     target.active = desired_active
     target.active_session_hash = None
+    if not desired_active:
+        ChatPushSubscription.query.filter_by(user_id=target.id).delete(synchronize_session=False)
     db.session.add(AccountSecurityEvent(
         actor_user_id=actor.id,
         target_user_id=target.id,
@@ -3636,6 +3750,7 @@ def reset_user_password(user_id):
     target.password_hash = generate_password_hash(new_password)
     target.password_changed_at = changed_at
     target.active_session_hash = None
+    ChatPushSubscription.query.filter_by(user_id=target.id).delete(synchronize_session=False)
     db.session.add(AccountSecurityEvent(
         actor_user_id=current_user().id,
         target_user_id=target.id,
@@ -3697,6 +3812,274 @@ def chat_message_for_participant(message_id, user_id):
     if not row or user_id not in {row.sender_id, row.recipient_id}:
         return None
     return row
+
+
+def valid_vapid_public_key(value):
+    try:
+        padding = "=" * (-len(value) % 4)
+        decoded = base64.urlsafe_b64decode((value + padding).encode("ascii"))
+    except (ValueError, UnicodeError):
+        return False
+    return len(decoded) == 65 and decoded[0] == 4
+
+
+def web_push_settings():
+    public_key = os.getenv("WEB_PUSH_VAPID_PUBLIC_KEY", "").strip().rstrip("=")
+    private_key = os.getenv("WEB_PUSH_VAPID_PRIVATE_KEY", "").strip()
+    private_key_file = os.getenv("WEB_PUSH_VAPID_PRIVATE_KEY_FILE", "").strip()
+    if private_key_file and not os.path.isabs(private_key_file):
+        private_key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), private_key_file)
+    if not private_key and private_key_file and os.path.isfile(private_key_file):
+        private_key = private_key_file
+    subject = os.getenv("WEB_PUSH_VAPID_SUBJECT", "").strip()
+    subject_valid = subject.startswith("mailto:") or subject.startswith("https://")
+    available = bool(valid_vapid_public_key(public_key) and private_key and subject_valid)
+    if available:
+        try:
+            available = vapid_public_key(load_vapid_private_key(private_key)) == public_key
+        except (OSError, ValueError, TypeError):
+            available = False
+    return {
+        "available": available,
+        "public_key": public_key if available else "",
+        "private_key": private_key if available else "",
+        "subject": subject if available else "",
+    }
+
+
+def normalize_web_push_subscription(payload):
+    subscription = payload.get("subscription") if isinstance(payload, dict) else None
+    if not isinstance(subscription, dict):
+        subscription = payload if isinstance(payload, dict) else {}
+    endpoint = str(subscription.get("endpoint", "")).strip()
+    parsed = urlparse(endpoint)
+    hostname = (parsed.hostname or "").lower()
+    if (
+        not endpoint
+        or len(endpoint) > 2048
+        or parsed.scheme != "https"
+        or not any(hostname == suffix or hostname.endswith("." + suffix) for suffix in WEB_PUSH_ENDPOINT_HOST_SUFFIXES)
+    ):
+        raise ValueError("Push 订阅地址无效。")
+    keys = subscription.get("keys") if isinstance(subscription.get("keys"), dict) else {}
+    p256dh = str(keys.get("p256dh", "")).strip().rstrip("=")
+    auth = str(keys.get("auth", "")).strip().rstrip("=")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{80,120}", p256dh):
+        raise ValueError("Push 订阅公钥无效。")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", auth):
+        raise ValueError("Push 订阅认证信息无效。")
+    try:
+        public_key_bytes = web_push_base64url_decode(p256dh)
+        auth_bytes = web_push_base64url_decode(auth)
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), public_key_bytes)
+    except (ValueError, TypeError):
+        raise ValueError("Push 订阅密钥格式无效。") from None
+    if len(public_key_bytes) != 65 or len(auth_bytes) < 16:
+        raise ValueError("Push 订阅密钥长度无效。")
+    return {"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}}
+
+
+def web_push_endpoint_hash(endpoint):
+    return hashlib.sha256(str(endpoint).encode("utf-8")).hexdigest()
+
+
+def encrypt_web_push_subscription(subscription):
+    nonce = secrets.token_bytes(12)
+    plaintext = json.dumps(subscription, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    encrypted = chat_cipher().encrypt(nonce, plaintext, WEB_PUSH_SUBSCRIPTION_AAD)
+    return base64.urlsafe_b64encode(nonce + encrypted).decode("ascii")
+
+
+def decrypt_web_push_subscription(value, encryption_version=CHAT_ENCRYPTION_VERSION):
+    if int(encryption_version or 0) != CHAT_ENCRYPTION_VERSION:
+        raise RuntimeError("不支持的 Push 订阅加密版本。")
+    try:
+        payload = base64.urlsafe_b64decode(str(value).encode("ascii"))
+        plaintext = chat_cipher().decrypt(payload[:12], payload[12:], WEB_PUSH_SUBSCRIPTION_AAD)
+        return normalize_web_push_subscription(json.loads(plaintext.decode("utf-8")))
+    except (InvalidTag, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Push 订阅解密失败。") from exc
+
+
+def web_push_base64url(value):
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def web_push_base64url_decode(value):
+    compact = str(value).strip().rstrip("=")
+    return base64.urlsafe_b64decode((compact + "=" * (-len(compact) % 4)).encode("ascii"))
+
+
+def load_vapid_private_key(value):
+    source = str(value or "").strip()
+    if not source:
+        raise ValueError("VAPID 私钥缺失。")
+    if os.path.isfile(source):
+        with open(source, "rb") as handle:
+            key = serialization.load_pem_private_key(handle.read(), password=None)
+        if not isinstance(key, ec.EllipticCurvePrivateKey) or not isinstance(key.curve, ec.SECP256R1):
+            raise ValueError("VAPID 私钥必须使用 P-256。")
+        return key
+    raw = web_push_base64url_decode(source)
+    if len(raw) != 32:
+        raise ValueError("VAPID 私钥必须是32字节的URL安全Base64值或PEM文件。")
+    number = int.from_bytes(raw, "big")
+    if number <= 0:
+        raise ValueError("VAPID 私钥无效。")
+    return ec.derive_private_key(number, ec.SECP256R1())
+
+
+def vapid_public_key(private_key):
+    encoded = private_key.public_key().public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint,
+    )
+    return web_push_base64url(encoded)
+
+
+def vapid_authorization(endpoint, private_key, public_key, subject):
+    parsed = urlparse(endpoint)
+    audience = f"{parsed.scheme}://{parsed.netloc}"
+    header = web_push_base64url(json.dumps(
+        {"typ": "JWT", "alg": "ES256"}, separators=(",", ":")
+    ).encode("utf-8"))
+    claims = web_push_base64url(json.dumps({
+        "aud": audience,
+        "exp": int(time.time()) + 12 * 60 * 60,
+        "sub": subject,
+    }, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{header}.{claims}".encode("ascii")
+    der_signature = private_key.sign(signing_input, ec.ECDSA(hashes.SHA256()))
+    r, s = decode_dss_signature(der_signature)
+    signature = web_push_base64url(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
+    return f"vapid t={header}.{claims}.{signature}, k={public_key}"
+
+
+def encrypt_web_push_payload(subscription, payload):
+    user_public_bytes = web_push_base64url_decode(subscription["keys"]["p256dh"])
+    auth_secret = web_push_base64url_decode(subscription["keys"]["auth"])
+    if len(user_public_bytes) != 65 or len(auth_secret) < 16:
+        raise ValueError("Push 订阅密钥长度无效。")
+    user_public_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), user_public_bytes)
+    server_private_key = ec.generate_private_key(ec.SECP256R1())
+    server_public_bytes = server_private_key.public_key().public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint,
+    )
+    shared_secret = server_private_key.exchange(ec.ECDH(), user_public_key)
+    key_info = b"WebPush: info\x00" + user_public_bytes + server_public_bytes
+    ikm = HKDF(
+        algorithm=hashes.SHA256(), length=32, salt=auth_secret, info=key_info
+    ).derive(shared_secret)
+    salt = secrets.token_bytes(16)
+    content_key = HKDF(
+        algorithm=hashes.SHA256(), length=16, salt=salt, info=b"Content-Encoding: aes128gcm\x00"
+    ).derive(ikm)
+    nonce = HKDF(
+        algorithm=hashes.SHA256(), length=12, salt=salt, info=b"Content-Encoding: nonce\x00"
+    ).derive(ikm)
+    plaintext = str(payload).encode("utf-8") + b"\x02"
+    ciphertext = AESGCM(content_key).encrypt(nonce, plaintext, None)
+    return salt + struct.pack("!I", 4096) + bytes([len(server_public_bytes)]) + server_public_bytes + ciphertext
+
+
+def send_web_push(subscription, payload, settings, ttl=300, timeout=10):
+    private_key = load_vapid_private_key(settings["private_key"])
+    if vapid_public_key(private_key) != settings["public_key"]:
+        raise ValueError("VAPID 公私钥不匹配。")
+    encrypted = encrypt_web_push_payload(subscription, payload)
+    request_object = Request(
+        subscription["endpoint"],
+        data=encrypted,
+        method="POST",
+        headers={
+            "Authorization": vapid_authorization(
+                subscription["endpoint"], private_key, settings["public_key"], settings["subject"]
+            ),
+            "Content-Encoding": "aes128gcm",
+            "Content-Type": "application/octet-stream",
+            "TTL": str(max(0, int(ttl))),
+            "Urgency": "normal",
+        },
+    )
+    with urlopen(request_object, timeout=timeout) as response:
+        return int(getattr(response, "status", 201) or 201)
+
+
+def deliver_chat_web_push(recipient_id, message_id):
+    settings = web_push_settings()
+    if not settings["available"]:
+        return {"sent": 0, "removed": 0, "failed": 0, "configured": False}
+    rows = ChatPushSubscription.query.filter_by(user_id=recipient_id).all()
+    payload = json.dumps({
+        "type": "chat-message",
+        "title": "ArbiScope 有新协作消息",
+        "body": "打开协作记录查看内容",
+        "tag": f"chat-message-{int(message_id)}",
+        "url": "/#chat",
+        "message_id": int(message_id),
+    }, ensure_ascii=False, separators=(",", ":"))
+    sent = removed = failed = 0
+    for row in rows:
+        try:
+            subscription = decrypt_web_push_subscription(row.subscription_data, row.encryption_version)
+        except RuntimeError:
+            db.session.delete(row)
+            removed += 1
+            continue
+        try:
+            send_web_push(subscription, payload, settings, ttl=300, timeout=10)
+            row.failure_count = 0
+            row.last_success_at = utc_now_naive()
+            row.updated_at = utc_now_naive()
+            sent += 1
+        except HTTPError as exc:
+            status_code = exc.code
+            if status_code in {404, 410}:
+                db.session.delete(row)
+                removed += 1
+            else:
+                row.failure_count = int(row.failure_count or 0) + 1
+                row.updated_at = utc_now_naive()
+                failed += 1
+                app.logger.warning(
+                    "chat_web_push_failed subscription_id=%s status=%s failures=%s",
+                    row.id,
+                    status_code or "unknown",
+                    row.failure_count,
+                )
+        except Exception as exc:
+            row.failure_count = int(row.failure_count or 0) + 1
+            row.updated_at = utc_now_naive()
+            failed += 1
+            app.logger.warning(
+                "chat_web_push_failed subscription_id=%s error=%s failures=%s",
+                row.id,
+                type(exc).__name__,
+                row.failure_count,
+            )
+    db.session.commit()
+    return {"sent": sent, "removed": removed, "failed": failed, "configured": True}
+
+
+def queue_chat_web_push(recipient_id, message_id):
+    if not web_push_settings()["available"]:
+        return False
+
+    def run():
+        with app.app_context():
+            deliver_chat_web_push(recipient_id, message_id)
+
+    future = CHAT_PUSH_EXECUTOR.submit(run)
+
+    def report_failure(completed):
+        try:
+            completed.result()
+        except Exception:
+            app.logger.exception("chat_web_push_worker_failed recipient_id=%s message_id=%s", recipient_id, message_id)
+
+    future.add_done_callback(report_failure)
+    return True
 
 
 def detect_chat_image(data):
@@ -3837,6 +4220,60 @@ def pinned_chat_message(user_id, peer_id, cleared_through_id, retention_cutoff):
         ChatMessage.created_at >= retention_cutoff,
     ).order_by(ChatMessagePreference.pinned_at.desc()).first()
     return db.session.get(ChatMessage, preference.message_id) if preference else None
+
+
+@app.get("/api/chat/push/config")
+def chat_push_config_api():
+    user = current_user()
+    settings = web_push_settings()
+    return jsonify({
+        "ok": True,
+        "available": settings["available"],
+        "public_key": settings["public_key"],
+        "subscription_count": ChatPushSubscription.query.filter_by(user_id=user.id).count(),
+    })
+
+
+@app.post("/api/chat/push/subscriptions")
+def create_chat_push_subscription_api():
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    if not web_push_settings()["available"]:
+        return jsonify({"ok": False, "error": "服务器尚未配置系统通知。"}), 503
+    try:
+        subscription = normalize_web_push_subscription(request.get_json(silent=True) or {})
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    user = current_user()
+    endpoint_hash = web_push_endpoint_hash(subscription["endpoint"])
+    row = ChatPushSubscription.query.filter_by(endpoint_hash=endpoint_hash).first()
+    if row is None:
+        row = ChatPushSubscription(user_id=user.id, endpoint_hash=endpoint_hash, subscription_data="")
+        db.session.add(row)
+    row.user_id = user.id
+    row.subscription_data = encrypt_web_push_subscription(subscription)
+    row.encryption_version = CHAT_ENCRYPTION_VERSION
+    row.user_agent = str(request.headers.get("User-Agent", ""))[:255] or None
+    row.failure_count = 0
+    row.updated_at = utc_now_naive()
+    db.session.commit()
+    return jsonify({"ok": True, "subscribed": True})
+
+
+@app.delete("/api/chat/push/subscriptions")
+def delete_chat_push_subscription_api():
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    try:
+        subscription = normalize_web_push_subscription(request.get_json(silent=True) or {})
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    removed = ChatPushSubscription.query.filter_by(
+        user_id=current_user().id,
+        endpoint_hash=web_push_endpoint_hash(subscription["endpoint"]),
+    ).delete(synchronize_session=False)
+    db.session.commit()
+    return jsonify({"ok": True, "subscribed": False, "removed": bool(removed)})
 
 
 @app.get("/api/chat/users")
@@ -4155,6 +4592,7 @@ def send_chat_message_api():
     except Exception:
         db.session.rollback()
         raise
+    queue_chat_web_push(peer.id, row.id)
     peer_state = chat_state(peer.id, user.id)
     peer_last_read_message_id = peer_state.last_read_message_id if peer_state else 0
     peer_last_read_at = peer_state.updated_at if peer_state else None

@@ -363,9 +363,19 @@ class ChatModuleTests(unittest.TestCase):
             headers={"X-CSRF-Token": "alice-csrf"},
         )
         self.assertEqual(updated.status_code, 200)
+        self.assertIn("不停止协作消息轮询、提醒声音或系统通知", updated.get_json()["item"]["description"])
         self.assertTrue(self.alice.get("/api/auth/me").get_json()["chat_nav_hidden"])
         self.assertIn(b'class="chat-nav-entry hidden"', self.alice.get("/").data)
         self.assertFalse(self.bob.get("/api/auth/me").get_json()["chat_nav_hidden"])
+
+        sent = self.bob.post(
+            "/api/chat/messages",
+            json={"recipient_id": self.alice_id, "body": "隐藏入口仍需提醒"},
+            headers={"X-CSRF-Token": "bob-csrf"},
+        )
+        self.assertEqual(sent.status_code, 200)
+        hidden_account_contacts = self.alice.get("/api/chat/users").get_json()
+        self.assertEqual(hidden_account_contacts["unread_total"], 1)
 
     def test_collaboration_entry_uses_motion_instead_of_visible_new_badge(self):
         page = self.alice.get("/").get_data(as_text=True)
@@ -712,7 +722,18 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn(".chat-compose-row{display:grid", style)
         self.assertIn(".chat-compose-row>button{align-self:stretch", style)
         self.assertNotIn(".chat-composer>button{align-self:start", style)
-        self.assertIn("20260815-web-push", page)
+        self.assertIn("20260817-hidden-chat-sound", page)
+        nav_visibility = script[
+            script.index("function applyChatNavVisibility"):
+            script.index("async function loadAuthState")
+        ]
+        self.assertIn("startChatPolling()", nav_visibility)
+        self.assertIn("primeSignalAudio()", nav_visibility)
+        announcement = script[
+            script.index("function announceIncomingChatMessage"):
+            script.index("function observeIncomingChatMessages")
+        ]
+        self.assertNotIn("chat_nav_hidden", announcement)
         self.assertNotIn("alert(error.message)}finally{chatSendInFlight", script)
         self.assertIn("visibilitychange", script)
         self.assertIn("window.addEventListener('focus',syncChatAfterWake)", script)

@@ -3454,7 +3454,7 @@ def account_chat_nav_rule_payload(user):
         "max_value": None,
         "editable": user.role == "admin",
         "enabled": True,
-        "description": "只影响当前登录账号的左侧入口；隐藏后仍可从本条规则打开协作记录。普通账号只能查看状态。",
+        "description": "只隐藏当前登录账号的左侧入口，不停止协作消息轮询、提醒声音或系统通知；隐藏后仍可从本条规则打开协作记录。协作声音仍以本机声音开关和浏览器授权为准。普通账号只能查看状态。",
         "updated_at": None,
         "automation": None,
         "account_scoped": True,

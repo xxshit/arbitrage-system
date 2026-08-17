@@ -5,6 +5,7 @@
 cloud-backup.local.json
 cloud-access.local.json
 .venv/
+.pytest_cache/
 __pycache__/
 instance/
 backups/

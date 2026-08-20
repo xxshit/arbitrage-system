@@ -12,6 +12,7 @@ import math
 import io
 import base64
 import struct
+import ipaddress
 from html.parser import HTMLParser
 from functools import wraps
 from datetime import datetime, timezone, timedelta
@@ -94,11 +95,11 @@ self.addEventListener('push', event => {
   } catch (error) {
     payload = {};
   }
-  if (payload.type !== 'chat-message') return;
+  if (!['chat-message', 'login-security-alert'].includes(payload.type)) return;
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({type: 'window', includeUncontrolled: true});
     const visibleWindow = windows.find(client => client.visibilityState === 'visible' && client.focused);
-    if (visibleWindow) {
+    if (payload.type === 'chat-message' && visibleWindow) {
       visibleWindow.postMessage({type: 'chat-push-received', message_id: payload.message_id || 0});
       return;
     }
@@ -637,6 +638,7 @@ class UserAccount(db.Model):
     active = db.Column(db.Boolean, nullable=False, default=True)
     active_session_hash = db.Column(db.String(64))
     last_login_at = db.Column(db.DateTime)
+    last_login_ip = db.Column(db.String(45))
     last_seen_at = db.Column(db.DateTime)
     password_changed_at = db.Column(db.DateTime, default=datetime.now, nullable=True)
     chat_nav_hidden = db.Column(db.Boolean, nullable=False, default=False)
@@ -665,6 +667,7 @@ class AccountDevice(db.Model):
     active_session_hash = db.Column(db.String(64))
     first_bound_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
     last_login_at = db.Column(db.DateTime)
+    last_ip = db.Column(db.String(45))
     last_seen_at = db.Column(db.DateTime)
     __table_args__ = (
         db.UniqueConstraint("user_id", "device_kind", name="uq_account_device_user_kind"),
@@ -679,6 +682,7 @@ class LoginSecurityAlert(db.Model):
     device_kind = db.Column(db.String(12), nullable=False)
     attempted_display_id = db.Column(db.String(24), nullable=False)
     client_label = db.Column(db.String(120))
+    source_ip = db.Column(db.String(45))
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
     read_at = db.Column(db.DateTime, index=True)
 
@@ -3375,7 +3379,33 @@ def device_lock_required(user):
     return str(getattr(user, "account_level", ACCOUNT_LEVEL_RESTRICTED) or ACCOUNT_LEVEL_RESTRICTED) != ACCOUNT_LEVEL_UNRESTRICTED
 
 
-def record_blocked_device_alert(user, device_kind, public_key_hash, client_label):
+def normalize_ip_address(value):
+    """Validate an address before it is stored or shown in a security report."""
+    candidate = str(value or "").strip()
+    if not candidate:
+        return None
+    try:
+        return ipaddress.ip_address(candidate).compressed
+    except ValueError:
+        return None
+
+
+def request_source_ip():
+    """Trust forwarding headers only when the direct peer is the local reverse proxy."""
+    proxy_original = request.environ.get("werkzeug.proxy_fix.orig") or {}
+    direct_ip = normalize_ip_address(proxy_original.get("REMOTE_ADDR") or request.environ.get("REMOTE_ADDR"))
+    if not direct_ip:
+        return None
+    if not ipaddress.ip_address(direct_ip).is_loopback:
+        return direct_ip
+    real_ip = normalize_ip_address(request.headers.get("X-Real-IP"))
+    if real_ip:
+        return real_ip
+    forwarded = str(request.headers.get("X-Forwarded-For", ""))
+    return normalize_ip_address(forwarded.rsplit(",", 1)[-1]) or direct_ip
+
+
+def record_blocked_device_alert(user, device_kind, public_key_hash, client_label, source_ip=None):
     now = datetime.now()
     display_id = device_display_id(device_kind, public_key_hash)
     duplicate = LoginSecurityAlert.query.filter(
@@ -3387,6 +3417,7 @@ def record_blocked_device_alert(user, device_kind, public_key_hash, client_label
     if duplicate:
         duplicate.created_at = now
         duplicate.client_label = client_label
+        duplicate.source_ip = source_ip
         duplicate.read_at = None
         return duplicate
     row = LoginSecurityAlert(
@@ -3394,6 +3425,7 @@ def record_blocked_device_alert(user, device_kind, public_key_hash, client_label
         device_kind=device_kind,
         attempted_display_id=display_id,
         client_label=client_label,
+        source_ip=source_ip,
         created_at=now,
     )
     db.session.add(row)
@@ -3409,6 +3441,7 @@ def device_payload(row, current_binding_id=None):
         "client_label": row.client_label,
         "first_bound_at": row.first_bound_at.strftime("%Y-%m-%d %H:%M:%S") if row.first_bound_at else None,
         "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
+        "last_ip": row.last_ip,
         "last_seen_at": row.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_seen_at else None,
         "current": row.id == current_binding_id,
     }
@@ -3517,6 +3550,7 @@ def login_api():
     body = request.get_json(silent=True) or {}
     username = str(body.get("username", "")).strip().lower()
     password = str(body.get("password", ""))
+    source_ip = request_source_ip()
     user = UserAccount.query.filter_by(username=username).with_for_update().first()
     if not user or not user.active or not check_password_hash(user.password_hash, password):
         session.pop("device_challenge", None)
@@ -3528,6 +3562,7 @@ def login_api():
         now = datetime.now()
         user.active_session_hash = session_digest(raw_token)
         user.last_login_at = now
+        user.last_login_ip = source_ip
         user.last_seen_at = now
         AccountDevice.query.filter_by(user_id=user.id).update(
             {AccountDevice.active_session_hash: None}, synchronize_session=False
@@ -3560,8 +3595,9 @@ def login_api():
     public_key_hash = device_public_key_hash(public_key_bytes)
     binding = AccountDevice.query.filter_by(user_id=user.id, device_kind=device_kind).first()
     if binding and binding.public_key_hash != public_key_hash:
-        record_blocked_device_alert(user, device_kind, public_key_hash, client_label)
+        alert = record_blocked_device_alert(user, device_kind, public_key_hash, client_label, source_ip)
         db.session.commit()
+        queue_login_security_web_push(alert.id)
         kind_label = "手机端" if device_kind == "mobile" else "电脑端"
         return jsonify({
             "ok": False,
@@ -3587,9 +3623,11 @@ def login_api():
     binding.user_agent = str(request.headers.get("User-Agent", ""))[:255] or None
     binding.active_session_hash = session_digest(raw_token)
     binding.last_login_at = now
+    binding.last_ip = source_ip
     binding.last_seen_at = now
     user.active_session_hash = None
     user.last_login_at = now
+    user.last_login_ip = source_ip
     user.last_seen_at = now
     db.session.commit()
     session.clear()
@@ -4046,6 +4084,7 @@ def list_users():
         "id": row.id, "username": row.username, "role": row.role, "active": row.active,
         "account_level": row.account_level or ACCOUNT_LEVEL_RESTRICTED,
         "device_lock_required": device_lock_required(row),
+        "last_login_ip": row.last_login_ip,
         "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
         "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
         "last_seen_at": row.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_seen_at else None,
@@ -4134,6 +4173,7 @@ def list_login_security_alerts():
             "device_kind_label": "手机端" if row.device_kind == "mobile" else "电脑端",
             "attempted_device_id": row.attempted_display_id,
             "client_label": row.client_label,
+            "source_ip": row.source_ip,
             "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
             "read": bool(row.read_at),
         } for row in rows],
@@ -4471,19 +4511,7 @@ def send_web_push(subscription, payload, settings, ttl=300, timeout=10):
         return int(getattr(response, "status", 201) or 201)
 
 
-def deliver_chat_web_push(recipient_id, message_id):
-    settings = web_push_settings()
-    if not settings["available"]:
-        return {"sent": 0, "removed": 0, "failed": 0, "configured": False}
-    rows = ChatPushSubscription.query.filter_by(user_id=recipient_id).all()
-    payload = json.dumps({
-        "type": "chat-message",
-        "title": "ArbiScope 有新协作消息",
-        "body": "打开协作记录查看内容",
-        "tag": f"chat-message-{int(message_id)}",
-        "url": "/#chat",
-        "message_id": int(message_id),
-    }, ensure_ascii=False, separators=(",", ":"))
+def deliver_web_push_rows(rows, payload, settings, log_name):
     sent = removed = failed = 0
     for row in rows:
         try:
@@ -4508,7 +4536,8 @@ def deliver_chat_web_push(recipient_id, message_id):
                 row.updated_at = utc_now_naive()
                 failed += 1
                 app.logger.warning(
-                    "chat_web_push_failed subscription_id=%s status=%s failures=%s",
+                    "%s_failed subscription_id=%s status=%s failures=%s",
+                    log_name,
                     row.id,
                     status_code or "unknown",
                     row.failure_count,
@@ -4518,13 +4547,53 @@ def deliver_chat_web_push(recipient_id, message_id):
             row.updated_at = utc_now_naive()
             failed += 1
             app.logger.warning(
-                "chat_web_push_failed subscription_id=%s error=%s failures=%s",
+                "%s_failed subscription_id=%s error=%s failures=%s",
+                log_name,
                 row.id,
                 type(exc).__name__,
                 row.failure_count,
             )
     db.session.commit()
     return {"sent": sent, "removed": removed, "failed": failed, "configured": True}
+
+
+def deliver_chat_web_push(recipient_id, message_id):
+    settings = web_push_settings()
+    if not settings["available"]:
+        return {"sent": 0, "removed": 0, "failed": 0, "configured": False}
+    rows = ChatPushSubscription.query.filter_by(user_id=recipient_id).all()
+    payload = json.dumps({
+        "type": "chat-message",
+        "title": "ArbiScope 有新协作消息",
+        "body": "打开协作记录查看内容",
+        "tag": f"chat-message-{int(message_id)}",
+        "url": "/#chat",
+        "message_id": int(message_id),
+    }, ensure_ascii=False, separators=(",", ":"))
+    return deliver_web_push_rows(rows, payload, settings, "chat_web_push")
+
+
+def deliver_login_security_web_push(alert_id):
+    settings = web_push_settings()
+    if not settings["available"]:
+        return {"sent": 0, "removed": 0, "failed": 0, "configured": False}
+    alert = db.session.get(LoginSecurityAlert, alert_id)
+    if not alert:
+        return {"sent": 0, "removed": 0, "failed": 0, "configured": True}
+    target = db.session.get(UserAccount, alert.target_user_id)
+    admin_ids = [row.id for row in UserAccount.query.filter_by(role="admin", active=True).all()]
+    rows = ChatPushSubscription.query.filter(ChatPushSubscription.user_id.in_(admin_ids)).all() if admin_ids else []
+    kind_label = "手机端" if alert.device_kind == "mobile" else "电脑端"
+    source_ip = alert.source_ip or "未知 IP"
+    payload = json.dumps({
+        "type": "login-security-alert",
+        "title": "ArbiScope 安全提醒",
+        "body": f"账号 {target.username if target else '未知账号'} 的陌生{kind_label}登录已拒绝 · IP {source_ip}",
+        "tag": f"login-security-alert-{int(alert.id)}",
+        "url": "/#security-notifications",
+        "alert_id": int(alert.id),
+    }, ensure_ascii=False, separators=(",", ":"))
+    return deliver_web_push_rows(rows, payload, settings, "login_security_web_push")
 
 
 def queue_chat_web_push(recipient_id, message_id):
@@ -4542,6 +4611,26 @@ def queue_chat_web_push(recipient_id, message_id):
             completed.result()
         except Exception:
             app.logger.exception("chat_web_push_worker_failed recipient_id=%s message_id=%s", recipient_id, message_id)
+
+    future.add_done_callback(report_failure)
+    return True
+
+
+def queue_login_security_web_push(alert_id):
+    if not web_push_settings()["available"]:
+        return False
+
+    def run():
+        with app.app_context():
+            deliver_login_security_web_push(alert_id)
+
+    future = CHAT_PUSH_EXECUTOR.submit(run)
+
+    def report_failure(completed):
+        try:
+            completed.result()
+        except Exception:
+            app.logger.exception("login_security_web_push_worker_failed alert_id=%s", alert_id)
 
     future.add_done_callback(report_failure)
     return True
@@ -12251,6 +12340,17 @@ with app.app_context():
         db.session.commit()
     if "account_level" not in user_columns:
         db.session.execute(text("ALTER TABLE user_account ADD COLUMN account_level VARCHAR(20) NOT NULL DEFAULT 'restricted'"))
+        db.session.commit()
+    if "last_login_ip" not in user_columns:
+        db.session.execute(text("ALTER TABLE user_account ADD COLUMN last_login_ip VARCHAR(45)"))
+        db.session.commit()
+    device_columns = {column["name"] for column in inspect(db.engine).get_columns("account_device")}
+    if "last_ip" not in device_columns:
+        db.session.execute(text("ALTER TABLE account_device ADD COLUMN last_ip VARCHAR(45)"))
+        db.session.commit()
+    security_alert_columns = {column["name"] for column in inspect(db.engine).get_columns("login_security_alert")}
+    if "source_ip" not in security_alert_columns:
+        db.session.execute(text("ALTER TABLE login_security_alert ADD COLUMN source_ip VARCHAR(45)"))
         db.session.commit()
     invite_columns = {column["name"] for column in inspect(db.engine).get_columns("invite_code")}
     if "code_value" not in invite_columns:

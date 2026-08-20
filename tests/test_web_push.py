@@ -16,11 +16,13 @@ os.environ["CHAT_ENCRYPTION_KEY"] = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8
 import app as app_module
 from app import (
     ChatPushSubscription,
+    LoginSecurityAlert,
     UserAccount,
     app,
     db,
     decrypt_web_push_subscription,
     deliver_chat_web_push,
+    deliver_login_security_web_push,
     encrypt_web_push_payload,
     session_digest,
 )
@@ -200,6 +202,46 @@ class WebPushTests(unittest.TestCase):
         self.assertEqual(payload["message_id"], 77)
         self.assertEqual(payload["body"], "打开协作记录查看内容")
         self.assertNotIn("message_body", payload)
+
+    def test_security_alert_push_goes_only_to_admin_and_contains_source_ip(self):
+        self.create_subscription()
+        bob_subscription = {
+            **APPLE_SUBSCRIPTION,
+            "endpoint": APPLE_SUBSCRIPTION["endpoint"] + "-viewer",
+        }
+        bob = app.test_client()
+        with bob.session_transaction() as session:
+            session["user_id"] = self.bob_id
+            session["auth_token"] = "bob-token"
+            session["csrf_token"] = "bob-csrf"
+        with patch.dict(os.environ, PUSH_ENV, clear=False):
+            created = bob.post(
+                "/api/chat/push/subscriptions",
+                json={"subscription": bob_subscription},
+                headers={"X-CSRF-Token": "bob-csrf"},
+            )
+        self.assertEqual(created.status_code, 200)
+        with app.app_context():
+            alert = LoginSecurityAlert(
+                target_user_id=self.bob_id,
+                device_kind="desktop",
+                attempted_display_id="PC-ABCD-EFGH-IJKL",
+                client_label="Chrome · Mac",
+                source_ip="198.51.100.52",
+            )
+            db.session.add(alert)
+            db.session.commit()
+            alert_id = alert.id
+        sender = Mock()
+        with patch.dict(os.environ, PUSH_ENV, clear=False), patch.object(app_module, "send_web_push", sender):
+            with app.app_context():
+                result = deliver_login_security_web_push(alert_id)
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(sender.call_count, 1)
+        payload = json.loads(sender.call_args.args[1])
+        self.assertEqual(payload["type"], "login-security-alert")
+        self.assertIn("198.51.100.52", payload["body"])
+        self.assertEqual(payload["url"], "/#security-notifications")
 
     def test_sending_message_queues_recipient_push(self):
         with patch.object(app_module, "queue_chat_web_push") as queued:

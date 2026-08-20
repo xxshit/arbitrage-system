@@ -106,8 +106,14 @@ class IPhoneLayoutContractTests(unittest.TestCase):
         self.assertIn("function accountLevelControl", APP_JS)
         self.assertIn("function setAccountLevel", APP_JS)
         self.assertIn("function loadSecurityAlerts", APP_JS)
+        self.assertIn("account-level-badge", INDEX_HTML)
+        self.assertIn("account-level-guide", INDEX_HTML)
+        self.assertIn("last_login_ip", APP_JS)
+        self.assertIn("source_ip", APP_JS)
+        self.assertIn("20260820-account-security-ip", INDEX_HTML)
         self.assertIn("account-device-grid", STYLE_CSS)
         self.assertIn("account-level-control", STYLE_CSS)
+        self.assertIn("account-level-guide", STYLE_CSS)
 
 
 if __name__ == "__main__":

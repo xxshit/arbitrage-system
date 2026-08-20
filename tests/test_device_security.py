@@ -17,6 +17,7 @@ from app import (
     UserAccount,
     app,
     db,
+    request_source_ip,
     session_digest,
 )
 
@@ -58,7 +59,7 @@ class DeviceSecurityTests(unittest.TestCase):
             db.drop_all()
             db.create_all()
 
-    def login_with_key(self, client, key, kind="desktop", password="viewer-password-123"):
+    def login_with_key(self, client, key, kind="desktop", password="viewer-password-123", source_ip=None):
         challenge_response = client.post("/api/auth/device/challenge", json={"username": "viewer"})
         self.assertEqual(challenge_response.status_code, 200)
         challenge = base64.urlsafe_b64decode(challenge_response.get_json()["challenge"] + "==")
@@ -70,6 +71,9 @@ class DeviceSecurityTests(unittest.TestCase):
             serialization.PublicFormat.UncompressedPoint,
         )
         mobile = kind == "mobile"
+        headers = {"User-Agent": "Mozilla/5.0 (iPhone) Mobile Safari" if mobile else "Mozilla/5.0 (Macintosh) Chrome"}
+        if source_ip:
+            headers["X-Real-IP"] = source_ip
         return client.post(
             "/api/auth/login",
             json={
@@ -81,14 +85,32 @@ class DeviceSecurityTests(unittest.TestCase):
                 "device_public_key": b64url(public_key),
                 "device_signature": b64url(raw_signature),
             },
-            headers={"User-Agent": "Mozilla/5.0 (iPhone) Mobile Safari" if mobile else "Mozilla/5.0 (Macintosh) Chrome"},
+            headers=headers,
         )
 
-    def login_with_password_only(self, client, password="viewer-password-123"):
+    def login_with_password_only(self, client, password="viewer-password-123", source_ip=None):
         return client.post(
             "/api/auth/login",
             json={"username": "viewer", "password": password},
+            headers={"X-Real-IP": source_ip} if source_ip else None,
         )
+
+    def test_source_ip_trusts_only_the_local_reverse_proxy(self):
+        with app.test_request_context(
+            "/", headers={"X-Forwarded-For": "198.51.100.7, 203.0.113.9"},
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        ):
+            self.assertEqual(request_source_ip(), "203.0.113.9")
+        with app.test_request_context(
+            "/", headers={"X-Real-IP": "198.51.100.7"},
+            environ_base={"REMOTE_ADDR": "192.0.2.44"},
+        ):
+            self.assertEqual(request_source_ip(), "192.0.2.44")
+        with app.test_request_context(
+            "/", headers={"X-Real-IP": "not-an-ip"},
+            environ_base={"REMOTE_ADDR": "127.0.0.1"},
+        ):
+            self.assertEqual(request_source_ip(), "127.0.0.1")
 
     def test_restricted_account_requests_device_proof_after_password_validation(self):
         response = self.login_with_password_only(app.test_client())
@@ -112,6 +134,15 @@ class DeviceSecurityTests(unittest.TestCase):
         with app.app_context():
             self.assertEqual(AccountDevice.query.filter_by(user_id=self.viewer_id).count(), 0)
             self.assertEqual(LoginSecurityAlert.query.count(), 0)
+
+    def test_unrestricted_login_records_the_latest_ip(self):
+        with app.app_context():
+            viewer = db.session.get(UserAccount, self.viewer_id)
+            viewer.account_level = "unrestricted"
+            db.session.commit()
+        self.assertEqual(self.login_with_password_only(app.test_client(), source_ip="203.0.113.21").status_code, 200)
+        with app.app_context():
+            self.assertEqual(db.session.get(UserAccount, self.viewer_id).last_login_ip, "203.0.113.21")
 
     def test_admin_can_change_account_level_and_invalidate_current_session(self):
         viewer = app.test_client()
@@ -166,11 +197,26 @@ class DeviceSecurityTests(unittest.TestCase):
             devices = AccountDevice.query.filter_by(user_id=self.viewer_id).all()
             self.assertEqual({row.device_kind for row in devices}, {"desktop", "mobile"})
 
+    def test_restricted_account_records_account_and_device_ip(self):
+        response = self.login_with_key(
+            app.test_client(), ec.generate_private_key(ec.SECP256R1()), source_ip="2001:db8::8"
+        )
+        self.assertEqual(response.status_code, 200)
+        with app.app_context():
+            viewer = db.session.get(UserAccount, self.viewer_id)
+            device = AccountDevice.query.filter_by(user_id=self.viewer_id, device_kind="desktop").one()
+            self.assertEqual(viewer.last_login_ip, "2001:db8::8")
+            self.assertEqual(device.last_ip, "2001:db8::8")
+        users = self.admin.get("/api/admin/users").get_json()["items"]
+        viewer_payload = next(item for item in users if item["id"] == self.viewer_id)
+        self.assertEqual(viewer_payload["last_login_ip"], "2001:db8::8")
+        self.assertEqual(viewer_payload["devices"][0]["last_ip"], "2001:db8::8")
+
     def test_second_desktop_is_blocked_and_reported_after_correct_password(self):
         first = app.test_client()
         blocked = app.test_client()
         self.assertEqual(self.login_with_key(first, ec.generate_private_key(ec.SECP256R1())).status_code, 200)
-        response = self.login_with_key(blocked, ec.generate_private_key(ec.SECP256R1()))
+        response = self.login_with_key(blocked, ec.generate_private_key(ec.SECP256R1()), source_ip="198.51.100.52")
         self.assertEqual(response.status_code, 409)
         self.assertTrue(response.get_json()["device_blocked"])
         self.assertIn("报告管理员", response.get_json()["error"])
@@ -179,6 +225,7 @@ class DeviceSecurityTests(unittest.TestCase):
         self.assertEqual(alerts["unread"], 1)
         self.assertEqual(alerts["items"][0]["username"], "viewer")
         self.assertTrue(alerts["items"][0]["attempted_device_id"].startswith("PC-"))
+        self.assertEqual(alerts["items"][0]["source_ip"], "198.51.100.52")
 
     def test_wrong_password_does_not_create_a_device_report(self):
         client = app.test_client()

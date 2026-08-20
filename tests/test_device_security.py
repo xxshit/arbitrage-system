@@ -84,6 +84,75 @@ class DeviceSecurityTests(unittest.TestCase):
             headers={"User-Agent": "Mozilla/5.0 (iPhone) Mobile Safari" if mobile else "Mozilla/5.0 (Macintosh) Chrome"},
         )
 
+    def login_with_password_only(self, client, password="viewer-password-123"):
+        return client.post(
+            "/api/auth/login",
+            json={"username": "viewer", "password": password},
+        )
+
+    def test_restricted_account_requests_device_proof_after_password_validation(self):
+        response = self.login_with_password_only(app.test_client())
+        self.assertEqual(response.status_code, 428)
+        self.assertTrue(response.get_json()["device_proof_required"])
+
+    def test_unrestricted_account_can_switch_devices_without_binding(self):
+        with app.app_context():
+            viewer = db.session.get(UserAccount, self.viewer_id)
+            viewer.account_level = "unrestricted"
+            db.session.commit()
+        first = app.test_client()
+        second = app.test_client()
+        first_response = self.login_with_password_only(first)
+        self.assertEqual(first_response.status_code, 200)
+        self.assertFalse(first_response.get_json()["device_lock_required"])
+        self.assertEqual(first.get("/api/auth/me").status_code, 200)
+        self.assertEqual(self.login_with_password_only(second).status_code, 200)
+        self.assertEqual(first.get("/api/auth/me").status_code, 401)
+        self.assertEqual(second.get("/api/auth/me").status_code, 200)
+        with app.app_context():
+            self.assertEqual(AccountDevice.query.filter_by(user_id=self.viewer_id).count(), 0)
+            self.assertEqual(LoginSecurityAlert.query.count(), 0)
+
+    def test_admin_can_change_account_level_and_invalidate_current_session(self):
+        viewer = app.test_client()
+        self.assertEqual(self.login_with_key(viewer, ec.generate_private_key(ec.SECP256R1())).status_code, 200)
+        response = self.admin.patch(
+            f"/api/admin/users/{self.viewer_id}/account-level",
+            json={"account_level": "unrestricted"},
+            headers={"X-CSRF-Token": "owner-csrf"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["device_lock_required"])
+        self.assertEqual(viewer.get("/api/auth/me").status_code, 401)
+        users = self.admin.get("/api/admin/users").get_json()["items"]
+        updated = next(item for item in users if item["id"] == self.viewer_id)
+        self.assertEqual(updated["account_level"], "unrestricted")
+        self.assertFalse(updated["device_lock_required"])
+
+    def test_downgrading_restores_the_previous_device_binding(self):
+        original_key = ec.generate_private_key(ec.SECP256R1())
+        original = app.test_client()
+        self.assertEqual(self.login_with_key(original, original_key).status_code, 200)
+        for level in ("unrestricted", "restricted"):
+            response = self.admin.patch(
+                f"/api/admin/users/{self.viewer_id}/account-level",
+                json={"account_level": level},
+                headers={"X-CSRF-Token": "owner-csrf"},
+            )
+            self.assertEqual(response.status_code, 200)
+        restored = app.test_client()
+        blocked = app.test_client()
+        self.assertEqual(self.login_with_key(restored, original_key).status_code, 200)
+        self.assertEqual(self.login_with_key(blocked, ec.generate_private_key(ec.SECP256R1())).status_code, 409)
+
+    def test_account_level_rejects_unknown_values(self):
+        response = self.admin.patch(
+            f"/api/admin/users/{self.viewer_id}/account-level",
+            json={"account_level": "vip-unknown"},
+            headers={"X-CSRF-Token": "owner-csrf"},
+        )
+        self.assertEqual(response.status_code, 400)
+
     def test_one_desktop_and_one_mobile_can_stay_logged_in(self):
         desktop = app.test_client()
         mobile = app.test_client()

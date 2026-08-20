@@ -99,11 +99,15 @@ class IPhoneLayoutContractTests(unittest.TestCase):
         self.assertIn("crypto.subtle.generateKey", AUTH_HTML)
         self.assertIn("namedCurve:'P-256'},false,['sign','verify']", AUTH_HTML)
         self.assertIn("/api/auth/device/challenge", AUTH_HTML)
+        self.assertIn("response.status===428&&data.device_proof_required", AUTH_HTML)
         self.assertIn('data-view="security-notifications"', INDEX_HTML)
         self.assertIn('id="securityAlertBadge"', INDEX_HTML)
         self.assertIn("function accountDeviceSlot", APP_JS)
+        self.assertIn("function accountLevelControl", APP_JS)
+        self.assertIn("function setAccountLevel", APP_JS)
         self.assertIn("function loadSecurityAlerts", APP_JS)
         self.assertIn("account-device-grid", STYLE_CSS)
+        self.assertIn("account-level-control", STYLE_CSS)
 
 
 if __name__ == "__main__":

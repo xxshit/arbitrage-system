@@ -55,6 +55,9 @@ CHAT_RETENTION_DAYS = 7
 CHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 CHAT_ENCRYPTION_VERSION = 1
 DEVICE_CHALLENGE_TTL_SECONDS = 120
+ACCOUNT_LEVEL_RESTRICTED = "restricted"
+ACCOUNT_LEVEL_UNRESTRICTED = "unrestricted"
+ACCOUNT_LEVELS = {ACCOUNT_LEVEL_RESTRICTED, ACCOUNT_LEVEL_UNRESTRICTED}
 CHAT_TEXT_AAD = b"ArbiScope/chat-message/v1"
 CHAT_IMAGE_AAD = b"ArbiScope/chat-image/v1"
 WEB_PUSH_SUBSCRIPTION_AAD = b"ArbiScope/web-push-subscription/v1"
@@ -630,6 +633,7 @@ class UserAccount(db.Model):
     username = db.Column(db.String(40), nullable=False, unique=True, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(20), nullable=False, default="viewer", index=True)
+    account_level = db.Column(db.String(20), nullable=False, default=ACCOUNT_LEVEL_RESTRICTED)
     active = db.Column(db.Boolean, nullable=False, default=True)
     active_session_hash = db.Column(db.String(64))
     last_login_at = db.Column(db.DateTime)
@@ -3367,6 +3371,10 @@ def current_account_device():
     return db.session.get(AccountDevice, binding_id) if binding_id else None
 
 
+def device_lock_required(user):
+    return str(getattr(user, "account_level", ACCOUNT_LEVEL_RESTRICTED) or ACCOUNT_LEVEL_RESTRICTED) != ACCOUNT_LEVEL_UNRESTRICTED
+
+
 def record_blocked_device_alert(user, device_kind, public_key_hash, client_label):
     now = datetime.now()
     display_id = device_display_id(device_kind, public_key_hash)
@@ -3428,17 +3436,25 @@ def require_account_login():
     token = session.get("auth_token")
     user = db.session.get(UserAccount, user_id) if user_id else None
     binding = current_account_device()
+    unrestricted_session_valid = bool(
+        user
+        and not device_lock_required(user)
+        and token
+        and user.active_session_hash == session_digest(token)
+    )
     device_session_valid = bool(
         binding
         and user
+        and device_lock_required(user)
         and binding.user_id == user.id
         and token
         and binding.active_session_hash == session_digest(token)
     )
     legacy_session_valid = bool(
-        not binding and user and token and user.active_session_hash == session_digest(token)
+        not binding and user and device_lock_required(user)
+        and token and user.active_session_hash == session_digest(token)
     )
-    if not user or not user.active or not (device_session_valid or legacy_session_valid):
+    if not user or not user.active or not (unrestricted_session_valid or device_session_valid or legacy_session_valid):
         session.clear()
         if request.path.startswith("/api/"):
             return jsonify({"ok": False, "error": "登录已失效，请重新登录。", "login_required": True}), 401
@@ -3507,6 +3523,34 @@ def login_api():
         session.pop("device_challenge_username", None)
         session.pop("device_challenge_expires", None)
         return jsonify({"ok": False, "error": "账号或密码不正确。"}), 401
+    if not device_lock_required(user):
+        raw_token = secrets.token_urlsafe(32)
+        now = datetime.now()
+        user.active_session_hash = session_digest(raw_token)
+        user.last_login_at = now
+        user.last_seen_at = now
+        AccountDevice.query.filter_by(user_id=user.id).update(
+            {AccountDevice.active_session_hash: None}, synchronize_session=False
+        )
+        db.session.commit()
+        session.clear()
+        session.permanent = True
+        session["user_id"] = user.id
+        session["auth_token"] = raw_token
+        session["csrf_token"] = secrets.token_urlsafe(24)
+        return jsonify({
+            "ok": True,
+            "redirect": "/",
+            "role": user.role,
+            "account_level": ACCOUNT_LEVEL_UNRESTRICTED,
+            "device_lock_required": False,
+        })
+    if not body.get("device_public_key") or not body.get("device_signature"):
+        return jsonify({
+            "ok": False,
+            "error": "这个账号需要验证已绑定设备。",
+            "device_proof_required": True,
+        }), 428
     try:
         device_kind = normalize_device_kind(body)
         client_label = normalize_device_client_label(body, device_kind)
@@ -3558,6 +3602,8 @@ def login_api():
         "ok": True,
         "redirect": "/",
         "role": user.role,
+        "account_level": ACCOUNT_LEVEL_RESTRICTED,
+        "device_lock_required": True,
         "device": device_payload(binding, binding.id),
     })
 
@@ -3602,6 +3648,8 @@ def enroll_current_device_api():
     if not valid_admin_csrf():
         return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
     user = current_user()
+    if not device_lock_required(user):
+        return jsonify({"ok": True, "device": None, "device_lock_required": False})
     if current_account_device():
         return jsonify({"ok": True, "device": device_payload(current_account_device(), session.get("device_binding_id"))})
     body = request.get_json(silent=True) or {}
@@ -3685,7 +3733,9 @@ def auth_me():
         "ok": True, "user_id": user.id, "username": user.username, "role": user.role,
         "is_admin": user.role == "admin", "csrf_token": session.get("csrf_token"),
         "chat_nav_hidden": bool(user.chat_nav_hidden),
-        "device_protected": bool(binding),
+        "account_level": user.account_level or ACCOUNT_LEVEL_RESTRICTED,
+        "device_lock_required": device_lock_required(user),
+        "device_protected": bool(binding) if device_lock_required(user) else False,
         "device": device_payload(binding, binding.id) if binding else None,
     })
 
@@ -3994,12 +4044,52 @@ def list_users():
     current_binding_id = session.get("device_binding_id")
     return jsonify({"items": [{
         "id": row.id, "username": row.username, "role": row.role, "active": row.active,
+        "account_level": row.account_level or ACCOUNT_LEVEL_RESTRICTED,
+        "device_lock_required": device_lock_required(row),
         "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
         "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
         "last_seen_at": row.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_seen_at else None,
         "password_changed_at": row.password_changed_at.strftime("%Y-%m-%d %H:%M:%S") if row.password_changed_at else None,
         "devices": [device_payload(device, current_binding_id) for device in devices_by_user.get(row.id, [])],
     } for row in rows]})
+
+
+@app.patch("/api/admin/users/<int:user_id>/account-level")
+@admin_required
+def set_user_account_level(user_id):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    target = db.session.get(UserAccount, user_id)
+    if not target:
+        return jsonify({"ok": False, "error": "账号不存在。"}), 404
+    body = request.get_json(silent=True) or {}
+    account_level = str(body.get("account_level", "")).strip().lower()
+    if account_level not in ACCOUNT_LEVELS:
+        return jsonify({"ok": False, "error": "账号等级无效。"}), 400
+    changed = target.account_level != account_level
+    target.account_level = account_level
+    target.active_session_hash = None
+    AccountDevice.query.filter_by(user_id=target.id).update(
+        {AccountDevice.active_session_hash: None}, synchronize_session=False
+    )
+    ChatPushSubscription.query.filter_by(user_id=target.id).delete(synchronize_session=False)
+    if changed:
+        db.session.add(AccountSecurityEvent(
+            actor_user_id=current_user().id,
+            target_user_id=target.id,
+            event_type=f"admin_account_level_{account_level}",
+            created_at=datetime.now(),
+        ))
+    current_session_reset = target.id == current_user().id
+    db.session.commit()
+    return jsonify({
+        "ok": True,
+        "user_id": target.id,
+        "account_level": target.account_level,
+        "device_lock_required": device_lock_required(target),
+        "signed_out": True,
+        "current_session_reset": current_session_reset,
+    })
 
 
 @app.delete("/api/admin/users/<int:user_id>/devices/<device_kind>")
@@ -12158,6 +12248,9 @@ with app.app_context():
         db.session.commit()
     if "password_changed_at" not in user_columns:
         db.session.execute(text("ALTER TABLE user_account ADD COLUMN password_changed_at DATETIME"))
+        db.session.commit()
+    if "account_level" not in user_columns:
+        db.session.execute(text("ALTER TABLE user_account ADD COLUMN account_level VARCHAR(20) NOT NULL DEFAULT 'restricted'"))
         db.session.commit()
     invite_columns = {column["name"] for column in inspect(db.engine).get_columns("invite_code")}
     if "code_value" not in invite_columns:

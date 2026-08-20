@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-title" content="ArbiScope">
   <title>{{ '登录' if mode == 'login' else '邀请码注册' }} | ArbiScope</title>
   <link rel="manifest" href="{{ url_for('web_app_manifest') }}?v=20260815-web-push">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260820-device-lock">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260820-account-levels">
 </head>
 <body class="auth-page">
   <main class="auth-shell">
@@ -17,7 +17,7 @@
       <p class="eyebrow">ARBITRAGE INTELLIGENCE</p>
       <h1>ArbiScope</h1>
       <p>你的套利监控、趋势研判和知识记录都安静地守在这里。</p>
-      <div class="auth-security"><b>加密设备保护</b><span>每个账号只允许绑定一台电脑和一台手机；其他设备即使知道密码也会被拒绝并报告管理员。</span></div>
+      <div class="auth-security"><b>分级账号保护</b><span>低等级账号绑定一台电脑和一台手机；管理员指定的高等级账号可以在不同设备自由切换。</span></div>
     </section>
     <form id="authForm" class="auth-card">
       <p class="eyebrow">{{ 'WELCOME BACK' if mode == 'login' else 'INVITATION ONLY' }}</p>
@@ -50,9 +50,9 @@
       const payload={username:document.getElementById('authUsername').value.trim(),password:document.getElementById('authPassword').value};
       if(mode==='register')payload.invite_code=document.getElementById('inviteCode').value.trim();
       try{
-        if(mode==='login')Object.assign(payload,await signedDevicePayload(payload.username.toLowerCase()));
-        const response=await fetch(`/api/auth/${mode}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-        const data=await response.json();
+        let response=await fetch(`/api/auth/${mode}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+        let data=await response.json();
+        if(mode==='login'&&response.status===428&&data.device_proof_required){Object.assign(payload,await signedDevicePayload(payload.username.toLowerCase()));response=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});data=await response.json()}
         if(!response.ok)throw new Error(data.error||'操作失败');
         location.href=data.redirect||'/';
       }catch(e){error.textContent=e.message;button.disabled=false;button.textContent=mode==='login'?'登录系统':'使用邀请码注册'}

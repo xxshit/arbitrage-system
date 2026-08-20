@@ -94,6 +94,17 @@ class IPhoneLayoutContractTests(unittest.TestCase):
         self.assertIn('content:"三所持仓"', STYLE_CSS)
         self.assertIn('content:"参考市值"', STYLE_CSS)
 
+    def test_accounts_use_cryptographic_desktop_and_mobile_bindings(self):
+        self.assertIn("arbiscope-device-identity-v1", AUTH_HTML)
+        self.assertIn("crypto.subtle.generateKey", AUTH_HTML)
+        self.assertIn("namedCurve:'P-256'},false,['sign','verify']", AUTH_HTML)
+        self.assertIn("/api/auth/device/challenge", AUTH_HTML)
+        self.assertIn('data-view="security-notifications"', INDEX_HTML)
+        self.assertIn('id="securityAlertBadge"', INDEX_HTML)
+        self.assertIn("function accountDeviceSlot", APP_JS)
+        self.assertIn("function loadSecurityAlerts", APP_JS)
+        self.assertIn("account-device-grid", STYLE_CSS)
+
 
 if __name__ == "__main__":
     unittest.main()

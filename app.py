@@ -23,10 +23,10 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
-from cryptography.exceptions import InvalidTag
+from cryptography.exceptions import InvalidSignature, InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature, encode_dss_signature
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from flask import Flask, g, has_app_context, jsonify, redirect, render_template, request, send_file, session, url_for
@@ -54,6 +54,7 @@ CHAT_PUSH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="chat-
 CHAT_RETENTION_DAYS = 7
 CHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 CHAT_ENCRYPTION_VERSION = 1
+DEVICE_CHALLENGE_TTL_SECONDS = 120
 CHAT_TEXT_AAD = b"ArbiScope/chat-message/v1"
 CHAT_IMAGE_AAD = b"ArbiScope/chat-image/v1"
 WEB_PUSH_SUBSCRIPTION_AAD = b"ArbiScope/web-push-subscription/v1"
@@ -645,6 +646,37 @@ class AccountSecurityEvent(db.Model):
     target_user_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
     event_type = db.Column(db.String(40), nullable=False, index=True)
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+
+
+class AccountDevice(db.Model):
+    """One cryptographic browser/PWA identity for a user's desktop or mobile slot."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    device_kind = db.Column(db.String(12), nullable=False, index=True)
+    public_key_data = db.Column(db.Text, nullable=False)
+    public_key_hash = db.Column(db.String(64), nullable=False, index=True)
+    display_id = db.Column(db.String(24), nullable=False)
+    client_label = db.Column(db.String(120))
+    user_agent = db.Column(db.String(255))
+    active_session_hash = db.Column(db.String(64))
+    first_bound_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    last_login_at = db.Column(db.DateTime)
+    last_seen_at = db.Column(db.DateTime)
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "device_kind", name="uq_account_device_user_kind"),
+    )
+
+
+class LoginSecurityAlert(db.Model):
+    """Administrator-visible report for a correctly-authenticated but blocked device."""
+    id = db.Column(db.Integer, primary_key=True)
+    target_user_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    event_type = db.Column(db.String(40), nullable=False, default="blocked_new_device", index=True)
+    device_kind = db.Column(db.String(12), nullable=False)
+    attempted_display_id = db.Column(db.String(24), nullable=False)
+    client_label = db.Column(db.String(120))
+    created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+    read_at = db.Column(db.DateTime, index=True)
 
 
 class ChatMessage(db.Model):
@@ -3242,6 +3274,138 @@ def session_digest(token):
     return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
 
+def device_base64url_decode(value):
+    compact = str(value or "").strip().rstrip("=")
+    if not compact or not re.fullmatch(r"[A-Za-z0-9_-]+", compact):
+        raise ValueError("设备密钥格式无效。")
+    try:
+        return base64.urlsafe_b64decode((compact + "=" * (-len(compact) % 4)).encode("ascii"))
+    except (ValueError, UnicodeError):
+        raise ValueError("设备密钥格式无效。") from None
+
+
+def device_base64url(value):
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def normalize_device_public_key(value):
+    raw = device_base64url_decode(value)
+    if len(raw) != 65 or raw[0] != 4:
+        raise ValueError("设备公钥格式无效。")
+    try:
+        ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), raw)
+    except ValueError:
+        raise ValueError("设备公钥格式无效。") from None
+    return raw
+
+
+def device_public_key_hash(public_key_bytes):
+    return hashlib.sha256(public_key_bytes).hexdigest()
+
+
+def device_display_id(device_kind, public_key_hash):
+    prefix = "MB" if device_kind == "mobile" else "PC"
+    compact = str(public_key_hash).upper()[:12]
+    return f"{prefix}-{compact[:4]}-{compact[4:8]}-{compact[8:12]}"
+
+
+def normalize_device_kind(body):
+    requested = str(body.get("device_kind", "")).strip().lower()
+    try:
+        touch_points = max(0, min(20, int(body.get("touch_points", 0) or 0)))
+    except (TypeError, ValueError):
+        touch_points = 0
+    user_agent = str(request.headers.get("User-Agent", ""))
+    client_hint_mobile = str(request.headers.get("Sec-CH-UA-Mobile", "")).strip() == "?1"
+    ua_mobile = bool(re.search(r"iphone|ipad|ipod|android|mobile|windows phone", user_agent, re.I))
+    if client_hint_mobile or ua_mobile or (requested == "mobile" and touch_points > 0):
+        return "mobile"
+    return "desktop"
+
+
+def normalize_device_client_label(body, device_kind):
+    label = re.sub(r"\s+", " ", str(body.get("device_label", "")).strip())[:120]
+    return label or ("手机或平板" if device_kind == "mobile" else "电脑浏览器")
+
+
+def consume_device_challenge(username):
+    challenge_value = session.pop("device_challenge", None)
+    challenge_username = session.pop("device_challenge_username", None)
+    challenge_expires = session.pop("device_challenge_expires", None)
+    if (
+        not challenge_value
+        or challenge_username != session_digest(str(username).strip().lower())
+        or not isinstance(challenge_expires, int)
+        or challenge_expires < int(time.time())
+    ):
+        raise ValueError("设备验证已过期，请重新登录。")
+    challenge = device_base64url_decode(challenge_value)
+    if len(challenge) != 32:
+        raise ValueError("设备验证无效，请重新登录。")
+    return challenge
+
+
+def verify_device_proof(username, body):
+    challenge = consume_device_challenge(username)
+    public_key_bytes = normalize_device_public_key(body.get("device_public_key"))
+    signature = device_base64url_decode(body.get("device_signature"))
+    if len(signature) == 64:
+        signature = encode_dss_signature(
+            int.from_bytes(signature[:32], "big"),
+            int.from_bytes(signature[32:], "big"),
+        )
+    try:
+        public_key = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), public_key_bytes)
+        public_key.verify(signature, challenge, ec.ECDSA(hashes.SHA256()))
+    except (ValueError, InvalidSignature):
+        raise ValueError("设备身份验证失败，请重新登录。") from None
+    return public_key_bytes
+
+
+def current_account_device():
+    binding_id = session.get("device_binding_id")
+    return db.session.get(AccountDevice, binding_id) if binding_id else None
+
+
+def record_blocked_device_alert(user, device_kind, public_key_hash, client_label):
+    now = datetime.now()
+    display_id = device_display_id(device_kind, public_key_hash)
+    duplicate = LoginSecurityAlert.query.filter(
+        LoginSecurityAlert.target_user_id == user.id,
+        LoginSecurityAlert.device_kind == device_kind,
+        LoginSecurityAlert.attempted_display_id == display_id,
+        LoginSecurityAlert.created_at >= now - timedelta(minutes=10),
+    ).first()
+    if duplicate:
+        duplicate.created_at = now
+        duplicate.client_label = client_label
+        duplicate.read_at = None
+        return duplicate
+    row = LoginSecurityAlert(
+        target_user_id=user.id,
+        device_kind=device_kind,
+        attempted_display_id=display_id,
+        client_label=client_label,
+        created_at=now,
+    )
+    db.session.add(row)
+    return row
+
+
+def device_payload(row, current_binding_id=None):
+    return {
+        "id": row.id,
+        "kind": row.device_kind,
+        "kind_label": "手机端" if row.device_kind == "mobile" else "电脑端",
+        "display_id": row.display_id,
+        "client_label": row.client_label,
+        "first_bound_at": row.first_bound_at.strftime("%Y-%m-%d %H:%M:%S") if row.first_bound_at else None,
+        "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
+        "last_seen_at": row.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_seen_at else None,
+        "current": row.id == current_binding_id,
+    }
+
+
 def current_user():
     return getattr(g, "current_user", None)
 
@@ -3258,19 +3422,33 @@ def admin_required(view):
 
 @app.before_request
 def require_account_login():
-    if request.endpoint in {"static", "service_worker", "web_app_manifest"} or request.path in {"/login", "/register", "/api/auth/login", "/api/auth/register"}:
+    if request.endpoint in {"static", "service_worker", "web_app_manifest"} or request.path in {"/login", "/register", "/api/auth/login", "/api/auth/register", "/api/auth/device/challenge"}:
         return None
     user_id = session.get("user_id")
     token = session.get("auth_token")
     user = db.session.get(UserAccount, user_id) if user_id else None
-    if not user or not user.active or not token or user.active_session_hash != session_digest(token):
+    binding = current_account_device()
+    device_session_valid = bool(
+        binding
+        and user
+        and binding.user_id == user.id
+        and token
+        and binding.active_session_hash == session_digest(token)
+    )
+    legacy_session_valid = bool(
+        not binding and user and token and user.active_session_hash == session_digest(token)
+    )
+    if not user or not user.active or not (device_session_valid or legacy_session_valid):
         session.clear()
         if request.path.startswith("/api/"):
             return jsonify({"ok": False, "error": "登录已失效，请重新登录。", "login_required": True}), 401
         return redirect(url_for("login_page", next=request.full_path))
     g.current_user = user
-    if not user.last_seen_at or datetime.now() - user.last_seen_at > timedelta(minutes=5):
-        user.last_seen_at = datetime.now()
+    now = datetime.now()
+    if not user.last_seen_at or now - user.last_seen_at > timedelta(minutes=5):
+        user.last_seen_at = now
+        if binding:
+            binding.last_seen_at = now
         db.session.commit()
     return None
 
@@ -3305,25 +3483,83 @@ def register_page():
     return render_template("auth.html", mode="register")
 
 
+@app.post("/api/auth/device/challenge")
+def device_challenge_api():
+    body = request.get_json(silent=True) or {}
+    username = str(body.get("username", "")).strip().lower()
+    if not re.fullmatch(r"[a-z0-9_]{2,24}", username):
+        return jsonify({"ok": False, "error": "账号格式不正确。"}), 400
+    challenge = secrets.token_bytes(32)
+    session["device_challenge"] = device_base64url(challenge)
+    session["device_challenge_username"] = session_digest(username)
+    session["device_challenge_expires"] = int(time.time()) + DEVICE_CHALLENGE_TTL_SECONDS
+    return jsonify({"ok": True, "challenge": device_base64url(challenge), "expires_in": DEVICE_CHALLENGE_TTL_SECONDS})
+
+
 @app.post("/api/auth/login")
 def login_api():
     body = request.get_json(silent=True) or {}
     username = str(body.get("username", "")).strip().lower()
     password = str(body.get("password", ""))
-    user = UserAccount.query.filter_by(username=username).first()
+    user = UserAccount.query.filter_by(username=username).with_for_update().first()
     if not user or not user.active or not check_password_hash(user.password_hash, password):
+        session.pop("device_challenge", None)
+        session.pop("device_challenge_username", None)
+        session.pop("device_challenge_expires", None)
         return jsonify({"ok": False, "error": "账号或密码不正确。"}), 401
+    try:
+        device_kind = normalize_device_kind(body)
+        client_label = normalize_device_client_label(body, device_kind)
+        public_key_bytes = verify_device_proof(username, body)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    public_key_hash = device_public_key_hash(public_key_bytes)
+    binding = AccountDevice.query.filter_by(user_id=user.id, device_kind=device_kind).first()
+    if binding and binding.public_key_hash != public_key_hash:
+        record_blocked_device_alert(user, device_kind, public_key_hash, client_label)
+        db.session.commit()
+        kind_label = "手机端" if device_kind == "mobile" else "电脑端"
+        return jsonify({
+            "ok": False,
+            "error": f"这个账号已经绑定另一台{kind_label}，本次登录已拒绝并报告管理员。",
+            "device_blocked": True,
+            "device_kind": device_kind,
+            "attempted_device_id": device_display_id(device_kind, public_key_hash),
+        }), 409
+    now = datetime.now()
+    if not binding:
+        binding = AccountDevice(
+            user_id=user.id,
+            device_kind=device_kind,
+            public_key_data=device_base64url(public_key_bytes),
+            public_key_hash=public_key_hash,
+            display_id=device_display_id(device_kind, public_key_hash),
+            first_bound_at=now,
+        )
+        db.session.add(binding)
+        db.session.flush()
     raw_token = secrets.token_urlsafe(32)
-    user.active_session_hash = session_digest(raw_token)
-    user.last_login_at = datetime.now()
-    user.last_seen_at = datetime.now()
+    binding.client_label = client_label
+    binding.user_agent = str(request.headers.get("User-Agent", ""))[:255] or None
+    binding.active_session_hash = session_digest(raw_token)
+    binding.last_login_at = now
+    binding.last_seen_at = now
+    user.active_session_hash = None
+    user.last_login_at = now
+    user.last_seen_at = now
     db.session.commit()
     session.clear()
     session.permanent = True
     session["user_id"] = user.id
     session["auth_token"] = raw_token
     session["csrf_token"] = secrets.token_urlsafe(24)
-    return jsonify({"ok": True, "redirect": "/", "role": user.role})
+    session["device_binding_id"] = binding.id
+    return jsonify({
+        "ok": True,
+        "redirect": "/",
+        "role": user.role,
+        "device": device_payload(binding, binding.id),
+    })
 
 
 @app.post("/api/auth/register")
@@ -3361,12 +3597,70 @@ def register_api():
     return jsonify({"ok": True, "redirect": "/login"})
 
 
+@app.post("/api/auth/device/enroll-current")
+def enroll_current_device_api():
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    user = current_user()
+    if current_account_device():
+        return jsonify({"ok": True, "device": device_payload(current_account_device(), session.get("device_binding_id"))})
+    body = request.get_json(silent=True) or {}
+    try:
+        device_kind = normalize_device_kind(body)
+        client_label = normalize_device_client_label(body, device_kind)
+        public_key_bytes = verify_device_proof(user.username, body)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    public_key_hash = device_public_key_hash(public_key_bytes)
+    binding = AccountDevice.query.filter_by(user_id=user.id, device_kind=device_kind).first()
+    if binding and binding.public_key_hash != public_key_hash:
+        record_blocked_device_alert(user, device_kind, public_key_hash, client_label)
+        user.active_session_hash = None
+        db.session.commit()
+        session.clear()
+        return jsonify({
+            "ok": False,
+            "error": "当前设备与账号已绑定设备不一致，请联系管理员解除旧绑定。",
+            "device_blocked": True,
+        }), 409
+    now = datetime.now()
+    if not binding:
+        binding = AccountDevice(
+            user_id=user.id,
+            device_kind=device_kind,
+            public_key_data=device_base64url(public_key_bytes),
+            public_key_hash=public_key_hash,
+            display_id=device_display_id(device_kind, public_key_hash),
+            first_bound_at=now,
+        )
+        db.session.add(binding)
+        db.session.flush()
+    token = session.get("auth_token")
+    if not token:
+        return jsonify({"ok": False, "error": "登录已失效，请重新登录。"}), 401
+    binding.client_label = client_label
+    binding.user_agent = str(request.headers.get("User-Agent", ""))[:255] or None
+    binding.active_session_hash = session_digest(token)
+    binding.last_login_at = binding.last_login_at or now
+    binding.last_seen_at = now
+    user.active_session_hash = None
+    session["device_binding_id"] = binding.id
+    db.session.commit()
+    return jsonify({"ok": True, "device": device_payload(binding, binding.id)})
+
+
 @app.post("/api/auth/logout")
 def logout_api():
     user_id = session.get("user_id")
     token = session.get("auth_token")
     user = db.session.get(UserAccount, user_id) if user_id else None
-    if user and token and user.active_session_hash == session_digest(token):
+    binding = current_account_device()
+    device_session_valid = bool(
+        user and binding and binding.user_id == user.id and token
+        and binding.active_session_hash == session_digest(token)
+    )
+    legacy_session_valid = bool(user and not binding and token and user.active_session_hash == session_digest(token))
+    if device_session_valid or legacy_session_valid:
         payload = request.get_json(silent=True) or {}
         push_endpoint = str(payload.get("push_endpoint", "")).strip()
         if push_endpoint:
@@ -3374,7 +3668,10 @@ def logout_api():
                 user_id=user.id,
                 endpoint_hash=web_push_endpoint_hash(push_endpoint),
             ).delete(synchronize_session=False)
-        user.active_session_hash = None
+        if binding:
+            binding.active_session_hash = None
+        else:
+            user.active_session_hash = None
         db.session.commit()
     session.clear()
     return jsonify({"ok": True, "redirect": "/login"})
@@ -3383,10 +3680,13 @@ def logout_api():
 @app.get("/api/auth/me")
 def auth_me():
     user = current_user()
+    binding = current_account_device()
     return jsonify({
         "ok": True, "user_id": user.id, "username": user.username, "role": user.role,
         "is_admin": user.role == "admin", "csrf_token": session.get("csrf_token"),
         "chat_nav_hidden": bool(user.chat_nav_hidden),
+        "device_protected": bool(binding),
+        "device": device_payload(binding, binding.id) if binding else None,
     })
 
 
@@ -3415,6 +3715,9 @@ def create_admin_command(username, password):
         row.role = "admin"
         row.active = True
         row.active_session_hash = None
+        AccountDevice.query.filter_by(user_id=row.id).update(
+            {AccountDevice.active_session_hash: None}, synchronize_session=False
+        )
     else:
         db.session.add(UserAccount(username=username, password_hash=generate_password_hash(password), role="admin", password_changed_at=changed_at))
     db.session.commit()
@@ -3684,13 +3987,79 @@ def create_invite():
 @app.get("/api/admin/users")
 @admin_required
 def list_users():
+    rows = UserAccount.query.order_by(UserAccount.created_at).all()
+    devices_by_user = {}
+    for device in AccountDevice.query.order_by(AccountDevice.device_kind).all():
+        devices_by_user.setdefault(device.user_id, []).append(device)
+    current_binding_id = session.get("device_binding_id")
     return jsonify({"items": [{
         "id": row.id, "username": row.username, "role": row.role, "active": row.active,
         "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
         "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
         "last_seen_at": row.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_seen_at else None,
         "password_changed_at": row.password_changed_at.strftime("%Y-%m-%d %H:%M:%S") if row.password_changed_at else None,
-    } for row in UserAccount.query.order_by(UserAccount.created_at).all()]})
+        "devices": [device_payload(device, current_binding_id) for device in devices_by_user.get(row.id, [])],
+    } for row in rows]})
+
+
+@app.delete("/api/admin/users/<int:user_id>/devices/<device_kind>")
+@admin_required
+def unbind_account_device(user_id, device_kind):
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    if device_kind not in {"desktop", "mobile"}:
+        return jsonify({"ok": False, "error": "设备类型无效。"}), 400
+    target = db.session.get(UserAccount, user_id)
+    if not target:
+        return jsonify({"ok": False, "error": "账号不存在。"}), 404
+    binding = AccountDevice.query.filter_by(user_id=target.id, device_kind=device_kind).first()
+    if not binding:
+        return jsonify({"ok": False, "error": "这个设备槽位尚未绑定。"}), 404
+    was_current = binding.id == session.get("device_binding_id")
+    db.session.delete(binding)
+    db.session.add(AccountSecurityEvent(
+        actor_user_id=current_user().id,
+        target_user_id=target.id,
+        event_type=f"admin_{device_kind}_device_unbound",
+        created_at=datetime.now(),
+    ))
+    db.session.commit()
+    return jsonify({"ok": True, "user_id": target.id, "device_kind": device_kind, "current_session_unbound": was_current})
+
+
+@app.get("/api/admin/security-alerts")
+@admin_required
+def list_login_security_alerts():
+    rows = LoginSecurityAlert.query.order_by(LoginSecurityAlert.created_at.desc()).limit(100).all()
+    user_ids = {row.target_user_id for row in rows}
+    usernames = {
+        row.id: row.username for row in UserAccount.query.filter(UserAccount.id.in_(user_ids)).all()
+    } if user_ids else {}
+    return jsonify({
+        "unread": LoginSecurityAlert.query.filter(LoginSecurityAlert.read_at.is_(None)).count(),
+        "items": [{
+            "id": row.id,
+            "username": usernames.get(row.target_user_id, "未知账号"),
+            "device_kind": row.device_kind,
+            "device_kind_label": "手机端" if row.device_kind == "mobile" else "电脑端",
+            "attempted_device_id": row.attempted_display_id,
+            "client_label": row.client_label,
+            "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
+            "read": bool(row.read_at),
+        } for row in rows],
+    })
+
+
+@app.post("/api/admin/security-alerts/read")
+@admin_required
+def mark_login_security_alerts_read():
+    if not valid_admin_csrf():
+        return jsonify({"ok": False, "error": "安全校验失效，请刷新页面后重试。"}), 403
+    updated = LoginSecurityAlert.query.filter(LoginSecurityAlert.read_at.is_(None)).update(
+        {LoginSecurityAlert.read_at: datetime.now()}, synchronize_session=False
+    )
+    db.session.commit()
+    return jsonify({"ok": True, "updated": updated})
 
 
 @app.patch("/api/admin/users/<int:user_id>/active")
@@ -3712,6 +4081,9 @@ def set_user_active(user_id):
     changed_at = datetime.now()
     target.active = desired_active
     target.active_session_hash = None
+    AccountDevice.query.filter_by(user_id=target.id).update(
+        {AccountDevice.active_session_hash: None}, synchronize_session=False
+    )
     if not desired_active:
         ChatPushSubscription.query.filter_by(user_id=target.id).delete(synchronize_session=False)
     db.session.add(AccountSecurityEvent(
@@ -3750,6 +4122,9 @@ def reset_user_password(user_id):
     target.password_hash = generate_password_hash(new_password)
     target.password_changed_at = changed_at
     target.active_session_hash = None
+    AccountDevice.query.filter_by(user_id=target.id).update(
+        {AccountDevice.active_session_hash: None}, synchronize_session=False
+    )
     ChatPushSubscription.query.filter_by(user_id=target.id).delete(synchronize_session=False)
     db.session.add(AccountSecurityEvent(
         actor_user_id=current_user().id,

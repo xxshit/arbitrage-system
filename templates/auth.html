@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-title" content="ArbiScope">
   <title>{{ '登录' if mode == 'login' else '邀请码注册' }} | ArbiScope</title>
   <link rel="manifest" href="{{ url_for('web_app_manifest') }}?v=20260815-web-push">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260815-web-push">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260820-device-lock">
 </head>
 <body class="auth-page">
   <main class="auth-shell">
@@ -17,7 +17,7 @@
       <p class="eyebrow">ARBITRAGE INTELLIGENCE</p>
       <h1>ArbiScope</h1>
       <p>你的套利监控、趋势研判和知识记录都安静地守在这里。</p>
-      <div class="auth-security"><b>单端登录保护</b><span>同一账号在新设备登录后，旧设备会自动退出。</span></div>
+      <div class="auth-security"><b>加密设备保护</b><span>每个账号只允许绑定一台电脑和一台手机；其他设备即使知道密码也会被拒绝并报告管理员。</span></div>
     </section>
     <form id="authForm" class="auth-card">
       <p class="eyebrow">{{ 'WELCOME BACK' if mode == 'login' else 'INVITATION ONLY' }}</p>
@@ -33,6 +33,16 @@
   </main>
   <script>
     const mode={{ mode|tojson }};
+    const deviceIdentityDatabase='arbiscope-device-identity-v1',deviceIdentityStore='account-keys';
+    function deviceBase64url(bytes){let binary='';new Uint8Array(bytes).forEach(value=>binary+=String.fromCharCode(value));return btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')}
+    function deviceBase64urlDecode(value){const compact=String(value||'').replace(/-/g,'+').replace(/_/g,'/'),binary=atob(compact+'='.repeat((4-compact.length%4)%4));return Uint8Array.from(binary,char=>char.charCodeAt(0))}
+    function deviceKind(){const ua=navigator.userAgent||'',appleTouch=navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1;return /iPhone|iPad|iPod|Android|Mobile/i.test(ua)||appleTouch?'mobile':'desktop'}
+    function deviceLabel(){const ua=navigator.userAgent||'',browser=/CriOS|Chrome/i.test(ua)?'Chrome':/FxiOS|Firefox/i.test(ua)?'Firefox':/Safari/i.test(ua)?'Safari':'浏览器',platform=deviceKind()==='mobile'?'手机或平板':(/Mac/i.test(navigator.platform||ua)?'Mac':'电脑');return `${browser} · ${platform}`}
+    function openDeviceIdentityDatabase(){return new Promise((resolve,reject)=>{const request=indexedDB.open(deviceIdentityDatabase,1);request.onupgradeneeded=()=>{if(!request.result.objectStoreNames.contains(deviceIdentityStore))request.result.createObjectStore(deviceIdentityStore)};request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error)})}
+    function readDeviceIdentity(db,username){return new Promise((resolve,reject)=>{const request=db.transaction(deviceIdentityStore,'readonly').objectStore(deviceIdentityStore).get(username);request.onsuccess=()=>resolve(request.result||null);request.onerror=()=>reject(request.error)})}
+    function writeDeviceIdentity(db,username,value){return new Promise((resolve,reject)=>{const transaction=db.transaction(deviceIdentityStore,'readwrite');transaction.objectStore(deviceIdentityStore).put(value,username);transaction.oncomplete=()=>resolve();transaction.onerror=()=>reject(transaction.error)})}
+    async function accountDeviceIdentity(username){if(!window.crypto?.subtle||!window.indexedDB)throw new Error('当前浏览器不支持加密设备绑定，请升级系统浏览器。');const db=await openDeviceIdentityDatabase();let identity=await readDeviceIdentity(db,username);if(!identity?.privateKey||!identity?.publicKey){const pair=await crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},false,['sign','verify']);identity={privateKey:pair.privateKey,publicKey:pair.publicKey};await writeDeviceIdentity(db,username,identity)}const publicKey=await crypto.subtle.exportKey('raw',identity.publicKey);return {...identity,publicKey:deviceBase64url(publicKey)}}
+    async function signedDevicePayload(username){const identity=await accountDeviceIdentity(username),challengeResponse=await fetch('/api/auth/device/challenge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username})}),challengeData=await challengeResponse.json();if(!challengeResponse.ok)throw new Error(challengeData.error||'设备验证初始化失败');const signature=await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},identity.privateKey,deviceBase64urlDecode(challengeData.challenge));return {device_public_key:identity.publicKey,device_signature:deviceBase64url(signature),device_kind:deviceKind(),touch_points:Number(navigator.maxTouchPoints||0),device_label:deviceLabel()}}
     document.getElementById('authForm').addEventListener('submit',async event=>{
       event.preventDefault();
       const error=document.getElementById('authError'),button=event.currentTarget.querySelector('button');
@@ -40,6 +50,7 @@
       const payload={username:document.getElementById('authUsername').value.trim(),password:document.getElementById('authPassword').value};
       if(mode==='register')payload.invite_code=document.getElementById('inviteCode').value.trim();
       try{
+        if(mode==='login')Object.assign(payload,await signedDevicePayload(payload.username.toLowerCase()));
         const response=await fetch(`/api/auth/${mode}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
         const data=await response.json();
         if(!response.ok)throw new Error(data.error||'操作失败');

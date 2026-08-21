@@ -56,9 +56,10 @@ CHAT_RETENTION_DAYS = 7
 CHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 CHAT_ENCRYPTION_VERSION = 1
 DEVICE_CHALLENGE_TTL_SECONDS = 120
-ACCOUNT_LEVEL_RESTRICTED = "restricted"
-ACCOUNT_LEVEL_UNRESTRICTED = "unrestricted"
-ACCOUNT_LEVELS = {ACCOUNT_LEVEL_RESTRICTED, ACCOUNT_LEVEL_UNRESTRICTED}
+ACCOUNT_LEVEL_LV1 = "lv1"
+ACCOUNT_LEVEL_LV2 = "lv2"
+ACCOUNT_LEVEL_LV3 = "lv3"
+ACCOUNT_LEVELS = {ACCOUNT_LEVEL_LV1, ACCOUNT_LEVEL_LV2, ACCOUNT_LEVEL_LV3}
 CHAT_TEXT_AAD = b"ArbiScope/chat-message/v1"
 CHAT_IMAGE_AAD = b"ArbiScope/chat-image/v1"
 WEB_PUSH_SUBSCRIPTION_AAD = b"ArbiScope/web-push-subscription/v1"
@@ -634,7 +635,7 @@ class UserAccount(db.Model):
     username = db.Column(db.String(40), nullable=False, unique=True, index=True)
     password_hash = db.Column(db.String(255), nullable=False)
     role = db.Column(db.String(20), nullable=False, default="viewer", index=True)
-    account_level = db.Column(db.String(20), nullable=False, default=ACCOUNT_LEVEL_RESTRICTED)
+    account_level = db.Column(db.String(20), nullable=False, default=ACCOUNT_LEVEL_LV1)
     active = db.Column(db.Boolean, nullable=False, default=True)
     active_session_hash = db.Column(db.String(64))
     last_login_at = db.Column(db.DateTime)
@@ -3375,8 +3376,27 @@ def current_account_device():
     return db.session.get(AccountDevice, binding_id) if binding_id else None
 
 
+def normalized_account_level(user):
+    if getattr(user, "role", None) == "admin":
+        return ACCOUNT_LEVEL_LV3
+    value = str(getattr(user, "account_level", ACCOUNT_LEVEL_LV1) or ACCOUNT_LEVEL_LV1).strip().lower()
+    if value == "unrestricted":
+        return ACCOUNT_LEVEL_LV2
+    if value == "restricted":
+        return ACCOUNT_LEVEL_LV1
+    return value if value in {ACCOUNT_LEVEL_LV1, ACCOUNT_LEVEL_LV2} else ACCOUNT_LEVEL_LV1
+
+
+def migrate_account_levels():
+    """Move the two existing roles to LV3/LV2 without changing future LV1 registrations."""
+    db.session.execute(text("UPDATE user_account SET account_level = 'lv3' WHERE role = 'admin' AND account_level <> 'lv3'"))
+    db.session.execute(text("UPDATE user_account SET account_level = 'lv2' WHERE role <> 'admin' AND account_level IN ('restricted', 'unrestricted')"))
+    db.session.execute(text("UPDATE user_account SET account_level = 'lv1' WHERE role <> 'admin' AND (account_level IS NULL OR account_level NOT IN ('lv1', 'lv2'))"))
+    db.session.commit()
+
+
 def device_lock_required(user):
-    return str(getattr(user, "account_level", ACCOUNT_LEVEL_RESTRICTED) or ACCOUNT_LEVEL_RESTRICTED) != ACCOUNT_LEVEL_UNRESTRICTED
+    return normalized_account_level(user) == ACCOUNT_LEVEL_LV1
 
 
 def normalize_ip_address(value):
@@ -3577,7 +3597,7 @@ def login_api():
             "ok": True,
             "redirect": "/",
             "role": user.role,
-            "account_level": ACCOUNT_LEVEL_UNRESTRICTED,
+            "account_level": normalized_account_level(user),
             "device_lock_required": False,
         })
     if not body.get("device_public_key") or not body.get("device_signature"):
@@ -3640,7 +3660,7 @@ def login_api():
         "ok": True,
         "redirect": "/",
         "role": user.role,
-        "account_level": ACCOUNT_LEVEL_RESTRICTED,
+        "account_level": ACCOUNT_LEVEL_LV1,
         "device_lock_required": True,
         "device": device_payload(binding, binding.id),
     })
@@ -3661,7 +3681,12 @@ def register_api():
     invite = InviteCode.query.filter_by(code_hash=session_digest(invite_code)).first()
     if not invite or invite.used_at or (invite.expires_at and invite.expires_at < datetime.now()):
         return jsonify({"ok": False, "error": "邀请码无效、已使用或已过期。"}), 400
-    user = UserAccount(username=username, password_hash=generate_password_hash(password), role="viewer")
+    user = UserAccount(
+        username=username,
+        password_hash=generate_password_hash(password),
+        role="viewer",
+        account_level=ACCOUNT_LEVEL_LV1,
+    )
     db.session.add(user)
     db.session.flush()
     used_at = datetime.now()
@@ -3771,7 +3796,7 @@ def auth_me():
         "ok": True, "user_id": user.id, "username": user.username, "role": user.role,
         "is_admin": user.role == "admin", "csrf_token": session.get("csrf_token"),
         "chat_nav_hidden": bool(user.chat_nav_hidden),
-        "account_level": user.account_level or ACCOUNT_LEVEL_RESTRICTED,
+        "account_level": normalized_account_level(user),
         "device_lock_required": device_lock_required(user),
         "device_protected": bool(binding) if device_lock_required(user) else False,
         "device": device_payload(binding, binding.id) if binding else None,
@@ -3780,7 +3805,8 @@ def auth_me():
 
 @app.get("/")
 def index():
-    return render_template("index.html", current_user=current_user())
+    user = current_user()
+    return render_template("index.html", current_user=user, account_level=normalized_account_level(user))
 
 
 def valid_admin_csrf():
@@ -3801,13 +3827,20 @@ def create_admin_command(username, password):
         row.password_hash = generate_password_hash(password)
         row.password_changed_at = changed_at
         row.role = "admin"
+        row.account_level = ACCOUNT_LEVEL_LV3
         row.active = True
         row.active_session_hash = None
         AccountDevice.query.filter_by(user_id=row.id).update(
             {AccountDevice.active_session_hash: None}, synchronize_session=False
         )
     else:
-        db.session.add(UserAccount(username=username, password_hash=generate_password_hash(password), role="admin", password_changed_at=changed_at))
+        db.session.add(UserAccount(
+            username=username,
+            password_hash=generate_password_hash(password),
+            role="admin",
+            account_level=ACCOUNT_LEVEL_LV3,
+            password_changed_at=changed_at,
+        ))
     db.session.commit()
     click.echo(f"管理员 {username} 已创建/重置。")
 
@@ -4082,7 +4115,7 @@ def list_users():
     current_binding_id = session.get("device_binding_id")
     return jsonify({"items": [{
         "id": row.id, "username": row.username, "role": row.role, "active": row.active,
-        "account_level": row.account_level or ACCOUNT_LEVEL_RESTRICTED,
+        "account_level": normalized_account_level(row),
         "device_lock_required": device_lock_required(row),
         "last_login_ip": row.last_login_ip,
         "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
@@ -4105,7 +4138,11 @@ def set_user_account_level(user_id):
     account_level = str(body.get("account_level", "")).strip().lower()
     if account_level not in ACCOUNT_LEVELS:
         return jsonify({"ok": False, "error": "账号等级无效。"}), 400
-    changed = target.account_level != account_level
+    if target.role == "admin" and account_level != ACCOUNT_LEVEL_LV3:
+        return jsonify({"ok": False, "error": "管理员固定为 LV3，不能降低等级。"}), 400
+    if target.role != "admin" and account_level == ACCOUNT_LEVEL_LV3:
+        return jsonify({"ok": False, "error": "LV3 只属于管理员账号。"}), 400
+    changed = normalized_account_level(target) != account_level
     target.account_level = account_level
     target.active_session_hash = None
     AccountDevice.query.filter_by(user_id=target.id).update(
@@ -12339,8 +12376,9 @@ with app.app_context():
         db.session.execute(text("ALTER TABLE user_account ADD COLUMN password_changed_at DATETIME"))
         db.session.commit()
     if "account_level" not in user_columns:
-        db.session.execute(text("ALTER TABLE user_account ADD COLUMN account_level VARCHAR(20) NOT NULL DEFAULT 'restricted'"))
+        db.session.execute(text("ALTER TABLE user_account ADD COLUMN account_level VARCHAR(20) NOT NULL DEFAULT 'lv1'"))
         db.session.commit()
+    migrate_account_levels()
     if "last_login_ip" not in user_columns:
         db.session.execute(text("ALTER TABLE user_account ADD COLUMN last_login_ip VARCHAR(45)"))
         db.session.commit()

@@ -13,10 +13,12 @@ os.environ["CHAT_ENCRYPTION_KEY"] = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8
 
 from app import (
     AccountDevice,
+    InviteCode,
     LoginSecurityAlert,
     UserAccount,
     app,
     db,
+    migrate_account_levels,
     request_source_ip,
     session_digest,
 )
@@ -36,6 +38,7 @@ class DeviceSecurityTests(unittest.TestCase):
                 username="owner",
                 password_hash=generate_password_hash("owner-password-123"),
                 role="admin",
+                account_level="lv3",
                 active_session_hash=session_digest("owner-token"),
             )
             viewer = UserAccount(
@@ -112,15 +115,46 @@ class DeviceSecurityTests(unittest.TestCase):
         ):
             self.assertEqual(request_source_ip(), "127.0.0.1")
 
-    def test_restricted_account_requests_device_proof_after_password_validation(self):
+    def test_lv1_account_requests_device_proof_after_password_validation(self):
         response = self.login_with_password_only(app.test_client())
         self.assertEqual(response.status_code, 428)
         self.assertTrue(response.get_json()["device_proof_required"])
 
-    def test_unrestricted_account_can_switch_devices_without_binding(self):
+    def test_new_registration_defaults_to_lv1(self):
+        invite_code = "ARBI-LV1TEST"
+        with app.app_context():
+            db.session.add(InviteCode(
+                code_hash=session_digest(invite_code),
+                code_prefix=invite_code[:10],
+                code_value=invite_code,
+                created_by=self.admin_id,
+            ))
+            db.session.commit()
+        response = app.test_client().post(
+            "/api/auth/register",
+            json={"username": "newviewer", "password": "new-viewer-password", "invite_code": invite_code},
+        )
+        self.assertEqual(response.status_code, 200)
+        with app.app_context():
+            created = UserAccount.query.filter_by(username="newviewer").one()
+            self.assertEqual(created.account_level, "lv1")
+            self.assertEqual(created.role, "viewer")
+
+    def test_legacy_accounts_migrate_admin_to_lv3_and_viewer_to_lv2(self):
+        with app.app_context():
+            admin = db.session.get(UserAccount, self.admin_id)
+            viewer = db.session.get(UserAccount, self.viewer_id)
+            admin.account_level = "restricted"
+            viewer.account_level = "restricted"
+            db.session.commit()
+            migrate_account_levels()
+            self.assertEqual(admin.account_level, "lv3")
+            self.assertEqual(viewer.account_level, "lv2")
+
+    def test_lv2_account_can_switch_devices_without_binding(self):
         with app.app_context():
             viewer = db.session.get(UserAccount, self.viewer_id)
-            viewer.account_level = "unrestricted"
+            viewer.account_level = "lv2"
             db.session.commit()
         first = app.test_client()
         second = app.test_client()
@@ -135,10 +169,10 @@ class DeviceSecurityTests(unittest.TestCase):
             self.assertEqual(AccountDevice.query.filter_by(user_id=self.viewer_id).count(), 0)
             self.assertEqual(LoginSecurityAlert.query.count(), 0)
 
-    def test_unrestricted_login_records_the_latest_ip(self):
+    def test_lv2_login_records_the_latest_ip(self):
         with app.app_context():
             viewer = db.session.get(UserAccount, self.viewer_id)
-            viewer.account_level = "unrestricted"
+            viewer.account_level = "lv2"
             db.session.commit()
         self.assertEqual(self.login_with_password_only(app.test_client(), source_ip="203.0.113.21").status_code, 200)
         with app.app_context():
@@ -149,7 +183,7 @@ class DeviceSecurityTests(unittest.TestCase):
         self.assertEqual(self.login_with_key(viewer, ec.generate_private_key(ec.SECP256R1())).status_code, 200)
         response = self.admin.patch(
             f"/api/admin/users/{self.viewer_id}/account-level",
-            json={"account_level": "unrestricted"},
+            json={"account_level": "lv2"},
             headers={"X-CSRF-Token": "owner-csrf"},
         )
         self.assertEqual(response.status_code, 200)
@@ -157,14 +191,14 @@ class DeviceSecurityTests(unittest.TestCase):
         self.assertEqual(viewer.get("/api/auth/me").status_code, 401)
         users = self.admin.get("/api/admin/users").get_json()["items"]
         updated = next(item for item in users if item["id"] == self.viewer_id)
-        self.assertEqual(updated["account_level"], "unrestricted")
+        self.assertEqual(updated["account_level"], "lv2")
         self.assertFalse(updated["device_lock_required"])
 
     def test_downgrading_restores_the_previous_device_binding(self):
         original_key = ec.generate_private_key(ec.SECP256R1())
         original = app.test_client()
         self.assertEqual(self.login_with_key(original, original_key).status_code, 200)
-        for level in ("unrestricted", "restricted"):
+        for level in ("lv2", "lv1"):
             response = self.admin.patch(
                 f"/api/admin/users/{self.viewer_id}/account-level",
                 json={"account_level": level},
@@ -184,6 +218,26 @@ class DeviceSecurityTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_only_admin_can_be_lv3_and_admin_cannot_be_downgraded(self):
+        viewer_response = self.admin.patch(
+            f"/api/admin/users/{self.viewer_id}/account-level",
+            json={"account_level": "lv3"},
+            headers={"X-CSRF-Token": "owner-csrf"},
+        )
+        self.assertEqual(viewer_response.status_code, 400)
+        admin_response = self.admin.patch(
+            f"/api/admin/users/{self.admin_id}/account-level",
+            json={"account_level": "lv2"},
+            headers={"X-CSRF-Token": "owner-csrf"},
+        )
+        self.assertEqual(admin_response.status_code, 400)
+
+    def test_admin_is_reported_as_lv3(self):
+        users = self.admin.get("/api/admin/users").get_json()["items"]
+        owner = next(item for item in users if item["id"] == self.admin_id)
+        self.assertEqual(owner["account_level"], "lv3")
+        self.assertFalse(owner["device_lock_required"])
+
     def test_one_desktop_and_one_mobile_can_stay_logged_in(self):
         desktop = app.test_client()
         mobile = app.test_client()
@@ -197,7 +251,7 @@ class DeviceSecurityTests(unittest.TestCase):
             devices = AccountDevice.query.filter_by(user_id=self.viewer_id).all()
             self.assertEqual({row.device_kind for row in devices}, {"desktop", "mobile"})
 
-    def test_restricted_account_records_account_and_device_ip(self):
+    def test_lv1_account_records_account_and_device_ip(self):
         response = self.login_with_key(
             app.test_client(), ec.generate_private_key(ec.SECP256R1()), source_ip="2001:db8::8"
         )

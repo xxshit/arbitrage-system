@@ -8,7 +8,7 @@
   <meta name="apple-mobile-web-app-title" content="ArbiScope">
   <title>{{ '登录' if mode == 'login' else '邀请码注册' }} | ArbiScope</title>
   <link rel="manifest" href="{{ url_for('web_app_manifest') }}?v=20260815-web-push">
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260820-account-security-ip">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20260821-account-lv123">
 </head>
 <body class="auth-page">
   <main class="auth-shell">
@@ -17,7 +17,7 @@
       <p class="eyebrow">ARBITRAGE INTELLIGENCE</p>
       <h1>ArbiScope</h1>
       <p>你的套利监控、趋势研判和知识记录都安静地守在这里。</p>
-      <div class="auth-security"><b>分级账号保护</b><span>低等级账号绑定一台电脑和一台手机；管理员指定的高等级账号可以在不同设备自由切换。</span></div>
+      <div class="auth-security"><b>LV1—LV3 分级账号</b><span>新账号默认 LV1 并绑定一台电脑和一台手机；LV2 可自由切换设备；管理员固定为最高权限 LV3。</span></div>
     </section>
     <form id="authForm" class="auth-card">
       <p class="eyebrow">{{ 'WELCOME BACK' if mode == 'login' else 'INVITATION ONLY' }}</p>

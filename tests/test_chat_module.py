@@ -722,7 +722,7 @@ class ChatModuleTests(unittest.TestCase):
         self.assertIn(".chat-compose-row{display:grid", style)
         self.assertIn(".chat-compose-row>button{align-self:stretch", style)
         self.assertNotIn(".chat-composer>button{align-self:start", style)
-        self.assertIn("20260821-account-lv123", page)
+        self.assertIn("20260821-ip-location", page)
         nav_visibility = script[
             script.index("function applyChatNavVisibility"):
             script.index("async function loadAuthState")

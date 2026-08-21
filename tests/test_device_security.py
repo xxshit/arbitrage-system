@@ -1,6 +1,7 @@
 import base64
 import os
 import unittest
+from unittest.mock import patch
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -11,6 +12,7 @@ os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["SECRET_KEY"] = "device-security-test-secret"
 os.environ["CHAT_ENCRYPTION_KEY"] = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
 
+import app as app_module
 from app import (
     AccountDevice,
     InviteCode,
@@ -20,6 +22,7 @@ from app import (
     db,
     migrate_account_levels,
     request_source_ip,
+    resolve_ip_location,
     session_digest,
 )
 
@@ -115,6 +118,33 @@ class DeviceSecurityTests(unittest.TestCase):
         ):
             self.assertEqual(request_source_ip(), "127.0.0.1")
 
+    def test_public_ip_location_uses_city_postal_and_network_provider(self):
+        payload = {
+            "success": True,
+            "ip": "8.8.8.8",
+            "country": "美国",
+            "region": "加利福尼亚州",
+            "city": "山景城",
+            "postal": "94043",
+            "connection": {"isp": "Google LLC"},
+        }
+
+        class LookupResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return __import__("json").dumps(payload, ensure_ascii=False).encode("utf-8")
+
+        app_module.IP_LOCATION_CACHE.clear()
+        with patch.object(app_module, "urlopen", return_value=LookupResponse()) as lookup:
+            location = resolve_ip_location("8.8.8.8")
+        self.assertEqual(location, "美国 加利福尼亚州 山景城 邮编 94043 · Google LLC")
+        self.assertIn("ipwho.is", lookup.call_args.args[0].full_url)
+
     def test_lv1_account_requests_device_proof_after_password_validation(self):
         response = self.login_with_password_only(app.test_client())
         self.assertEqual(response.status_code, 428)
@@ -177,6 +207,21 @@ class DeviceSecurityTests(unittest.TestCase):
         self.assertEqual(self.login_with_password_only(app.test_client(), source_ip="203.0.113.21").status_code, 200)
         with app.app_context():
             self.assertEqual(db.session.get(UserAccount, self.viewer_id).last_login_ip, "203.0.113.21")
+
+    def test_successful_login_records_and_returns_approximate_location(self):
+        with app.app_context():
+            viewer = db.session.get(UserAccount, self.viewer_id)
+            viewer.account_level = "lv2"
+            db.session.commit()
+        with patch.object(app_module, "resolve_ip_location", return_value="中国 广东省 深圳市 · 中国电信"):
+            response = self.login_with_password_only(app.test_client(), source_ip="8.8.8.8")
+        self.assertEqual(response.status_code, 200)
+        with app.app_context():
+            viewer = db.session.get(UserAccount, self.viewer_id)
+            self.assertEqual(viewer.last_login_location, "中国 广东省 深圳市 · 中国电信")
+        users = self.admin.get("/api/admin/users").get_json()["items"]
+        viewer_payload = next(item for item in users if item["id"] == self.viewer_id)
+        self.assertEqual(viewer_payload["last_login_location"], "中国 广东省 深圳市 · 中国电信")
 
     def test_admin_can_change_account_level_and_invalidate_current_session(self):
         viewer = app.test_client()
@@ -261,6 +306,7 @@ class DeviceSecurityTests(unittest.TestCase):
             device = AccountDevice.query.filter_by(user_id=self.viewer_id, device_kind="desktop").one()
             self.assertEqual(viewer.last_login_ip, "2001:db8::8")
             self.assertEqual(device.last_ip, "2001:db8::8")
+            self.assertEqual(device.last_location, "内网地址")
         users = self.admin.get("/api/admin/users").get_json()["items"]
         viewer_payload = next(item for item in users if item["id"] == self.viewer_id)
         self.assertEqual(viewer_payload["last_login_ip"], "2001:db8::8")
@@ -280,6 +326,7 @@ class DeviceSecurityTests(unittest.TestCase):
         self.assertEqual(alerts["items"][0]["username"], "viewer")
         self.assertTrue(alerts["items"][0]["attempted_device_id"].startswith("PC-"))
         self.assertEqual(alerts["items"][0]["source_ip"], "198.51.100.52")
+        self.assertEqual(alerts["items"][0]["source_location"], "内网地址")
 
     def test_wrong_password_does_not_create_a_device_report(self):
         client = app.test_client()

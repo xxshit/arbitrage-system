@@ -228,6 +228,7 @@ class WebPushTests(unittest.TestCase):
                 attempted_display_id="PC-ABCD-EFGH-IJKL",
                 client_label="Chrome · Mac",
                 source_ip="198.51.100.52",
+                source_location="美国 加利福尼亚州 山景城 · Example ISP",
             )
             db.session.add(alert)
             db.session.commit()
@@ -241,6 +242,7 @@ class WebPushTests(unittest.TestCase):
         payload = json.loads(sender.call_args.args[1])
         self.assertEqual(payload["type"], "login-security-alert")
         self.assertIn("198.51.100.52", payload["body"])
+        self.assertIn("山景城", payload["body"])
         self.assertEqual(payload["url"], "/#security-notifications")
 
     def test_sending_message_queues_recipient_push(self):

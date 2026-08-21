@@ -19,7 +19,7 @@ from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urlencode, urljoin, urlparse
+from urllib.parse import quote, urlencode, urljoin, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -51,6 +51,9 @@ app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0").st
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
 CHAT_PUSH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="chat-web-push")
+IP_LOCATION_CACHE = {}
+IP_LOCATION_CACHE_LOCK = threading.Lock()
+IP_LOCATION_CACHE_SECONDS = 24 * 60 * 60
 
 CHAT_RETENTION_DAYS = 7
 CHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
@@ -640,6 +643,7 @@ class UserAccount(db.Model):
     active_session_hash = db.Column(db.String(64))
     last_login_at = db.Column(db.DateTime)
     last_login_ip = db.Column(db.String(45))
+    last_login_location = db.Column(db.String(160))
     last_seen_at = db.Column(db.DateTime)
     password_changed_at = db.Column(db.DateTime, default=datetime.now, nullable=True)
     chat_nav_hidden = db.Column(db.Boolean, nullable=False, default=False)
@@ -669,6 +673,7 @@ class AccountDevice(db.Model):
     first_bound_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
     last_login_at = db.Column(db.DateTime)
     last_ip = db.Column(db.String(45))
+    last_location = db.Column(db.String(160))
     last_seen_at = db.Column(db.DateTime)
     __table_args__ = (
         db.UniqueConstraint("user_id", "device_kind", name="uq_account_device_user_kind"),
@@ -684,6 +689,7 @@ class LoginSecurityAlert(db.Model):
     attempted_display_id = db.Column(db.String(24), nullable=False)
     client_label = db.Column(db.String(120))
     source_ip = db.Column(db.String(45))
+    source_location = db.Column(db.String(160))
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
     read_at = db.Column(db.DateTime, index=True)
 
@@ -3425,7 +3431,62 @@ def request_source_ip():
     return normalize_ip_address(forwarded.rsplit(",", 1)[-1]) or direct_ip
 
 
-def record_blocked_device_alert(user, device_kind, public_key_hash, client_label, source_ip=None):
+def resolve_ip_location(source_ip, timeout=2.5):
+    """Return an approximate network location; failure must never block authentication."""
+    normalized = normalize_ip_address(source_ip)
+    if not normalized:
+        return None
+    address = ipaddress.ip_address(normalized)
+    if not address.is_global:
+        if address.is_loopback:
+            return "本机地址"
+        if address.is_private or address.is_link_local:
+            return "内网地址"
+        return "非公网地址"
+    now = time.monotonic()
+    with IP_LOCATION_CACHE_LOCK:
+        cached = IP_LOCATION_CACHE.get(normalized)
+        if cached and cached[0] > now:
+            return cached[1]
+    location = None
+    try:
+        query = urlencode({
+            "lang": "zh-CN",
+            "fields": "success,ip,country,region,city,postal,connection",
+        })
+        lookup = Request(
+            f"https://ipwho.is/{quote(normalized, safe='')}?{query}",
+            headers={"Accept": "application/json", "User-Agent": "ArbiScope-IP-Audit/1.0"},
+        )
+        with urlopen(lookup, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        returned_ip = normalize_ip_address(payload.get("ip"))
+        if payload.get("success") is True and returned_ip == normalized:
+            parts = []
+            for key in ("country", "region", "city"):
+                part = re.sub(r"\s+", " ", str(payload.get(key) or "").strip())
+                if part and part not in parts:
+                    parts.append(part)
+            postal = re.sub(r"\s+", " ", str(payload.get("postal") or "").strip())
+            if postal and postal not in parts:
+                parts.append(f"邮编 {postal}")
+            connection = payload.get("connection") if isinstance(payload.get("connection"), dict) else {}
+            network = re.sub(
+                r"\s+", " ", str(connection.get("isp") or connection.get("org") or "").strip()
+            )
+            address_text = " ".join(parts)
+            location = (f"{address_text} · {network}" if network else address_text)[:160] or None
+    except Exception:
+        location = None
+    ttl = IP_LOCATION_CACHE_SECONDS if location else 10 * 60
+    with IP_LOCATION_CACHE_LOCK:
+        IP_LOCATION_CACHE[normalized] = (now + ttl, location)
+    return location
+
+
+def record_blocked_device_alert(
+    user, device_kind, public_key_hash, client_label, source_ip=None, source_location=None
+):
     now = datetime.now()
     display_id = device_display_id(device_kind, public_key_hash)
     duplicate = LoginSecurityAlert.query.filter(
@@ -3438,6 +3499,7 @@ def record_blocked_device_alert(user, device_kind, public_key_hash, client_label
         duplicate.created_at = now
         duplicate.client_label = client_label
         duplicate.source_ip = source_ip
+        duplicate.source_location = source_location
         duplicate.read_at = None
         return duplicate
     row = LoginSecurityAlert(
@@ -3446,6 +3508,7 @@ def record_blocked_device_alert(user, device_kind, public_key_hash, client_label
         attempted_display_id=display_id,
         client_label=client_label,
         source_ip=source_ip,
+        source_location=source_location,
         created_at=now,
     )
     db.session.add(row)
@@ -3462,9 +3525,30 @@ def device_payload(row, current_binding_id=None):
         "first_bound_at": row.first_bound_at.strftime("%Y-%m-%d %H:%M:%S") if row.first_bound_at else None,
         "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
         "last_ip": row.last_ip,
+        "last_location": row.last_location,
         "last_seen_at": row.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_seen_at else None,
         "current": row.id == current_binding_id,
     }
+
+
+def hydrate_missing_ip_locations(users=(), devices=(), alerts=()):
+    """Lazily backfill pre-upgrade IP rows when an administrator opens the audit pages."""
+    changed = False
+    for row, ip_field, location_field in (
+        *((item, "last_login_ip", "last_login_location") for item in users),
+        *((item, "last_ip", "last_location") for item in devices),
+        *((item, "source_ip", "source_location") for item in alerts),
+    ):
+        source_ip = getattr(row, ip_field, None)
+        if not source_ip or getattr(row, location_field, None):
+            continue
+        location = resolve_ip_location(source_ip)
+        if location:
+            setattr(row, location_field, location)
+            changed = True
+    if changed:
+        db.session.commit()
+    return changed
 
 
 def current_user():
@@ -3580,9 +3664,11 @@ def login_api():
     if not device_lock_required(user):
         raw_token = secrets.token_urlsafe(32)
         now = datetime.now()
+        source_location = resolve_ip_location(source_ip)
         user.active_session_hash = session_digest(raw_token)
         user.last_login_at = now
         user.last_login_ip = source_ip
+        user.last_login_location = source_location
         user.last_seen_at = now
         AccountDevice.query.filter_by(user_id=user.id).update(
             {AccountDevice.active_session_hash: None}, synchronize_session=False
@@ -3613,9 +3699,12 @@ def login_api():
     except (TypeError, ValueError) as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     public_key_hash = device_public_key_hash(public_key_bytes)
+    source_location = resolve_ip_location(source_ip)
     binding = AccountDevice.query.filter_by(user_id=user.id, device_kind=device_kind).first()
     if binding and binding.public_key_hash != public_key_hash:
-        alert = record_blocked_device_alert(user, device_kind, public_key_hash, client_label, source_ip)
+        alert = record_blocked_device_alert(
+            user, device_kind, public_key_hash, client_label, source_ip, source_location
+        )
         db.session.commit()
         queue_login_security_web_push(alert.id)
         kind_label = "手机端" if device_kind == "mobile" else "电脑端"
@@ -3644,10 +3733,12 @@ def login_api():
     binding.active_session_hash = session_digest(raw_token)
     binding.last_login_at = now
     binding.last_ip = source_ip
+    binding.last_location = source_location
     binding.last_seen_at = now
     user.active_session_hash = None
     user.last_login_at = now
     user.last_login_ip = source_ip
+    user.last_login_location = source_location
     user.last_seen_at = now
     db.session.commit()
     session.clear()
@@ -3723,11 +3814,16 @@ def enroll_current_device_api():
     except (TypeError, ValueError) as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
     public_key_hash = device_public_key_hash(public_key_bytes)
+    source_ip = request_source_ip()
+    source_location = resolve_ip_location(source_ip)
     binding = AccountDevice.query.filter_by(user_id=user.id, device_kind=device_kind).first()
     if binding and binding.public_key_hash != public_key_hash:
-        record_blocked_device_alert(user, device_kind, public_key_hash, client_label)
+        alert = record_blocked_device_alert(
+            user, device_kind, public_key_hash, client_label, source_ip, source_location
+        )
         user.active_session_hash = None
         db.session.commit()
+        queue_login_security_web_push(alert.id)
         session.clear()
         return jsonify({
             "ok": False,
@@ -3753,8 +3849,12 @@ def enroll_current_device_api():
     binding.user_agent = str(request.headers.get("User-Agent", ""))[:255] or None
     binding.active_session_hash = session_digest(token)
     binding.last_login_at = binding.last_login_at or now
+    binding.last_ip = source_ip
+    binding.last_location = source_location
     binding.last_seen_at = now
     user.active_session_hash = None
+    user.last_login_ip = source_ip
+    user.last_login_location = source_location
     session["device_binding_id"] = binding.id
     db.session.commit()
     return jsonify({"ok": True, "device": device_payload(binding, binding.id)})
@@ -4109,8 +4209,10 @@ def create_invite():
 @admin_required
 def list_users():
     rows = UserAccount.query.order_by(UserAccount.created_at).all()
+    all_devices = AccountDevice.query.order_by(AccountDevice.device_kind).all()
+    hydrate_missing_ip_locations(users=rows, devices=all_devices)
     devices_by_user = {}
-    for device in AccountDevice.query.order_by(AccountDevice.device_kind).all():
+    for device in all_devices:
         devices_by_user.setdefault(device.user_id, []).append(device)
     current_binding_id = session.get("device_binding_id")
     return jsonify({"items": [{
@@ -4118,6 +4220,7 @@ def list_users():
         "account_level": normalized_account_level(row),
         "device_lock_required": device_lock_required(row),
         "last_login_ip": row.last_login_ip,
+        "last_login_location": row.last_login_location,
         "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
         "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
         "last_seen_at": row.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_seen_at else None,
@@ -4197,6 +4300,7 @@ def unbind_account_device(user_id, device_kind):
 @admin_required
 def list_login_security_alerts():
     rows = LoginSecurityAlert.query.order_by(LoginSecurityAlert.created_at.desc()).limit(100).all()
+    hydrate_missing_ip_locations(alerts=rows)
     user_ids = {row.target_user_id for row in rows}
     usernames = {
         row.id: row.username for row in UserAccount.query.filter(UserAccount.id.in_(user_ids)).all()
@@ -4211,6 +4315,7 @@ def list_login_security_alerts():
             "attempted_device_id": row.attempted_display_id,
             "client_label": row.client_label,
             "source_ip": row.source_ip,
+            "source_location": row.source_location,
             "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
             "read": bool(row.read_at),
         } for row in rows],
@@ -4622,10 +4727,11 @@ def deliver_login_security_web_push(alert_id):
     rows = ChatPushSubscription.query.filter(ChatPushSubscription.user_id.in_(admin_ids)).all() if admin_ids else []
     kind_label = "手机端" if alert.device_kind == "mobile" else "电脑端"
     source_ip = alert.source_ip or "未知 IP"
+    source_location = alert.source_location or "归属地未知"
     payload = json.dumps({
         "type": "login-security-alert",
         "title": "ArbiScope 安全提醒",
-        "body": f"账号 {target.username if target else '未知账号'} 的陌生{kind_label}登录已拒绝 · IP {source_ip}",
+        "body": f"账号 {target.username if target else '未知账号'} 的陌生{kind_label}登录已拒绝 · IP {source_ip} · {source_location}",
         "tag": f"login-security-alert-{int(alert.id)}",
         "url": "/#security-notifications",
         "alert_id": int(alert.id),
@@ -12382,13 +12488,22 @@ with app.app_context():
     if "last_login_ip" not in user_columns:
         db.session.execute(text("ALTER TABLE user_account ADD COLUMN last_login_ip VARCHAR(45)"))
         db.session.commit()
+    if "last_login_location" not in user_columns:
+        db.session.execute(text("ALTER TABLE user_account ADD COLUMN last_login_location VARCHAR(160)"))
+        db.session.commit()
     device_columns = {column["name"] for column in inspect(db.engine).get_columns("account_device")}
     if "last_ip" not in device_columns:
         db.session.execute(text("ALTER TABLE account_device ADD COLUMN last_ip VARCHAR(45)"))
         db.session.commit()
+    if "last_location" not in device_columns:
+        db.session.execute(text("ALTER TABLE account_device ADD COLUMN last_location VARCHAR(160)"))
+        db.session.commit()
     security_alert_columns = {column["name"] for column in inspect(db.engine).get_columns("login_security_alert")}
     if "source_ip" not in security_alert_columns:
         db.session.execute(text("ALTER TABLE login_security_alert ADD COLUMN source_ip VARCHAR(45)"))
+        db.session.commit()
+    if "source_location" not in security_alert_columns:
+        db.session.execute(text("ALTER TABLE login_security_alert ADD COLUMN source_location VARCHAR(160)"))
         db.session.commit()
     invite_columns = {column["name"] for column in inspect(db.engine).get_columns("invite_code")}
     if "code_value" not in invite_columns:

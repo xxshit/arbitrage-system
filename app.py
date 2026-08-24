@@ -7547,6 +7547,60 @@ def thought_watch_config(symbol):
         "fallback": {},
     }
 
+
+def coti_range_snapshot(closed30):
+    """Describe COTI's current consolidation without treating every pullback as a trend break."""
+    if len(closed30) < 50:
+        return {}
+
+    # The latest two completed bars are reserved for breakout confirmation. Build the
+    # reference box from the longest recent 24-48H window whose wick range is still
+    # reasonable for this volatile small-cap contract.
+    history = closed30[:-2]
+    selected = history[-48:]
+    for candle_count in (96, 72, 48):
+        if len(history) < candle_count:
+            continue
+        candidate = history[-candle_count:]
+        lows = sorted(float(row[3]) for row in candidate)
+        highs = sorted(float(row[2]) for row in candidate)
+        low = lows[int((len(lows) - 1) * 0.15)]
+        high = highs[int((len(highs) - 1) * 0.85)]
+        width = percent_delta(high, low)
+        if width is not None and width <= 18.0:
+            selected = candidate
+            break
+
+    lows = sorted(float(row[3]) for row in selected)
+    highs = sorted(float(row[2]) for row in selected)
+    support = lows[int((len(lows) - 1) * 0.15)]
+    resistance = highs[int((len(highs) - 1) * 0.85)]
+    recent = closed30[-2:]
+    recent_closes = [float(row[4]) for row in recent]
+    prior_volume_rows = history[-20:]
+    prior_two_bar_average = (
+        sum(float(row[7]) for row in prior_volume_rows) / len(prior_volume_rows) * 2
+        if prior_volume_rows else None
+    )
+    recent_volume = sum(float(row[7]) for row in recent)
+    volume_ratio = recent_volume / prior_two_bar_average if prior_two_bar_average else None
+    width_pct = percent_delta(resistance, support)
+    last_close = recent_closes[-1]
+    return {
+        "support": support,
+        "resistance": resistance,
+        "width_pct": width_pct,
+        "duration_hours": len(selected) * 0.5,
+        "position_pct": (
+            (last_close - support) / (resistance - support) * 100
+            if resistance > support else None
+        ),
+        "volume_ratio": volume_ratio,
+        "recent_closes": recent_closes,
+        "breakdown_confirmed": all(close <= support * 0.995 for close in recent_closes),
+        "breakout_confirmed": all(close >= resistance * 1.005 for close in recent_closes),
+    }
+
 # 30秒基差监控连续确认状态。完整盯盘只接受已连续两次为负的基差，防止单点插针。
 TURNOVER_BASIS_STATE = {}
 # 换手方向切换候选：滚动K线在未收盘时会快速抖动，方向改变必须跨两次独立完整扫描。
@@ -7575,11 +7629,13 @@ def thought_snapshot(symbol):
         "cvd": None,
         "change_30m": None,
         "change_4h": None,
+        "change_7d": None,
         "funding_rate": None,
         "basis": None,
         "validation": {},
         "micro_validation": {},
         "orderbook_wall": {},
+        "coti_range": {},
         "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "fallback",
     }
@@ -7587,8 +7643,8 @@ def thought_snapshot(symbol):
     try:
         urls = {
             "ticker": "https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({"symbol": raw_symbol}),
-            "k30": "https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "30m", "limit": 60}),
-            "k4h": "https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "4h", "limit": 30}),
+            "k30": "https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "30m", "limit": 200 if symbol == "COTI/USDT" else 60}),
+            "k4h": "https://fapi.binance.com/fapi/v1/klines?" + urlencode({"symbol": raw_symbol, "interval": "4h", "limit": 60 if symbol == "COTI/USDT" else 30}),
             "premium": "https://fapi.binance.com/fapi/v1/premiumIndex?" + urlencode({"symbol": raw_symbol}),
             "oi": "https://fapi.binance.com/futures/data/openInterestHist?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 50}),
             "ratios": "https://fapi.binance.com/futures/data/globalLongShortAccountRatio?" + urlencode({"symbol": raw_symbol, "period": "30m", "limit": 50}),
@@ -7666,11 +7722,13 @@ def thought_snapshot(symbol):
             "change_24h": float(ticker.get("priceChangePercent", 0) or 0),
             "change_1d": percent_delta(float(closed4h[-1][4]), float(closed4h[-7][1])) if len(closed4h) >= 7 else None,
             "change_3d": percent_delta(float(closed4h[-1][4]), float(closed4h[-19][1])) if len(closed4h) >= 19 else None,
+            "change_7d": percent_delta(float(closed4h[-1][4]), float(closed4h[-43][1])) if len(closed4h) >= 43 else None,
             "funding_rate": float(premium.get("lastFundingRate", 0) or 0) * 100,
             "basis": percent_delta(mark_price, index_price) if index_price else None,
             "validation": validation,
             "micro_validation": micro_validation,
             "orderbook_wall": orderbook_wall,
+            "coti_range": coti_range_snapshot(closed30) if symbol == "COTI/USDT" else {},
             "source": "live",
         }
     except Exception:
@@ -7695,9 +7753,11 @@ def thought_snapshot_from_db(symbol, fallback):
         "cvd": None,
         "change_30m": None,
         "change_4h": None,
+        "change_7d": None,
         "validation": {},
         "micro_validation": {},
         "orderbook_wall": {},
+        "coti_range": {},
         "source": "db_fallback",
     }
 
@@ -7720,11 +7780,13 @@ def thought_fast_snapshot(symbol):
         "cvd": None,
         "change_30m": None,
         "change_4h": None,
+        "change_7d": None,
         "funding_rate": None,
         "basis": None,
         "validation": {},
         "micro_validation": {},
         "orderbook_wall": {},
+        "coti_range": {},
         "updated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
         "source": "db_fallback",
     }
@@ -7900,6 +7962,54 @@ def tlm_trap_short_direction(analysis):
     if recent_bounce and cvd_selling and ratio_chasing_long and (funding_deep_negative or basis_negative):
         return "tlm_trap_short"
     return None
+
+
+def coti_structure_direction(analysis):
+    """COTI needs a real range break; ordinary weakness inside the box is neutral."""
+    if analysis.get("symbol") != "COTI/USDT" or analysis.get("source") not in {"live", "thought_live_db"}:
+        return None
+    box = analysis.get("coti_range") or {}
+    if not box.get("support") or not box.get("resistance"):
+        return None
+    validation = analysis.get("validation") or {}
+    windows = [validation.get(key) or {} for key in ("30m", "1h", "2h")]
+
+    def value(row, key, default=0):
+        item = row.get(key)
+        return default if item is None else float(item)
+
+    cvd_down = sum(value(row, "cvd") < 0 for row in windows)
+    cvd_up = sum(value(row, "cvd") > 0 for row in windows)
+    price_down = sum(value(row, "price_change") <= -0.35 for row in windows)
+    price_up = sum(value(row, "price_change") >= 0.35 for row in windows)
+    volume_active = max(
+        [value(row, "volume_ratio") for row in windows]
+        + [float(box.get("volume_ratio") or 0)]
+    ) >= 1.15
+    quantity_changes = [position_quantity_change(row) for row in windows]
+    long_exit = any(change is not None and change <= -0.5 for change in quantity_changes)
+    new_shorts = any(
+        change is not None and change >= 0.5
+        and value(row, "ratio_change") >= 0.3
+        and value(row, "price_change") < 0
+        for row, change in zip(windows, quantity_changes)
+    )
+    bullish_position = any(
+        change is not None and change >= 0.5
+        and value(row, "ratio_change") <= -0.3
+        for row, change in zip(windows, quantity_changes)
+    )
+    if (
+        box.get("breakdown_confirmed") and price_down >= 2 and cvd_down >= 2
+        and volume_active and (long_exit or new_shorts)
+    ):
+        return "coti_range_breakdown"
+    if (
+        box.get("breakout_confirmed") and price_up >= 2 and cvd_up >= 2
+        and volume_active and bullish_position
+    ):
+        return "coti_range_breakout"
+    return "coti_range_watch"
 
 
 HEI_BAR_DIRECTIONS = {
@@ -8235,6 +8345,8 @@ def thought_push_direction(analysis):
         return None
     if symbol == "HEI/USDT":
         return hei_risk_direction(analysis)
+    if symbol == "COTI/USDT":
+        return coti_structure_direction(analysis)
     t_direction = t_micro_direction(analysis)
     if t_direction:
         return t_direction
@@ -8320,6 +8432,8 @@ def thought_signal_key(analysis, direction):
     last = analysis.get("last") or 0
     resistance = analysis.get("resistance") or 0
     support = analysis.get("support") or 0
+    if direction in {"coti_range_watch", "coti_range_breakdown", "coti_range_breakout"}:
+        return direction
     if direction in HEI_BAR_DIRECTIONS:
         bucket_at = ((analysis.get("micro_validation") or {}).get("5m") or {}).get("bucket_at")
         if bucket_at is None:
@@ -8673,6 +8787,18 @@ def thought_ake_has_new_information(previous, metrics):
 def thought_push_has_new_information(previous, metrics):
     if previous is None:
         return True
+    if metrics.get("symbol") == "COTI/USDT":
+        if previous.direction != metrics["direction"]:
+            return True
+        # A range is a state, not a recurring bearish idea. After the one-time
+        # correction, stay silent until a confirmed break or a genuinely large
+        # continuation changes the tradeable structure.
+        if metrics.get("direction") == "coti_range_watch":
+            return False
+        return metric_changed(
+            metrics.get("last_price"), getattr(previous, "last_price", None),
+            pct_threshold=0.08,
+        )
     if metrics.get("symbol") == "HEI/USDT" and metrics.get("direction") in HEI_RISK_DIRECTIONS:
         return previous.direction != metrics["direction"] or previous.signal_key != metrics["signal_key"]
     if metrics.get("direction") in TURNOVER_THOUGHT_DIRECTIONS:
@@ -9208,6 +9334,59 @@ def thought_lark_ake_wall_message(analysis, direction):
     ])
 
 
+def thought_lark_coti_message(analysis, direction):
+    box = analysis.get("coti_range") or {}
+    validation = analysis.get("validation") or {}
+    support = box.get("support")
+    resistance = box.get("resistance")
+    duration_days = float(box.get("duration_hours") or 0) / 24
+    range_line = (
+        f"动态箱体：{lark_price_value(support)}-{lark_price_value(resistance)}，"
+        f"宽度 {lark_plain_value(box.get('width_pct'), 2, '%')}，"
+        f"已按最近 {duration_days:.1f} 天已收盘30MIN结构计算"
+    )
+    if direction == "coti_range_breakdown":
+        header = "短线方向：<font color='cus-bear'>●● 🔴⬇️ 箱体下破 / 看跌确认</font>"
+        title = "COTI思路盯盘：连续收盘跌破后，空头证据终于共振"
+        judgement = (
+            "连续两根已收盘30MIN位于箱体下沿下方，至少两个观察周期价格与CVD同步转弱，"
+            "并有放量及多头退出或新空建立证据。这才是可执行的短线看跌，不再把箱体内回落冒充破位。"
+        )
+        key_note = "若快速收回箱体下沿且量仓空头证据消失，本次下破按假跌破降级。"
+    elif direction == "coti_range_breakout":
+        header = "短线方向：<font color='cus-bull'>●● 🔵⬆️ 箱体上破 / 转强确认</font>"
+        title = "COTI思路盯盘：连续收盘突破，原看跌剧本继续失效"
+        judgement = (
+            "连续两根已收盘30MIN位于箱体上沿上方，至少两个观察周期价格与CVD同步转强，"
+            "并有放量和新增仓位配合。此前持续看跌没有兑现，本轮按向上突破观察，不再维护旧空头故事。"
+        )
+        key_note = "若重新跌回箱体且量能衰减，本次突破按假突破处理，不追涨。"
+    else:
+        header = "短线方向：<font color='orange'>● 🟠↔️ 区间消化 / 原看跌未兑现</font>"
+        title = "COTI思路盯盘：从机械看跌降级为箱体等待"
+        judgement = (
+            "价格仍在动态箱体内，连续看跌并没有被真实下破验证。箱体内短周期转弱只代表回落，"
+            "负资费、负基差或负CVD也只能描述局部压力；在价格没有离开箱体前，方向统一记为中性等待。"
+        )
+        key_note = (
+            "看跌升级必须同时满足：连续两根已收盘30MIN跌破下沿、至少两个周期CVD转负、放量，"
+            "并看到多头退出或新空建立；少一项都不推看跌。向上突破使用对称标准。"
+        )
+    return "\n".join([
+        header,
+        title,
+        f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}",
+        f"价格：{lark_price_value(analysis.get('last'))}，近7D：{lark_plain_value(analysis.get('change_7d'), 2, '%')}，BN基差：{lark_plain_value(analysis.get('basis'), 4, '%')}，BN资费：{lark_plain_value(analysis.get('funding_rate'), 4, '%')}",
+        range_line,
+        thought_window_line(validation, "30MIN", "30m"),
+        thought_window_line(validation, "1H", "1h"),
+        thought_window_line(validation, "2H", "2h"),
+        f"判断：{judgement}",
+        f"验证边界：{key_note}",
+        "COINGLASS：https://www.coinglass.com/tv/zh/Binance_COTIUSDT",
+    ])
+
+
 def thought_lark_message(analysis, direction):
     if direction in {"t_bounce_long", "t_bounce_stall_short"}:
         return thought_lark_t_message(analysis, direction)
@@ -9698,6 +9877,8 @@ def thought_lark_message(analysis, direction):
         return thought_lark_era_message(analysis, direction)
     if direction in HEI_RISK_DIRECTIONS:
         return thought_lark_hei_message(analysis, direction)
+    if direction in {"coti_range_watch", "coti_range_breakdown", "coti_range_breakout"}:
+        return thought_lark_coti_message(analysis, direction)
     if direction in AKE_STRUCTURE_DIRECTIONS:
         return thought_lark_ake_structure_message(analysis, direction)
     if direction in {"ake_wall_test", "ake_wall_spike_retest", "ake_wall_zone_strength", "ake_wall_breakout", "ake_wall_rejection"}:
@@ -10212,10 +10393,19 @@ def thought_coti_item(coti):
     """COTI 分周期研判：保留用户假设，同时显式展示反证条件。"""
     current_basis = coti.get("basis")
     current_funding = coti.get("funding_rate")
+    box = coti.get("coti_range") or {}
+    box_support = box.get("support") or coti.get("support")
+    box_resistance = box.get("resistance") or coti.get("resistance")
+    current_direction = coti_structure_direction(coti)
+    status_labels = {
+        "coti_range_breakdown": "箱体下破 / 看跌已确认",
+        "coti_range_breakout": "箱体上破 / 原看跌继续失效",
+        "coti_range_watch": "区间消化 / 原看跌未兑现",
+    }
     return {
         "symbol": coti["symbol"],
-        "trade_side": "短线看多 / 中长线看空待证",
-        "trade_status": "原短线看跌判负 / 当前犄角延续",
+        "trade_side": "区间等待 / 突破后再定方向",
+        "trade_status": status_labels.get(current_direction, "区间数据待补齐"),
         "entry": None,
         "entry_time": "2026-07-29 00:44",
         "exit": None,
@@ -10223,8 +10413,8 @@ def thought_coti_item(coti):
         "last": coti.get("last"),
         "profit_pct": None,
         "realized_profit_pct": None,
-        "support": coti.get("support"),
-        "resistance": coti.get("resistance"),
+        "support": box_support,
+        "resistance": box_resistance,
         "oi_value": coti.get("oi_value"),
         "oi_change_pct": coti.get("oi_change_pct"),
         "ratio_value": coti.get("ratio_value"),
@@ -10237,7 +10427,7 @@ def thought_coti_item(coti):
         "validation": coti.get("validation") or {},
         "source": coti.get("source"),
         "screenshot_url": None,
-        "thought_summary": "COTI 从盯盘价0.012705继续上涨，原先把极负基差、极负资费和1H结算理解为短期转跌前兆，与实际走势相反，这一段短线看跌明确判负。负基差和负资费只说明现货强于合约及资金费方向，不能直接等同空头拥挤：还可能是现货主导拉盘、合约价格受控以吸引多头、换手派发或逼空燃料。当前必须并行验证这些路径，中长线看空仍只作为待验证假设。",
+        "thought_summary": f"COTI 原短线看跌已经判负；近期继续反复推送看跌但价格没有有效下破，说明模型把箱体内回落误写成趋势。当前改为动态区间：约 {box_support or 0:.6f}-{box_resistance or 0:.6f}，在连续收盘离开箱体并获得量仓确认前统一记为中性等待。近7D价格变化约 {coti.get('change_7d') or 0:+.2f}%；负基差、负资费和负CVD只作局部压力证据，不再单独触发看跌。",
         "user_mistakes": [
             "需要防止把‘资费周期从4H缩短为1H’直接等同于主力已经完成换手。它能确认合约端失衡和风险升高，但不能单独确认随后必跌。",
             "CVD持续下跌而价格抗跌时，不只代表卖压，也可能代表主动卖单被被动买盘吸收；若持仓继续增加、人数比继续下降，短线仍可能逼空。",
@@ -10248,17 +10438,17 @@ def thought_coti_item(coti):
             "我还混用了不同时间窗：长窗口CVD仍为负，但最近30MIN至4H的CVD已经转正。判断短线方向时，近期增量必须优先于更长历史累计值。",
             "后续必须分别统计短线、波段和中长线判断，不能用一个方向覆盖所有周期，也不能在短线犄角仍完整时提前宣布中长线剧本已经开始。",
         ],
-        "thesis_win_rate": {"wins": 0, "losses": 1, "pending": 1, "rate": 0.0, "note": "短线看跌与实际上涨相反，已记1次失败；中长线出货后看空仍待验证，不用未完成剧本掩盖短线错误。"},
+        "thesis_win_rate": {"wins": 0, "losses": 2, "pending": 1, "rate": 0.0, "note": "首次短线看跌与实际上涨相反；近期连续看跌又被多日区间消化否定时点，新增1次重复缺陷。中长线看空仍待验证，不能用未完成剧本掩盖两次短线错误。"},
         "my_thesis": "你的判断：COTI 中长线偏空、短线暂不确定。7月28日约05:00-08:00出现极负基差，结算前资费顶到负向上限，结算周期随后由4H缩短为1H，你把它理解为主力换手信号；同时CVD持续走低，说明主动卖出强于主动买入。你预计主力换手接近完成后，价格转跌，持仓和多空人数比会逐步出现与偏多犄角相反的结构。当前持仓上升、人数比下降的犄角仍在，因此不把短线直接判空。",
-        "assistant_thesis": f"我的修正：当前短线看多但不追高。现价约{coti.get('last') or 0:.6f}，相对盯盘价0.012705约上涨{((coti.get('last') or 0) / 0.012705 - 1) * 100:+.2f}%；最近30MIN价格约{coti.get('change_30m') or 0:+.2f}%，持仓窗口约{coti.get('oi_change_pct') or 0:+.2f}%，人数比约{coti.get('ratio_change_pct') or 0:+.2f}%。1H至4H若继续维持价格涨、持仓涨、人数比跌、近期CVD为正，属于逼空犄角延续。中线转空必须等价格失守放量承接区、反抽失败，并伴随近期CVD转负和犄角破坏；长线看空还需持续派发及官方供给/解锁证据补全。",
+        "assistant_thesis": f"我的修正：现价约{coti.get('last') or 0:.6f}，当前不再预设看多或看空。动态箱体约{box_support or 0:.6f}-{box_resistance or 0:.6f}；箱体内的价格下行、CVD转负或负资金面只能说明局部卖压，不能叫趋势下破。看跌必须由连续两根已收盘30MIN跌破下沿、至少两个周期CVD转负、放量，以及多头退出或新空建立共同确认。",
         "challenge_points": [
-            "短线（30MIN-4H）：当前偏多但不追涨。价格涨、持仓涨、人数比跌、近期CVD涨仍在共振；只有回踩放量失守结构支撑并反抽失败，才从延续降级为反转观察。",
+            "短线（30MIN-4H）：当前按区间消化，不预设方向。连续两根已收盘30MIN没有离开动态箱体前，任何短周期转弱只叫箱体内回落。",
             "负资金面四路径并行：①拥挤空头/逼空燃料；②现货先拉、合约受控；③利用负资费吸引多头继续抬高现货；④高位换手或派发。必须比较现货与合约谁先动、两端成交量、OI、人数比、CVD及基差如何收敛，不能先选故事。",
-            "波段（1D-3D）：偏空观察。若价格跌破换手区低点后反抽失败，CVD继续下降，且偏多犄角同步破坏，才升级为可执行的空头窗口。",
-            "中长线（1W+）：看空假设。需要看到派发/平多或新空建立的连续结构，不能只用一次极端结算事件定论。",
+            "波段（1D-3D）：中性等待。只有价格离开箱体、回抽失败/回踩不破，并由量仓结构确认，才建立新方向。",
+            "中长线（1W+）：原看空仅保留为用户假设。需要持续派发、平多或新空建立的连续结构，不能用一次极端结算事件，也不能用多日横盘代替下跌。",
             "两条看空路径要区分：价格跌、持仓跌、人数比回升更像多头撤退；价格跌、持仓增、人数比回升且CVD跌更像新空建立。两者都偏空，但速度与反抽风险不同。",
         ],
-        "validation_view": f"当前短线偏多确认。动态支撑约{coti.get('support') or 0:.6f}，动态压力约{coti.get('resistance') or 0:.6f}；不在压力附近追涨。价格放量失守支撑并反抽失败、近期CVD转负、持仓与人数比犄角破坏三项共振后，才把中长线看空转成实际做空信号。",
+        "validation_view": f"当前状态：{status_labels.get(current_direction, '区间数据待补齐')}。动态下沿约{box_support or 0:.6f}，上沿约{box_resistance or 0:.6f}。看跌需连续两根30MIN收盘位于下沿下方，并同时满足至少两个周期CVD转负、放量及多头退出/新空建立；向上突破使用对称标准。",
         "take_profit": [
             "当前没有空单，不设置机械止盈。出现做空确认后，第一目标应放在换手区低点或放量支撑，而不是凭固定百分比猜目标。",
             "若未来价格下跌但持仓快速坍塌、负基差迅速收敛，可能只是集中平仓或爆仓，应先锁定利润，防止剧烈反抽。",
@@ -10268,6 +10458,7 @@ def thought_coti_item(coti):
             "若放量突破换手区高点且回踩不破，同时CVD由负转正，说明主动买入接管，短中线看空均暂时失效。",
         ],
         "review_notes": [
+            "2026-08-24重复缺陷：COTI连续多次被推送看跌，但价格长时间没有有效下破。原因是通用函数把箱体内短周期转弱叠加负资金面直接翻译成看跌，却没有把‘多日不跌’作为时点失效反证。已改为COTI独立动态箱体状态；区间内静默，只在真实突破时推送方向。",
             "2026-07-30用户纠正：负基差、负资费不必然代表空头拥挤。主力可能拉高现货并控制合约形成贴水，以吸引多头抬价或完成换手。模型改为竞争假设并行，后续由现货/合约领先关系和量仓结构淘汰假设。",
             f"2026-07-29最新纠错：COTI现价约{coti.get('last') or 0:.6f}，相对0.012705盯盘起点约{((coti.get('last') or 0) / 0.012705 - 1) * 100:+.2f}%。原短线看跌与实际上涨相反，已明确记为失败；错因是把极端负资金面当成转跌确认，忽略了价格抗跌、持仓扩张、人数比下降和近期CVD转正共同构成的逼空结构。",
             "2026-07-29 17:45实时复核：现价约0.014443，BN基差约-0.9211%，BN资费约-0.0176%；30MIN价格+14.30%、持仓+11.81%、人数比-19.82%、CVD+2.42M，短线偏多犄角已确认。5MIN价格回落约3.53%、CVD转负，但量能仅约0.18倍，暂按冲高后的缩量回踩，不按趋势反转。",

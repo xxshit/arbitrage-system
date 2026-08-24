@@ -9,11 +9,14 @@ from app import (
     ake_structure_direction,
     app,
     classify_early_trend_stage,
+    coti_range_snapshot,
+    coti_structure_direction,
     estimated_position_quantity_change,
     hei_risk_direction,
     position_quantity_change,
     send_early_trend_stage_push,
     thought_lark_ake_structure_message,
+    thought_lark_coti_message,
     thought_lark_hei_message,
     thought_primary_position_evidence,
     thought_push_direction,
@@ -165,6 +168,98 @@ class ThoughtRepricingTests(unittest.TestCase):
         }
         self.assertEqual(ake_structure_direction(self.analysis), "ake_above_wall_new_range")
         self.assertIsNone(thought_push_direction(self.analysis))
+
+    @staticmethod
+    def coti_analysis(breakdown=False, breakout=False, volume_ratio=1.5):
+        price_change = 1.0 if breakout else -1.0
+        cvd = 100 if breakout else -100
+        quantity_change = 1.0 if breakout else -1.0
+        ratio_change = -1.0 if breakout else 1.0
+        return {
+            "symbol": "COTI/USDT",
+            "source": "live",
+            "last": 0.0122,
+            "basis": -0.2,
+            "funding_rate": -0.01,
+            "change_7d": 18.9,
+            "coti_range": {
+                "support": 0.0110,
+                "resistance": 0.0127,
+                "width_pct": 15.45,
+                "duration_hours": 48,
+                "volume_ratio": volume_ratio,
+                "breakdown_confirmed": breakdown,
+                "breakout_confirmed": breakout,
+            },
+            "validation": {
+                key: {
+                    "price_change": price_change,
+                    "oi_change": quantity_change,
+                    "position_quantity_change": quantity_change,
+                    "ratio_change": ratio_change,
+                    "cvd": cvd,
+                    "volume_ratio": volume_ratio,
+                }
+                for key in ("30m", "1h", "2h")
+            },
+        }
+
+    def test_coti_range_overrides_generic_bearish_template(self):
+        analysis = self.coti_analysis()
+        self.assertEqual(coti_structure_direction(analysis), "coti_range_watch")
+        self.assertEqual(thought_push_direction(analysis), "coti_range_watch")
+
+    def test_coti_breakdown_requires_close_flow_volume_and_position_confirmation(self):
+        self.assertEqual(
+            coti_structure_direction(self.coti_analysis(breakdown=True)),
+            "coti_range_breakdown",
+        )
+        self.assertEqual(
+            coti_structure_direction(self.coti_analysis(breakdown=True, volume_ratio=0.8)),
+            "coti_range_watch",
+        )
+
+    def test_coti_breakout_uses_symmetric_confirmation(self):
+        self.assertEqual(
+            coti_structure_direction(self.coti_analysis(breakout=True)),
+            "coti_range_breakout",
+        )
+
+    def test_coti_same_range_never_repeats_direction_push(self):
+        previous = SimpleNamespace(
+            direction="coti_range_watch", signal_key="coti_range_watch",
+            last_price=0.0121,
+        )
+        metrics = {
+            "symbol": "COTI/USDT", "direction": "coti_range_watch",
+            "signal_key": "coti_range_watch", "last_price": 0.0122,
+        }
+        self.assertFalse(thought_push_has_new_information(previous, metrics))
+        metrics["direction"] = "coti_range_breakdown"
+        self.assertTrue(thought_push_has_new_information(previous, metrics))
+
+    def test_coti_range_message_explicitly_retracts_unverified_bearish_call(self):
+        with app.app_context():
+            message = thought_lark_coti_message(
+                self.coti_analysis(), "coti_range_watch",
+            )
+        self.assertIn("原看跌未兑现", message)
+        self.assertIn("连续两根已收盘30MIN", message)
+        self.assertIn("0.01100000-0.01270000", message)
+
+    def test_coti_range_snapshot_uses_two_closed_bars_for_break_confirmation(self):
+        rows = []
+        for index in range(100):
+            close = 100.0 + (index % 5 - 2) * 0.2
+            rows.append([
+                index * 1_800_000, close, close + 0.5, close - 0.5, close,
+                0, index * 1_800_000 + 1_799_999, 100, 0, 0, 50,
+            ])
+        inside = coti_range_snapshot(rows)
+        self.assertFalse(inside["breakdown_confirmed"])
+        rows[-2][4] = rows[-1][4] = 97.0
+        broken = coti_range_snapshot(rows)
+        self.assertTrue(broken["breakdown_confirmed"])
 
     def test_ake_opposite_direction_needs_three_observations_and_ten_minutes(self):
         AKE_DIRECTION_CANDIDATES.clear()

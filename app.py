@@ -539,6 +539,41 @@ class LarkPushState(db.Model):
     __table_args__ = (db.UniqueConstraint("channel", "symbol", "signal_key", name="uq_lark_push_state"),)
 
 
+class PushSignalValidation(db.Model):
+    """Immutable push-time snapshot plus a fixed-window, market-data validation result."""
+    id = db.Column(db.Integer, primary_key=True)
+    category = db.Column(db.String(40), nullable=False, index=True)
+    category_label = db.Column(db.String(80), nullable=False)
+    subtype = db.Column(db.String(40), nullable=False, index=True)
+    subtype_label = db.Column(db.String(80), nullable=False)
+    symbol = db.Column(db.String(30), nullable=False, index=True)
+    source_event_key = db.Column(db.String(120), nullable=False)
+    direction = db.Column(db.String(12), nullable=False, default="up")
+    trigger_price = db.Column(db.Float, nullable=False)
+    trigger_epoch = db.Column(db.BigInteger, nullable=False, index=True)
+    triggered_at = db.Column(db.DateTime, nullable=False, index=True)
+    validation_minutes = db.Column(db.Integer, nullable=False, default=60)
+    target_move_pct = db.Column(db.Float, nullable=False, default=5.0)
+    failure_move_pct = db.Column(db.Float, nullable=False, default=5.0)
+    status = db.Column(db.String(24), nullable=False, default="pending", index=True)
+    first_hit = db.Column(db.String(24))
+    first_hit_at = db.Column(db.DateTime)
+    max_favorable_pct = db.Column(db.Float, nullable=False, default=0.0)
+    max_adverse_pct = db.Column(db.Float, nullable=False, default=0.0)
+    peak_price = db.Column(db.Float)
+    trough_price = db.Column(db.Float)
+    observed_candle_count = db.Column(db.Integer, nullable=False, default=0)
+    resolved_at = db.Column(db.DateTime)
+    result_note = db.Column(db.String(500))
+    snapshot_json = db.Column(db.Text)
+    updated_at = db.Column(db.DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+    __table_args__ = (
+        db.UniqueConstraint(
+            "category", "symbol", "source_event_key", name="uq_push_signal_validation_source"
+        ),
+    )
+
+
 class ThoughtPushSnapshot(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     symbol = db.Column(db.String(30), nullable=False, unique=True, index=True)
@@ -900,6 +935,16 @@ TRADE_VALIDATION_CANDLE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 TRADE_VALIDATION_CHART_SECONDS = 3 * 24 * 60 * 60
 TRADE_VALIDATION_INTERVAL = "5m"
 TRADE_VALIDATION_AUTO_SYMBOLS = {"COTI/USDT"}
+PUSH_SIGNAL_VALIDATION_CANDLE_SECONDS = 5 * 60
+PUSH_SIGNAL_VALIDATION_GRACE_SECONDS = 10 * 60
+PUSH_SIGNAL_VALIDATION_RULES = {
+    "sudden_pump": {
+        "label": "5MIN急涨提醒",
+        "validation_minutes": 60,
+        "target_move_pct": 5.0,
+        "failure_move_pct": 5.0,
+    },
+}
 TREND_WINDOWS = {
     "change_5m": 5 * 60,
     "change_15m": 15 * 60,
@@ -1565,6 +1610,7 @@ AUTOMATION_LABELS = {
     "index_component_sync": "指数成分同步",
     "chat_retention_cleanup": "协作记录过期清理",
     "trend_horizon_validation": "AKE多周期趋势验证",
+    "push_signal_validation": "推送分类结果验证",
 }
 
 
@@ -6984,6 +7030,155 @@ def sudden_pump_rough_candidates(snapshot, threshold=15.0, now_bucket=None):
     return candidates
 
 
+def push_signal_validation_bounds(trigger_epoch, validation_minutes):
+    """Only use complete candles that begin at or after the push, avoiding pre-push extremes."""
+    start_bucket = (
+        int(trigger_epoch) // PUSH_SIGNAL_VALIDATION_CANDLE_SECONDS + 1
+    ) * PUSH_SIGNAL_VALIDATION_CANDLE_SECONDS
+    end_bucket = start_bucket + int(validation_minutes) * 60
+    return start_bucket, end_bucket
+
+
+def create_push_signal_validation(item, source_event_key, trigger_epoch=None):
+    """Register an actually delivered sudden-pump push without treating user feedback as a result."""
+    category = "sudden_pump"
+    existing = PushSignalValidation.query.filter_by(
+        category=category,
+        symbol=item["symbol"],
+        source_event_key=source_event_key,
+    ).first()
+    if existing:
+        return existing
+    rule = PUSH_SIGNAL_VALIDATION_RULES[category]
+    trigger_epoch = int(trigger_epoch or time.time())
+    row = PushSignalValidation(
+        category=category,
+        category_label=rule["label"],
+        subtype=item["stage_key"],
+        subtype_label=item["stage_label"],
+        symbol=item["symbol"],
+        source_event_key=source_event_key,
+        direction="up",
+        trigger_price=float(item["last_price"]),
+        trigger_epoch=trigger_epoch,
+        triggered_at=datetime.fromtimestamp(trigger_epoch, timezone.utc).replace(tzinfo=None),
+        validation_minutes=rule["validation_minutes"],
+        target_move_pct=rule["target_move_pct"],
+        failure_move_pct=rule["failure_move_pct"],
+        status="pending",
+        snapshot_json=json.dumps({
+            key: item.get(key)
+            for key in (
+                "symbol", "stage_key", "stage_label", "stage_rank", "stage_reason", "last_price",
+                "change_5m", "change_15m", "hot_bar_count", "cvd", "oi_change", "ratio_change",
+                "volume_ratio", "closed_trigger", "trigger_bucket",
+            )
+        }, ensure_ascii=False),
+    )
+    db.session.add(row)
+    return row
+
+
+def evaluate_push_signal_validation(row, klines, now_epoch=None):
+    """Apply a fixed first-hit rule and retain neutral/ambiguous outcomes outside win rate."""
+    now_epoch = int(now_epoch or time.time())
+    start_bucket, end_bucket = push_signal_validation_bounds(row.trigger_epoch, row.validation_minutes)
+    expected_buckets = list(range(start_bucket, end_bucket, PUSH_SIGNAL_VALIDATION_CANDLE_SECONDS))
+    parsed = {}
+    for raw in klines or []:
+        if len(raw) < 7:
+            continue
+        bucket = int(raw[0] // 1000)
+        close_epoch = int(raw[6] // 1000)
+        if bucket not in expected_buckets or close_epoch >= now_epoch:
+            continue
+        parsed[bucket] = {
+            "high": float(raw[2]),
+            "low": float(raw[3]),
+        }
+    ordered = [(bucket, parsed[bucket]) for bucket in sorted(parsed)]
+    row.observed_candle_count = len(ordered)
+    if ordered:
+        row.peak_price = max(item["high"] for _, item in ordered)
+        row.trough_price = min(item["low"] for _, item in ordered)
+        if row.direction == "down":
+            row.max_favorable_pct = max(0.0, -(percent_delta(row.trough_price, row.trigger_price) or 0.0))
+            row.max_adverse_pct = min(0.0, -(percent_delta(row.peak_price, row.trigger_price) or 0.0))
+        else:
+            row.max_favorable_pct = max(0.0, percent_delta(row.peak_price, row.trigger_price) or 0.0)
+            row.max_adverse_pct = min(0.0, percent_delta(row.trough_price, row.trigger_price) or 0.0)
+
+    first_hit = None
+    first_hit_bucket = None
+    target_ratio = row.target_move_pct / 100.0
+    failure_ratio = row.failure_move_pct / 100.0
+    for bucket, candle in ordered:
+        if row.direction == "down":
+            target_hit = candle["low"] <= row.trigger_price * (1 - target_ratio)
+            failure_hit = candle["high"] >= row.trigger_price * (1 + failure_ratio)
+        else:
+            target_hit = candle["high"] >= row.trigger_price * (1 + target_ratio)
+            failure_hit = candle["low"] <= row.trigger_price * (1 - failure_ratio)
+        if target_hit or failure_hit:
+            first_hit = "ambiguous" if target_hit and failure_hit else ("target" if target_hit else "failure")
+            first_hit_bucket = bucket
+            break
+    row.first_hit = first_hit
+    row.first_hit_at = (
+        datetime.fromtimestamp(first_hit_bucket, timezone.utc).replace(tzinfo=None)
+        if first_hit_bucket is not None else None
+    )
+
+    complete = sorted(parsed) == expected_buckets
+    if now_epoch < end_bucket or (not complete and now_epoch < end_bucket + PUSH_SIGNAL_VALIDATION_GRACE_SECONDS):
+        row.status = "pending"
+        return row.status
+    resolved_at = datetime.fromtimestamp(now_epoch, timezone.utc).replace(tzinfo=None)
+    row.resolved_at = resolved_at
+    if not complete:
+        row.status = "insufficient_data"
+        row.result_note = f"验证窗口应有{len(expected_buckets)}根已收盘5MIN，实际取得{len(parsed)}根；不计胜率。"
+    elif first_hit == "target":
+        row.status = "win"
+        row.result_note = f"推送后{row.validation_minutes}分钟内先达到+{row.target_move_pct:.2f}%延续目标。"
+    elif first_hit == "failure":
+        row.status = "loss"
+        row.result_note = f"推送后{row.validation_minutes}分钟内先达到-{row.failure_move_pct:.2f}%失效线。"
+    elif first_hit == "ambiguous":
+        row.status = "insufficient_data"
+        row.result_note = "同一根5MIN同时覆盖延续目标和失效线，无法确认先后；不计胜率。"
+    else:
+        row.status = "neutral"
+        row.result_note = f"推送后{row.validation_minutes}分钟内上下波动均未达到固定阈值；记中性，不计胜率。"
+    return row.status
+
+
+def refresh_push_signal_validations(now_epoch=None):
+    """Refresh pending validations independently so push scanning stays lightweight."""
+    now_epoch = int(now_epoch or time.time())
+    rows = PushSignalValidation.query.filter_by(status="pending").order_by(
+        PushSignalValidation.trigger_epoch.asc()
+    ).limit(100).all()
+    for row in rows:
+        start_bucket, end_bucket = push_signal_validation_bounds(row.trigger_epoch, row.validation_minutes)
+        try:
+            klines = get_json("https://fapi.binance.com/fapi/v1/klines?" + urlencode({
+                "symbol": row.symbol.replace("/", ""),
+                "interval": "5m",
+                "startTime": start_bucket * 1000,
+                "endTime": end_bucket * 1000 - 1,
+                "limit": max(1, int(row.validation_minutes * 60 / PUSH_SIGNAL_VALIDATION_CANDLE_SECONDS)),
+            }), timeout=6)
+            evaluate_push_signal_validation(row, klines, now_epoch)
+        except Exception as exc:
+            if now_epoch >= end_bucket + PUSH_SIGNAL_VALIDATION_GRACE_SECONDS:
+                row.status = "insufficient_data"
+                row.resolved_at = datetime.fromtimestamp(now_epoch, timezone.utc).replace(tzinfo=None)
+                row.result_note = f"验证窗口结束后行情数据仍不完整（{type(exc).__name__}）；不计胜率。"
+    db.session.commit()
+    return len(rows)
+
+
 def send_sudden_pump_push(items):
     """Push one message per meaningful phase in a 30-minute episode."""
     webhook = os.getenv("LARK_THOUGHT_ANALYSIS_WEBHOOK", "").strip()
@@ -6991,7 +7186,8 @@ def send_sudden_pump_push(items):
         return False
     sections = []
     reserved = []
-    now = datetime.now()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    trigger_epoch = int(time.time())
     stage_ranks = {"ignition": 1, "acceleration": 2, "extreme_15m": 3}
     for item in items:
         episode = int(item["trigger_bucket"]) // 1800 * 1800
@@ -7021,12 +7217,12 @@ def send_sudden_pump_push(items):
             "风险提示：这是突然点火提醒，不等于无条件追多；若后续放量滞涨、持仓退出或CVD转弱，要防高位换手。",
             f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{item['symbol'].replace('/', '')}",
         ]))
-        reserved.append((item["symbol"], signal_key))
+        reserved.append((item, signal_key))
     if not sections:
         return False
-    for symbol, signal_key in reserved:
+    for item, signal_key in reserved:
         db.session.add(LarkPushState(
-            channel="sudden_pump_5m", symbol=symbol, signal_key=signal_key, pushed_at=now
+            channel="sudden_pump_5m", symbol=item["symbol"], signal_key=signal_key, pushed_at=now
         ))
     db.session.commit()
     try:
@@ -7037,7 +7233,17 @@ def send_sudden_pump_push(items):
         )
         with urlopen(request_obj, timeout=10) as response:
             result = json.loads(response.read().decode("utf-8"))
-        return result.get("code", 0) == 0 or result.get("StatusCode", 0) == 0
+        if "code" in result:
+            delivered = result.get("code") == 0
+        elif "StatusCode" in result:
+            delivered = result.get("StatusCode") == 0
+        else:
+            delivered = False
+        if delivered:
+            for item, signal_key in reserved:
+                create_push_signal_validation(item, signal_key, trigger_epoch)
+            db.session.commit()
+        return delivered
     except Exception:
         return False
 
@@ -12476,6 +12682,73 @@ def seed_trade_validation():
     ))
 
 
+def push_signal_validation_summary(rows):
+    groups = {}
+    for row in rows:
+        key = (row.category, row.subtype)
+        group = groups.setdefault(key, {
+            "category": row.category,
+            "category_label": row.category_label,
+            "subtype": row.subtype,
+            "subtype_label": row.subtype_label,
+            "total": 0,
+            "wins": 0,
+            "losses": 0,
+            "neutral": 0,
+            "pending": 0,
+            "insufficient_data": 0,
+        })
+        group["total"] += 1
+        status_key = {"win": "wins", "loss": "losses"}.get(row.status, row.status)
+        if status_key in group:
+            group[status_key] += 1
+    result = []
+    for group in groups.values():
+        decided = group["wins"] + group["losses"]
+        group["decided"] = decided
+        group["win_rate"] = group["wins"] / decided * 100 if decided else None
+        result.append(group)
+    return sorted(result, key=lambda item: (item["category_label"], item["subtype_label"]))
+
+
+@app.get("/api/push-signal-validation")
+def push_signal_validation_api():
+    rows = PushSignalValidation.query.order_by(PushSignalValidation.trigger_epoch.desc()).all()
+
+    def fmt_utc(value):
+        return (
+            value.replace(tzinfo=timezone.utc).astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            if value else None
+        )
+
+    return jsonify({
+        "summary": push_signal_validation_summary(rows),
+        "automation": automation_payload("push_signal_validation"),
+        "rule_note": "急涨提醒固定观察60分钟：先到+5%记胜、先到-5%记负；未触线记中性，同根先后不明或数据缺失不计胜率。",
+        "items": [{
+            "id": row.id,
+            "category": row.category,
+            "category_label": row.category_label,
+            "subtype": row.subtype,
+            "subtype_label": row.subtype_label,
+            "symbol": row.symbol,
+            "trigger_price": row.trigger_price,
+            "triggered_at": fmt_utc(row.triggered_at),
+            "validation_minutes": row.validation_minutes,
+            "target_move_pct": row.target_move_pct,
+            "failure_move_pct": row.failure_move_pct,
+            "status": row.status,
+            "first_hit": row.first_hit,
+            "first_hit_at": fmt_utc(row.first_hit_at),
+            "max_favorable_pct": row.max_favorable_pct,
+            "max_adverse_pct": row.max_adverse_pct,
+            "observed_candle_count": row.observed_candle_count,
+            "resolved_at": fmt_utc(row.resolved_at),
+            "result_note": row.result_note,
+        } for row in rows[:50]],
+    })
+
+
 @app.get("/api/trade-validation")
 def trade_validation():
     plans = TradeValidation.query.order_by(TradeValidation.created_at.desc()).all()
@@ -13016,6 +13289,22 @@ def background_trend_horizon_validation():
         time.sleep(60)
 
 
+def background_push_signal_validation():
+    """Resolve delivered push signals on fixed, complete 5MIN windows."""
+    time.sleep(45)
+    while True:
+        try:
+            with app.app_context():
+                mark_automation_status("push_signal_validation", "started")
+                refresh_push_signal_validations()
+                mark_automation_status("push_signal_validation", "success")
+        except Exception as exc:
+            with app.app_context():
+                db.session.rollback()
+                mark_automation_status("push_signal_validation", "error", exc)
+        time.sleep(60)
+
+
 def background_chat_retention_cleanup():
     """Run lightweight chat retention every six hours; messages and images expire together."""
     time.sleep(18)
@@ -13148,6 +13437,7 @@ def start_background_workers():
     threading.Thread(target=background_thought_analysis_push, daemon=True, name="thought-analysis-push").start()
     threading.Thread(target=background_hei_risk_watch, daemon=True, name="hei-risk-watch").start()
     threading.Thread(target=background_trend_horizon_validation, daemon=True, name="trend-horizon-validation").start()
+    threading.Thread(target=background_push_signal_validation, daemon=True, name="push-signal-validation").start()
     threading.Thread(target=background_chat_retention_cleanup, daemon=True, name="chat-retention-cleanup").start()
     threading.Thread(target=background_turnover_basis_watch, daemon=True, name="turnover-basis-watch").start()
 

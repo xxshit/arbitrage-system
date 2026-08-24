@@ -113,7 +113,7 @@ class IPhoneLayoutContractTests(unittest.TestCase):
         self.assertIn("last_login_location", APP_JS)
         self.assertIn("source_location", APP_JS)
         self.assertIn("IP 归属地（约）", APP_JS)
-        self.assertIn("20260821-ip-location", INDEX_HTML)
+        self.assertIn("20260824-push-validation", INDEX_HTML)
         self.assertIn("可用基本功能", INDEX_HTML)
         self.assertIn("可用大部分功能", INDEX_HTML)
         self.assertIn("最高权限", INDEX_HTML)

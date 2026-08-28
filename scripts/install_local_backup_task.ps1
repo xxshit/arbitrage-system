@@ -6,13 +6,17 @@ param(
 
 $ErrorActionPreference = "Stop"
 $pullScript = Join-Path $PSScriptRoot "pull_cloud_mysql_backup.ps1"
+$hiddenRunner = Join-Path $PSScriptRoot "run_cloud_backup_hidden.vbs"
 if (-not (Test-Path -LiteralPath $pullScript)) {
     throw "Backup pull script not found: $pullScript"
 }
+if (-not (Test-Path -LiteralPath $hiddenRunner)) {
+    throw "Hidden backup runner not found: $hiddenRunner"
+}
 
 $action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$pullScript`""
+    -Execute "$env:WINDIR\System32\wscript.exe" `
+    -Argument "//B //Nologo `"$hiddenRunner`""
 $trigger = New-ScheduledTaskTrigger -Daily -At $RunAt
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
@@ -29,4 +33,4 @@ Register-ScheduledTask `
     -Description "Pull and verify the latest private cloud MySQL backup for Arbitrage Hub." `
     -Force | Out-Null
 
-Write-Output "Scheduled task installed: $TaskName (daily $RunAt, runs after the next startup if missed)."
+Write-Output "Scheduled task installed: $TaskName (daily $RunAt, hidden, runs after the next startup if missed)."

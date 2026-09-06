@@ -112,7 +112,13 @@ class OnchainOpportunityTests(unittest.TestCase):
         self.assertIn("不含持仓量、资金费率或合约多空人数比确认", INDEX_HTML)
         self.assertIn("function loadOnchainOpportunities", APP_JS)
         self.assertIn("onchain_opportunity_refresh", APP_JS)
+        self.assertIn("function onchainDecimal", APP_JS)
+        self.assertIn('class="onchain-price"', APP_JS)
+        self.assertIn('class="onchain-change-grid"', APP_JS)
         self.assertIn(".onchain-opportunity-card", STYLE_CSS)
+        self.assertIn(".onchain-change-grid{display:grid;grid-template-columns:repeat(2", STYLE_CSS)
+        self.assertIn("overflow-wrap:anywhere", STYLE_CSS)
+        self.assertIn("20260906-onchain-price-layout", INDEX_HTML)
         self.assertIn("@media(max-width:760px)", STYLE_CSS)
 
 

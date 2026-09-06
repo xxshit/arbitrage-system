@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, MagicMock, patch
 
 from app import (
     SUDDEN_PUMP_CONFIRMATIONS,
@@ -9,7 +9,10 @@ from app import (
     fetch_sudden_pump_context,
     push_signal_validation_bounds,
     push_signal_validation_summary,
+    send_sudden_pump_push,
+    sudden_pump_bullish_confirmation,
     sudden_pump_confirmation_ready,
+    sudden_pump_push_section,
 )
 
 
@@ -52,6 +55,28 @@ def validation_row(**overrides):
     return SimpleNamespace(**values)
 
 
+def bullish_pump_item(**overrides):
+    values = {
+        "symbol": "FAST/USDT",
+        "last_price": 1.25,
+        "change_5m": 18.0,
+        "change_15m": 35.0,
+        "hot_bar_count": 2,
+        "cvd": 250_000,
+        "oi_change": 1.5,
+        "ratio_change": -0.8,
+        "volume_ratio": 2.5,
+        "closed_trigger": True,
+        "trigger_bucket": 1_700_000_000,
+        "stage_key": "acceleration",
+        "stage_label": "短线连续加速",
+        "stage_rank": 2,
+        "stage_reason": "短线连续扩张。",
+    }
+    values.update(overrides)
+    return values
+
+
 class SuddenPumpScanTests(unittest.TestCase):
     def setUp(self):
         SUDDEN_PUMP_CONFIRMATIONS.clear()
@@ -65,6 +90,75 @@ class SuddenPumpScanTests(unittest.TestCase):
         by_total = classify_sudden_pump_stage(18.0, 51.0, 1)
         self.assertEqual(by_bars["stage_key"], "acceleration")
         self.assertEqual(by_total["stage_key"], "extreme_15m")
+
+    def test_high_confidence_bullish_requires_momentum_volume_and_flow_alignment(self):
+        self.assertTrue(sudden_pump_bullish_confirmation(bullish_pump_item()))
+        for weaker in (
+            {"stage_rank": 1},
+            {"volume_ratio": 1.99},
+            {"cvd": 0},
+            {"oi_change": 0.99},
+            {"ratio_change": -0.49},
+        ):
+            with self.subTest(weaker=weaker):
+                self.assertFalse(sudden_pump_bullish_confirmation(bullish_pump_item(**weaker)))
+
+    def test_high_confidence_section_explicitly_says_bullish_without_promising_certain_profit(self):
+        section = sudden_pump_push_section(
+            bullish_pump_item(),
+            "已收盘5MIN确认",
+            rendered_at="2026-09-06 09:00:00",
+        )
+        self.assertIn("看涨 / 急速上涨确认", section)
+        self.assertIn("高置信短线看涨", section)
+        self.assertIn("高置信不等于必涨", section)
+
+    def test_first_bullish_confirmation_pushes_even_when_phase_was_already_sent(self):
+        item = bullish_pump_item()
+        episode = item["trigger_bucket"] // 1800 * 1800
+        mocked_state = MagicMock()
+        mocked_state.query.filter.return_value.all.return_value = [
+            SimpleNamespace(signal_key=f"{episode}:acceleration")
+        ]
+        mocked_db = MagicMock()
+        response = MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"code": 0}'
+        with (
+            patch.dict("app.os.environ", {"LARK_THOUGHT_ANALYSIS_WEBHOOK": "https://example.invalid/hook"}),
+            patch("app.LarkPushState", mocked_state),
+            patch("app.db", mocked_db),
+            patch("app.create_push_signal_validation") as mocked_create_validation,
+            patch("app.urlopen", return_value=response) as mocked_urlopen,
+        ):
+            delivered = send_sudden_pump_push([item])
+        self.assertTrue(delivered)
+        self.assertEqual(
+            [call.kwargs["signal_key"] for call in mocked_state.call_args_list],
+            [f"{episode}:bullish_confirmed"],
+        )
+        self.assertIn("高置信短线看涨", mocked_urlopen.call_args.args[0].data.decode("utf-8"))
+        mocked_create_validation.assert_called_once_with(
+            item, f"{episode}:bullish_confirmed", ANY
+        )
+        mocked_db.session.commit.assert_called_once()
+
+    @patch("app.time.sleep")
+    @patch("app.urlopen", side_effect=OSError("temporary Lark failure"))
+    @patch("app.create_push_signal_validation")
+    @patch("app.db")
+    @patch("app.LarkPushState")
+    def test_failed_lark_delivery_retries_without_writing_dedup_state(
+        self, mocked_state, mocked_db, mocked_create_validation, mocked_urlopen, mocked_sleep
+    ):
+        mocked_state.query.filter.return_value.all.return_value = []
+        with patch.dict("app.os.environ", {"LARK_THOUGHT_ANALYSIS_WEBHOOK": "https://example.invalid/hook"}):
+            delivered = send_sudden_pump_push([bullish_pump_item()])
+        self.assertFalse(delivered)
+        self.assertEqual(mocked_urlopen.call_count, 3)
+        self.assertEqual(mocked_sleep.call_count, 2)
+        mocked_db.session.add.assert_not_called()
+        mocked_db.session.commit.assert_not_called()
+        mocked_create_validation.assert_not_called()
 
     def test_live_candle_requires_two_separate_confirmations(self):
         self.assertFalse(sudden_pump_confirmation_ready("CYS/USDT", 1000, False, 10))

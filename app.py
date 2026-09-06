@@ -993,6 +993,9 @@ PUSH_SIGNAL_VALIDATION_RULES = {
         "failure_move_pct": 5.0,
     },
 }
+SUDDEN_PUMP_BULLISH_MIN_VOLUME_RATIO = 2.0
+SUDDEN_PUMP_BULLISH_MIN_OI_CHANGE = 1.0
+SUDDEN_PUMP_BULLISH_MAX_RATIO_CHANGE = -0.5
 TREND_WINDOWS = {
     "change_5m": 5 * 60,
     "change_15m": 15 * 60,
@@ -7284,6 +7287,17 @@ def classify_sudden_pump_stage(change_5m, change_15m, hot_bar_count):
     }
 
 
+def sudden_pump_bullish_confirmation(item):
+    """Require sustained price expansion plus aligned flow before calling a pump bullish."""
+    return (
+        int(item.get("stage_rank") or 0) >= 2
+        and float(item.get("volume_ratio") or 0) >= SUDDEN_PUMP_BULLISH_MIN_VOLUME_RATIO
+        and float(item.get("cvd") or 0) > 0
+        and float(item.get("oi_change") or 0) >= SUDDEN_PUMP_BULLISH_MIN_OI_CHANGE
+        and float(item.get("ratio_change") or 0) <= SUDDEN_PUMP_BULLISH_MAX_RATIO_CHANGE
+    )
+
+
 def sudden_pump_confirmation_ready(symbol, bucket_at, closed_trigger, observed_at=None):
     """A live candle needs two observations; a completed candle is already time-confirmed."""
     if closed_trigger:
@@ -7345,7 +7359,7 @@ def fetch_sudden_pump_context(symbol, threshold=15.0):
                 float(ratio_rows[0].get("longShortRatio", 0) or 0),
             )
         stage = classify_sudden_pump_stage(change_5m, change_15m, hot_bar_count)
-        return {
+        item = {
             "symbol": symbol,
             "last_price": float(recent[-1][4]),
             "change_5m": change_5m,
@@ -7359,6 +7373,8 @@ def fetch_sudden_pump_context(symbol, threshold=15.0):
             "trigger_bucket": int(trigger_row[0] // 1000),
             **stage,
         }
+        item["bullish_confirmed"] = sudden_pump_bullish_confirmation(item)
+        return item
     except Exception:
         return None
 
@@ -7433,7 +7449,7 @@ def create_push_signal_validation(item, source_event_key, trigger_epoch=None):
             for key in (
                 "symbol", "stage_key", "stage_label", "stage_rank", "stage_reason", "last_price",
                 "change_5m", "change_15m", "hot_bar_count", "cvd", "oi_change", "ratio_change",
-                "volume_ratio", "closed_trigger", "trigger_bucket",
+                "volume_ratio", "closed_trigger", "trigger_bucket", "bullish_confirmed",
             )
         }, ensure_ascii=False),
     )
@@ -7541,8 +7557,40 @@ def refresh_push_signal_validations(now_epoch=None):
     return len(rows)
 
 
+def sudden_pump_push_section(item, confirmation, rendered_at=None):
+    bullish_confirmed = sudden_pump_bullish_confirmation(item)
+    symbol = item["symbol"]
+    rendered_at = rendered_at or datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    horn = (item.get("oi_change") or 0) > 0 and (item.get("ratio_change") or 0) < 0
+    structure = "持仓增、人数比降，短线犄角同步" if horn else "资金结构尚未形成完整犄角"
+    if bullish_confirmed:
+        heading = lark_dot_label("↑ 看涨 / 急速上涨确认", "cus-bull")
+        title = f"**{symbol}　高置信短线看涨**"
+        judgement = (
+            f"看涨依据：{item['stage_reason']}量能达到近期均值至少"
+            f"{SUDDEN_PUMP_BULLISH_MIN_VOLUME_RATIO:.1f}倍，且CVD、持仓与人数比共同支持主动上攻。"
+        )
+        risk = "风险提示：高置信不等于必涨或适合追高；若后续放量滞涨、持仓退出或CVD转弱，看涨确认立即失效。"
+    else:
+        heading = lark_dot_label(f"↑ 急涨 / {item['stage_label']}", "cus-bull")
+        title = f"**{symbol}　短周期突然启动**"
+        judgement = f"阶段判断：{item['stage_reason']}{structure}。"
+        risk = "风险提示：这是突然点火提醒，不等于无条件追多；若后续放量滞涨、持仓退出或CVD转弱，要防高位换手。"
+    return "\n".join([
+        heading,
+        title,
+        f"时间：{rendered_at}｜{confirmation}",
+        f"价格：{lark_price_value(item.get('last_price'))}",
+        f"近5MIN：价格 <font color='cus-bull'>{item['change_5m']:+.2f}%</font>｜近15MIN <font color='cus-bull'>{item['change_15m']:+.2f}%</font>｜急涨K线 {item['hot_bar_count']} 根",
+        f"资金结构：持仓 {lark_plain_value(item.get('oi_change'), 2, '%')}｜多空人数比 {lark_plain_value(item.get('ratio_change'), 2, '%')}｜CVD {lark_cvd_label(item.get('cvd'))}｜量能 {lark_plain_value(item.get('volume_ratio'), 2, 'x')}",
+        judgement,
+        risk,
+        f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{symbol.replace('/', '')}",
+    ])
+
+
 def send_sudden_pump_push(items):
-    """Push one message per meaningful phase in a 30-minute episode."""
+    """Push each new phase or first high-confidence bullish confirmation, retrying known failures."""
     webhook = os.getenv("LARK_THOUGHT_ANALYSIS_WEBHOOK", "").strip()
     if not webhook or not items:
         return False
@@ -7563,51 +7611,55 @@ def send_sudden_pump_push(items):
             (stage_ranks.get(row.signal_key.rsplit(":", 1)[-1], 0) for row in episode_rows),
             default=0,
         )
-        if highest_sent_rank >= item["stage_rank"]:
+        bullish_confirmed = sudden_pump_bullish_confirmation(item)
+        bullish_key = f"{episode}:bullish_confirmed"
+        phase_is_new = highest_sent_rank < item["stage_rank"]
+        bullish_is_new = bullish_confirmed and not any(row.signal_key == bullish_key for row in episode_rows)
+        if not phase_is_new and not bullish_is_new:
             continue
-        horn = (item.get("oi_change") or 0) > 0 and (item.get("ratio_change") or 0) < 0
-        structure = "持仓增、人数比降，短线犄角同步" if horn else "资金结构尚未形成完整犄角"
+        item["bullish_confirmed"] = bullish_confirmed
         confirmation = "已收盘5MIN确认" if item.get("closed_trigger") else "盘中连续两次确认"
-        sections.append("\n".join([
-            lark_dot_label(f"↑ 急涨 / {item['stage_label']}", "cus-bull"),
-            f"**{item['symbol']}　短周期突然启动**",
-            f"时间：{datetime.now(SHANGHAI_TZ).strftime('%Y-%m-%d %H:%M:%S')}｜{confirmation}",
-            f"价格：{lark_price_value(item.get('last_price'))}",
-            f"近5MIN：价格 <font color='cus-bull'>{item['change_5m']:+.2f}%</font>｜近15MIN <font color='cus-bull'>{item['change_15m']:+.2f}%</font>｜急涨K线 {item['hot_bar_count']} 根",
-            f"资金结构：持仓 {lark_plain_value(item.get('oi_change'), 2, '%')}｜多空人数比 {lark_plain_value(item.get('ratio_change'), 2, '%')}｜CVD {lark_cvd_label(item.get('cvd'))}｜量能 {lark_plain_value(item.get('volume_ratio'), 2, 'x')}",
-            f"阶段判断：{item['stage_reason']}{structure}。",
-            "风险提示：这是突然点火提醒，不等于无条件追多；若后续放量滞涨、持仓退出或CVD转弱，要防高位换手。",
-            f"COINGLASS：https://www.coinglass.com/tv/zh/Binance_{item['symbol'].replace('/', '')}",
-        ]))
-        reserved.append((item, signal_key))
+        sections.append(sudden_pump_push_section(item, confirmation))
+        state_keys = []
+        if phase_is_new:
+            state_keys.append(signal_key)
+        if bullish_is_new:
+            state_keys.append(bullish_key)
+        reserved.append((item, state_keys, signal_key if phase_is_new else bullish_key))
     if not sections:
-        return False
-    for item, signal_key in reserved:
-        db.session.add(LarkPushState(
-            channel="sudden_pump_5m", symbol=item["symbol"], signal_key=signal_key, pushed_at=now
-        ))
-    db.session.commit()
-    try:
-        request_obj = Request(
-            webhook,
-            data=json.dumps(lark_trend_card(sections), ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json", "User-Agent": "ArbiScope/1.0"},
-        )
-        with urlopen(request_obj, timeout=10) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        if "code" in result:
-            delivered = result.get("code") == 0
-        elif "StatusCode" in result:
-            delivered = result.get("StatusCode") == 0
-        else:
+        return True
+    payload = json.dumps(lark_trend_card(sections), ensure_ascii=False).encode("utf-8")
+    delivered = False
+    for attempt in range(3):
+        try:
+            request_obj = Request(
+                webhook,
+                data=payload,
+                headers={"Content-Type": "application/json", "User-Agent": "ArbiScope/1.0"},
+            )
+            with urlopen(request_obj, timeout=10) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            delivered = (
+                result.get("code") == 0 if "code" in result
+                else result.get("StatusCode") == 0 if "StatusCode" in result
+                else False
+            )
+        except Exception:
             delivered = False
         if delivered:
-            for item, signal_key in reserved:
-                create_push_signal_validation(item, signal_key, trigger_epoch)
-            db.session.commit()
-        return delivered
-    except Exception:
+            break
+        if attempt < 2:
+            time.sleep(attempt + 1)
+    if not delivered:
         return False
+    for item, state_keys, validation_key in reserved:
+        for state_key in state_keys:
+            db.session.add(LarkPushState(
+                channel="sudden_pump_5m", symbol=item["symbol"], signal_key=state_key, pushed_at=now
+            ))
+        create_push_signal_validation(item, validation_key, trigger_epoch)
+    db.session.commit()
+    return True
 
 
 def scan_intraday_sudden_pumps():
@@ -7638,7 +7690,9 @@ def scan_intraday_sudden_pumps():
             if key[1] < cutoff_bucket:
                 SUDDEN_PUMP_CONFIRMATIONS.pop(key, None)
         if verified:
-            send_sudden_pump_push(sorted(verified, key=lambda item: item["change_15m"], reverse=True))
+            delivered = send_sudden_pump_push(sorted(verified, key=lambda item: item["change_15m"], reverse=True))
+            if not delivered:
+                raise RuntimeError("急涨候选已确认，但Lark推送未成功；未写去重状态，下一轮继续重试")
         return len(verified)
     finally:
         SUDDEN_PUMP_SCAN_LOCK.release()

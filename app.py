@@ -466,6 +466,41 @@ class IndexComponentSnapshot(db.Model):
     __table_args__ = (db.UniqueConstraint("exchange", "symbol", name="uq_index_component_exchange_symbol"),)
 
 
+class OnchainOpportunitySnapshot(db.Model):
+    """Latest screened DEX pool per token; separate from futures-market signals."""
+    id = db.Column(db.Integer, primary_key=True)
+    network = db.Column(db.String(30), nullable=False, index=True)
+    chain_label = db.Column(db.String(40), nullable=False)
+    token_address = db.Column(db.String(128), nullable=False)
+    pool_address = db.Column(db.String(128), nullable=False)
+    dex_id = db.Column(db.String(60))
+    token_symbol = db.Column(db.String(40), nullable=False)
+    token_name = db.Column(db.String(150))
+    quote_symbol = db.Column(db.String(40))
+    price_usd = db.Column(db.Float)
+    price_change_5m = db.Column(db.Float)
+    price_change_1h = db.Column(db.Float)
+    price_change_6h = db.Column(db.Float)
+    price_change_24h = db.Column(db.Float)
+    liquidity_usd = db.Column(db.Float, nullable=False)
+    volume_1h_usd = db.Column(db.Float)
+    volume_24h_usd = db.Column(db.Float)
+    buys_1h = db.Column(db.Integer)
+    sells_1h = db.Column(db.Integer)
+    market_cap_usd = db.Column(db.Float)
+    fdv_usd = db.Column(db.Float)
+    pair_created_at = db.Column(db.DateTime)
+    opportunity_score = db.Column(db.Float, nullable=False, default=0.0, index=True)
+    risk_level = db.Column(db.String(20), nullable=False, default="注意")
+    risk_tags_json = db.Column(db.Text, nullable=False, default="[]")
+    source_url = db.Column(db.String(500), nullable=False)
+    source_rank = db.Column(db.Integer, nullable=False, default=0)
+    captured_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+    __table_args__ = (
+        db.UniqueConstraint("network", "token_address", name="uq_onchain_opportunity_network_token"),
+    )
+
+
 class ListingState(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     exchange = db.Column(db.String(30), nullable=False)
@@ -926,6 +961,19 @@ HORN_SCAN_HOUR = 8
 LAST_HORN_SCAN_DATE = None
 LAST_LARK_TREND_PUSH_DATE = None
 INDEX_COMPONENT_REFRESH_SECONDS = 5 * 60
+ONCHAIN_OPPORTUNITY_REFRESH_SECONDS = 5 * 60
+ONCHAIN_MIN_LIQUIDITY_USD = 50_000
+ONCHAIN_MIN_VOLUME_24H_USD = 25_000
+ONCHAIN_NETWORKS = {
+    "bsc": {"label": "BSC", "source_path": "bsc"},
+    "solana": {"label": "Solana", "source_path": "solana"},
+    "base": {"label": "Base", "source_path": "base"},
+    "eth": {"label": "Ethereum", "source_path": "eth"},
+}
+ONCHAIN_QUOTE_ASSETS = {
+    "USDT", "USDC", "USDE", "FDUSD", "DAI", "BUSD", "USD1", "USDS", "PYUSD",
+    "WBNB", "BNB", "WSOL", "SOL", "WETH", "ETH", "WBTC", "BTC",
+}
 FUNDING_HISTORY_SYNC_SECONDS = 60
 PRICE_BACKFILL_SYNC_SECONDS = 2 * 60
 PRICE_HISTORY_BUCKET_SECONDS = 5 * 60
@@ -959,6 +1007,7 @@ TREND_WINDOWS = {
 BACKGROUND_WORKERS_STARTED = False
 EARLY_TREND_SCAN_LOCK = threading.Lock()
 SUDDEN_PUMP_SCAN_LOCK = threading.Lock()
+ONCHAIN_OPPORTUNITY_SCAN_LOCK = threading.Lock()
 SUDDEN_PUMP_CONFIRMATIONS = {}
 RUNTIME_RULE_DEFAULTS = [
     {"rule_key": "spot_market_refresh", "category": "实时行情", "label": "现多期空行情刷新", "schedule_type": "interval", "value": "5", "unit": "秒", "min_value": 2, "max_value": 60, "description": "拉取现货与 Binance 合约盘口，刷新开差、平差、基差和报警候选。"},
@@ -968,6 +1017,7 @@ RUNTIME_RULE_DEFAULTS = [
     {"rule_key": "hei_watch_scan", "category": "走势盯盘", "label": "HEI 风险快速盯盘", "schedule_type": "interval", "value": "30", "unit": "秒", "min_value": 15, "max_value": 300, "description": "仅在 HEI 已启用盯盘时快速复核基差、5MIN 涨跌和成交量异动；同一根K线与同一基差区间去重。"},
     {"rule_key": "sudden_pump_scan", "category": "趋势筛选", "label": "全市场 5MIN 急涨扫描", "schedule_type": "interval", "value": "10", "unit": "秒", "min_value": 5, "max_value": 60, "description": "轻量读取本地5分钟价格桶；候选出现后才向 Binance 复核，捕捉短周期突然点火。"},
     {"rule_key": "sudden_pump_threshold", "category": "趋势筛选", "label": "5MIN 急涨触发阈值", "schedule_type": "threshold", "value": "15", "unit": "%", "min_value": 5, "max_value": 50, "description": "单根5MIN涨幅达到阈值进入急涨提醒；盘中信号连续确认两次，已收盘信号直接确认。"},
+    {"rule_key": "onchain_opportunity_refresh", "category": "链上机会", "label": "链上机会索引刷新", "schedule_type": "interval", "value": "300", "unit": "秒", "min_value": 180, "max_value": 3600, "description": "读取 BSC、Solana、Base、Ethereum 的 DEX 热门池，按流动性、成交活跃度、买卖压力和短周期动量生成只读机会索引。"},
     {"rule_key": "early_trend_scan", "category": "趋势筛选", "label": "全市场五根 30MIN 扫描", "schedule_type": "interval", "value": "1800", "unit": "秒", "min_value": 900, "max_value": 7200, "description": "每根 30MIN K线收盘后扫描全市场；只使用已收盘K线，识别启动前蓄势和五根强启动。"},
     {"rule_key": "daily_trend_push", "category": "每日任务", "label": "日报趋势汇总与推送", "schedule_type": "daily_time", "value": "08:00", "unit": "北京时间", "description": "汇总最新趋势结果并推送确定性最强的三个币；不承担首次发现信号。"},
     {"rule_key": "announcement_scan", "category": "每日任务", "label": "上下架公告抓取", "schedule_type": "daily_time", "value": "08:00", "unit": "北京时间", "description": "读取五家交易所公告，解析公告时间和具体执行时间并保存 MySQL。"},
@@ -1611,6 +1661,7 @@ AUTOMATION_LABELS = {
     "chat_retention_cleanup": "协作记录过期清理",
     "trend_horizon_validation": "AKE多周期趋势验证",
     "push_signal_validation": "推送分类结果验证",
+    "onchain_opportunity_refresh": "链上机会索引",
 }
 
 
@@ -6193,6 +6244,317 @@ def dashboard():
             "markets_scanned": len(items) * len(EXCHANGES),
             "mode": "机会看板 · 三所合约公开 API",
         },
+    })
+
+
+def onchain_number(value, fallback=None):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
+def onchain_score_metrics(item):
+    """Score visibility, not expected return: liquidity and real activity lead momentum."""
+    clamp = lambda value, low=0.0, high=1.0: max(low, min(high, value))
+    liquidity = max(0.0, onchain_number(item.get("liquidity_usd"), 0.0))
+    volume_24h = max(0.0, onchain_number(item.get("volume_24h_usd"), 0.0))
+    txns_1h = max(0, int(item.get("buys_1h") or 0) + int(item.get("sells_1h") or 0))
+    buys_1h = max(0, int(item.get("buys_1h") or 0))
+    buy_ratio = buys_1h / txns_1h if txns_1h else 0.0
+    turnover = volume_24h / liquidity if liquidity else 0.0
+
+    liquidity_score = 25 * clamp((math.log10(max(liquidity, 1)) - math.log10(50_000)) / 2.0)
+    volume_score = 15 * clamp((math.log10(max(volume_24h, 1)) - math.log10(25_000)) / 2.0)
+    transaction_score = 10 * clamp((math.log10(max(txns_1h, 1)) - 1.0) / 2.0)
+    order_flow_score = 15 * clamp((buy_ratio - 0.45) / 0.20)
+    momentum_score = (
+        10 * clamp(max(0.0, onchain_number(item.get("price_change_5m"), 0.0)) / 12.0)
+        + 15 * clamp(max(0.0, onchain_number(item.get("price_change_1h"), 0.0)) / 35.0)
+        + 10 * clamp(max(0.0, onchain_number(item.get("price_change_6h"), 0.0)) / 80.0)
+    )
+    return {
+        "score": round(liquidity_score + volume_score + transaction_score + order_flow_score + momentum_score, 1),
+        "components": {
+            "liquidity": round(liquidity_score, 1),
+            "activity": round(volume_score + transaction_score, 1),
+            "order_flow": round(order_flow_score, 1),
+            "momentum": round(momentum_score, 1),
+        },
+        "buy_ratio": round(buy_ratio * 100, 1),
+        "turnover": round(turnover, 2),
+    }
+
+
+def onchain_risk_profile(item, now=None):
+    """Return observable risk flags; no contract audit or holder distribution is inferred."""
+    now = now or utc_now_naive()
+    liquidity = onchain_number(item.get("liquidity_usd"), 0.0)
+    change_5m = abs(onchain_number(item.get("price_change_5m"), 0.0))
+    change_1h = abs(onchain_number(item.get("price_change_1h"), 0.0))
+    buys = int(item.get("buys_1h") or 0)
+    sells = int(item.get("sells_1h") or 0)
+    created_at = item.get("pair_created_at")
+    risk_points = 0
+    tags = []
+    if liquidity < 100_000:
+        tags.append("流动性偏低")
+        risk_points += 2
+    if created_at:
+        age_hours = max(0.0, (now - created_at).total_seconds() / 3600)
+        if age_hours < 6:
+            tags.append("新池不足6H")
+            risk_points += 2
+        elif age_hours < 24:
+            tags.append("新池不足24H")
+            risk_points += 1
+    if change_5m >= 15:
+        tags.append("5MIN剧烈波动")
+        risk_points += 1
+    if change_1h >= 50:
+        tags.append("1H过热")
+        risk_points += 2
+    elif change_1h >= 30:
+        tags.append("1H涨幅偏高")
+        risk_points += 1
+    if sells > max(10, buys * 1.2):
+        tags.append("1H卖单占优")
+        risk_points += 1
+    if not item.get("market_cap_usd"):
+        tags.append("流通量未核验")
+        risk_points += 1
+    if not tags:
+        tags.append("仍需合约与持仓审计")
+    level = "极高" if risk_points >= 4 else ("高" if risk_points >= 2 else "注意")
+    return level, tags
+
+
+def parse_onchain_datetime(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except (TypeError, ValueError):
+        return None
+
+
+def onchain_related_token(pool, included, relation_key):
+    relation = (((pool.get("relationships") or {}).get(relation_key) or {}).get("data") or {})
+    token_id = relation.get("id")
+    attributes = (included.get(token_id) or {}).get("attributes") or {}
+    address = attributes.get("address") or (str(token_id).split("_", 1)[-1] if token_id else "")
+    return {
+        "address": str(address or "").strip(),
+        "symbol": str(attributes.get("symbol") or "").strip(),
+        "name": str(attributes.get("name") or "").strip(),
+    }
+
+
+def parse_onchain_trending_pools(payload, network, captured_at=None):
+    """Normalize GeckoTerminal JSON:API pools and keep one strongest pool per token address."""
+    config = ONCHAIN_NETWORKS[network]
+    captured_at = captured_at or utc_now_naive()
+    included = {item.get("id"): item for item in (payload.get("included") or []) if item.get("id")}
+    candidates = {}
+    for source_rank, pool in enumerate(payload.get("data") or [], start=1):
+        attributes = pool.get("attributes") or {}
+        base = onchain_related_token(pool, included, "base_token")
+        quote_token = onchain_related_token(pool, included, "quote_token")
+        if not base["address"] or not base["symbol"] or base["symbol"].upper() in ONCHAIN_QUOTE_ASSETS:
+            continue
+        liquidity = onchain_number(attributes.get("reserve_in_usd"), 0.0)
+        volumes = attributes.get("volume_usd") or {}
+        transactions = attributes.get("transactions") or {}
+        price_changes = attributes.get("price_change_percentage") or {}
+        volume_24h = onchain_number(volumes.get("h24"), 0.0)
+        if liquidity < ONCHAIN_MIN_LIQUIDITY_USD or volume_24h < ONCHAIN_MIN_VOLUME_24H_USD:
+            continue
+        txns_1h = transactions.get("h1") or {}
+        pool_address = str(attributes.get("address") or str(pool.get("id") or "").split("_", 1)[-1]).strip()
+        if not pool_address:
+            continue
+        dex_relation = (((pool.get("relationships") or {}).get("dex") or {}).get("data") or {})
+        item = {
+            "network": network,
+            "chain_label": config["label"],
+            "token_address": base["address"],
+            "pool_address": pool_address,
+            "dex_id": str(dex_relation.get("id") or "")[:60],
+            "token_symbol": base["symbol"][:40],
+            "token_name": base["name"][:150],
+            "quote_symbol": quote_token["symbol"][:40],
+            "price_usd": onchain_number(attributes.get("base_token_price_usd")),
+            "price_change_5m": onchain_number(price_changes.get("m5")),
+            "price_change_1h": onchain_number(price_changes.get("h1")),
+            "price_change_6h": onchain_number(price_changes.get("h6")),
+            "price_change_24h": onchain_number(price_changes.get("h24")),
+            "liquidity_usd": liquidity,
+            "volume_1h_usd": onchain_number(volumes.get("h1"), 0.0),
+            "volume_24h_usd": volume_24h,
+            "buys_1h": int(onchain_number(txns_1h.get("buys"), 0) or 0),
+            "sells_1h": int(onchain_number(txns_1h.get("sells"), 0) or 0),
+            "market_cap_usd": onchain_number(attributes.get("market_cap_usd")),
+            "fdv_usd": onchain_number(attributes.get("fdv_usd")),
+            "pair_created_at": parse_onchain_datetime(attributes.get("pool_created_at")),
+            "source_url": f"https://www.geckoterminal.com/{config['source_path']}/pools/{quote(pool_address, safe='')}",
+            "source_rank": source_rank,
+            "captured_at": captured_at,
+        }
+        score = onchain_score_metrics(item)
+        item["opportunity_score"] = score["score"]
+        item["risk_level"], tags = onchain_risk_profile(item, captured_at)
+        item["risk_tags_json"] = json.dumps(tags, ensure_ascii=False)
+        address_key = base["address"].lower() if base["address"].startswith("0x") else base["address"]
+        previous = candidates.get(address_key)
+        if not previous or (item["opportunity_score"], liquidity) > (previous["opportunity_score"], previous["liquidity_usd"]):
+            candidates[address_key] = item
+    return sorted(candidates.values(), key=lambda item: (item["opportunity_score"], item["liquidity_usd"]), reverse=True)[:12]
+
+
+def get_onchain_json(url, timeout=10):
+    request = Request(url, headers={
+        "User-Agent": "ArbiScope/1.0",
+        "Accept": "application/json;version=20230302",
+    })
+    with urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def acquire_onchain_refresh_lock():
+    if db.engine.dialect.name not in {"mysql", "mariadb"}:
+        return None, True
+    connection = db.engine.connect()
+    acquired = connection.execute(text("SELECT GET_LOCK('arbitrage_onchain_opportunity_refresh', 0)")).scalar()
+    return connection, acquired == 1
+
+
+def release_onchain_refresh_lock(connection):
+    if connection is None:
+        return
+    try:
+        connection.execute(text("SELECT RELEASE_LOCK('arbitrage_onchain_opportunity_refresh')"))
+    finally:
+        connection.close()
+
+
+def refresh_onchain_opportunities():
+    if not ONCHAIN_OPPORTUNITY_SCAN_LOCK.acquire(blocking=False):
+        return {"skipped": True, "updated_networks": [], "errors": {}}
+    lock_connection = None
+    try:
+        lock_connection, acquired = acquire_onchain_refresh_lock()
+        if not acquired:
+            return {"skipped": True, "updated_networks": [], "errors": {}}
+        captured_at = utc_now_naive()
+        parsed_by_network = {}
+        errors = {}
+        for network in ONCHAIN_NETWORKS:
+            try:
+                payload = get_onchain_json(
+                    f"https://api.geckoterminal.com/api/v2/networks/{network}/trending_pools?include=base_token%2Cquote_token&page=1",
+                    timeout=10,
+                )
+                rows = parse_onchain_trending_pools(payload, network, captured_at)
+                if not rows:
+                    raise RuntimeError("公开接口返回空候选")
+                parsed_by_network[network] = rows
+            except Exception as exc:
+                errors[network] = f"{type(exc).__name__}: {exc}"
+        if not parsed_by_network:
+            raise RuntimeError("；".join(f"{network} {message}" for network, message in errors.items()))
+        for network, rows in parsed_by_network.items():
+            OnchainOpportunitySnapshot.query.filter_by(network=network).delete(synchronize_session=False)
+            for row in rows:
+                db.session.add(OnchainOpportunitySnapshot(**row))
+        db.session.commit()
+        return {"skipped": False, "updated_networks": sorted(parsed_by_network), "errors": errors}
+    finally:
+        release_onchain_refresh_lock(lock_connection)
+        ONCHAIN_OPPORTUNITY_SCAN_LOCK.release()
+
+
+def onchain_snapshot_payload(row):
+    score = onchain_score_metrics({
+        "liquidity_usd": row.liquidity_usd,
+        "volume_24h_usd": row.volume_24h_usd,
+        "buys_1h": row.buys_1h,
+        "sells_1h": row.sells_1h,
+        "price_change_5m": row.price_change_5m,
+        "price_change_1h": row.price_change_1h,
+        "price_change_6h": row.price_change_6h,
+    })
+    try:
+        risk_tags = json.loads(row.risk_tags_json or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        risk_tags = ["风险标签不可用"]
+    return {
+        "network": row.network,
+        "chain_label": row.chain_label,
+        "token_address": row.token_address,
+        "pool_address": row.pool_address,
+        "dex_id": row.dex_id,
+        "token_symbol": row.token_symbol,
+        "token_name": row.token_name,
+        "quote_symbol": row.quote_symbol,
+        "price_usd": row.price_usd,
+        "price_change_5m": row.price_change_5m,
+        "price_change_1h": row.price_change_1h,
+        "price_change_6h": row.price_change_6h,
+        "price_change_24h": row.price_change_24h,
+        "liquidity_usd": row.liquidity_usd,
+        "volume_1h_usd": row.volume_1h_usd,
+        "volume_24h_usd": row.volume_24h_usd,
+        "buys_1h": row.buys_1h,
+        "sells_1h": row.sells_1h,
+        "buy_ratio": score["buy_ratio"],
+        "turnover": score["turnover"],
+        "market_cap_usd": row.market_cap_usd,
+        "fdv_usd": row.fdv_usd,
+        "pair_created_at": row.pair_created_at.replace(tzinfo=timezone.utc).astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M") if row.pair_created_at else None,
+        "opportunity_score": row.opportunity_score,
+        "score_components": score["components"],
+        "risk_level": row.risk_level,
+        "risk_tags": risk_tags,
+        "source_url": row.source_url,
+        "source_rank": row.source_rank,
+        "captured_at": row.captured_at.replace(tzinfo=timezone.utc).astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S") if row.captured_at else None,
+    }
+
+
+@app.get("/api/onchain-opportunities")
+def onchain_opportunities_api():
+    rows = OnchainOpportunitySnapshot.query.order_by(
+        OnchainOpportunitySnapshot.opportunity_score.desc(),
+        OnchainOpportunitySnapshot.liquidity_usd.desc(),
+    ).all()
+    captured_at = max((row.captured_at for row in rows), default=None)
+    now = utc_now_naive()
+    rows_by_chain = {
+        network: [row for row in rows if row.network == network]
+        for network in ONCHAIN_NETWORKS
+    }
+    stale_after = ONCHAIN_OPPORTUNITY_REFRESH_SECONDS * 3
+    return jsonify({
+        "items": [onchain_snapshot_payload(row) for row in rows],
+        "chains": [
+            {
+                "key": network,
+                "label": config["label"],
+                "count": len(rows_by_chain[network]),
+                "updated_at": max((row.captured_at for row in rows_by_chain[network]), default=None).replace(tzinfo=timezone.utc).astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S") if rows_by_chain[network] else None,
+                "stale": bool(rows_by_chain[network] and (now - max(row.captured_at for row in rows_by_chain[network])).total_seconds() > stale_after),
+            }
+            for network, config in ONCHAIN_NETWORKS.items()
+        ],
+        "updated_at": captured_at.replace(tzinfo=timezone.utc).astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S") if captured_at else None,
+        "stale": bool(rows and any((now - row.captured_at).total_seconds() > stale_after for row in rows)),
+        "automation": automation_payload("onchain_opportunity_refresh"),
+        "source": "GeckoTerminal 公开链上 DEX 数据",
+        "method_note": "机会分只衡量可见流动性、成交活跃度、买卖压力和短周期动量，不代表合约安全、可卖出或预期收益。",
     })
 
 
@@ -13239,6 +13601,22 @@ def background_index_component_sync():
         time.sleep(runtime_interval("index_component_sync", INDEX_COMPONENT_REFRESH_SECONDS))
 
 
+def background_onchain_opportunity_refresh():
+    """Refresh the DEX-only index independently from futures and Lark push loops."""
+    time.sleep(12)
+    while True:
+        try:
+            with app.app_context():
+                mark_automation_status("onchain_opportunity_refresh", "started")
+                refresh_onchain_opportunities()
+                mark_automation_status("onchain_opportunity_refresh", "success")
+        except Exception as exc:
+            with app.app_context():
+                db.session.rollback()
+                mark_automation_status("onchain_opportunity_refresh", "error", exc)
+        time.sleep(runtime_interval("onchain_opportunity_refresh", ONCHAIN_OPPORTUNITY_REFRESH_SECONDS))
+
+
 def background_thought_analysis_push():
     time.sleep(20)
     while True:
@@ -13429,6 +13807,7 @@ def start_background_workers():
     threading.Thread(target=background_dual_funding_history_sync, daemon=True, name="dual-funding-history-sync").start()
     threading.Thread(target=background_price_history_backfill, daemon=True, name="price-history-backfill").start()
     threading.Thread(target=background_index_component_sync, daemon=True, name="index-component-sync").start()
+    threading.Thread(target=background_onchain_opportunity_refresh, daemon=True, name="onchain-opportunity-refresh").start()
     threading.Thread(target=background_announcement_scan, daemon=True, name="announcement-scan").start()
     threading.Thread(target=background_daily_horn_scan, daemon=True, name="daily-horn-scan").start()
     threading.Thread(target=background_intraday_sudden_pump_scan, daemon=True, name="intraday-sudden-pump-scan").start()

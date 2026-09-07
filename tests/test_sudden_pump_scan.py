@@ -12,7 +12,9 @@ from app import (
     send_sudden_pump_push,
     sudden_pump_bullish_confirmation,
     sudden_pump_confirmation_ready,
+    sudden_pump_pre_ignition_stage,
     sudden_pump_push_section,
+    sudden_pump_scan_delay,
 )
 
 
@@ -70,7 +72,7 @@ def bullish_pump_item(**overrides):
         "trigger_bucket": 1_700_000_000,
         "stage_key": "acceleration",
         "stage_label": "短线连续加速",
-        "stage_rank": 2,
+        "stage_rank": 3,
         "stage_reason": "短线连续扩张。",
     }
     values.update(overrides)
@@ -94,7 +96,7 @@ class SuddenPumpScanTests(unittest.TestCase):
     def test_high_confidence_bullish_requires_momentum_volume_and_flow_alignment(self):
         self.assertTrue(sudden_pump_bullish_confirmation(bullish_pump_item()))
         for weaker in (
-            {"stage_rank": 1},
+            {"stage_key": "ignition"},
             {"volume_ratio": 1.99},
             {"cvd": 0},
             {"oi_change": 0.99},
@@ -102,6 +104,34 @@ class SuddenPumpScanTests(unittest.TestCase):
         ):
             with self.subTest(weaker=weaker):
                 self.assertFalse(sudden_pump_bullish_confirmation(bullish_pump_item(**weaker)))
+
+    def test_pre_ignition_requires_early_move_fast_volume_and_positive_cvd(self):
+        stage = sudden_pump_pre_ignition_stage(10.5, 120, 3.2, 5000)
+        self.assertEqual(stage["stage_key"], "pre_ignition")
+        self.assertIsNone(sudden_pump_pre_ignition_stage(9.99, 120, 3.2, 5000))
+        self.assertIsNone(sudden_pump_pre_ignition_stage(10.5, 181, 3.2, 5000))
+        self.assertIsNone(sudden_pump_pre_ignition_stage(10.5, 120, 2.99, 5000))
+        self.assertIsNone(sudden_pump_pre_ignition_stage(10.5, 120, 3.2, 0))
+
+    @patch("app.get_json")
+    def test_active_ten_percent_move_can_become_pre_ignition_before_formal_threshold(self, mocked_get_json):
+        start = 1_700_000_000_000
+        rows = [kline(start + index * 300_000, 100, 100, 1000, 500) for index in range(8)]
+        rows.append(kline(start + 8 * 300_000, 100, 111, 4000, 3500))
+        mocked_get_json.return_value = rows
+        item = fetch_sudden_pump_context(
+            "FAST/USDT", 15.0, now_epoch=(start + 8 * 300_000) / 1000 + 120
+        )
+        self.assertEqual(item["stage_key"], "pre_ignition")
+        self.assertAlmostEqual(item["change_5m"], 11.0)
+        self.assertAlmostEqual(item["volume_pace_ratio"], 10.0)
+        self.assertIsNone(item["oi_change"])
+        self.assertIsNone(item["ratio_change"])
+        mocked_get_json.assert_called_once()
+
+    def test_candidate_window_temporarily_accelerates_scan_to_five_seconds(self):
+        self.assertEqual(sudden_pump_scan_delay(10, fast_until=130, now=100), 5)
+        self.assertEqual(sudden_pump_scan_delay(10, fast_until=90, now=100), 10)
 
     def test_high_confidence_section_explicitly_says_bullish_without_promising_certain_profit(self):
         section = sudden_pump_push_section(
@@ -112,6 +142,19 @@ class SuddenPumpScanTests(unittest.TestCase):
         self.assertIn("看涨 / 急速上涨确认", section)
         self.assertIn("高置信短线看涨", section)
         self.assertIn("高置信不等于必涨", section)
+
+    def test_pre_ignition_section_is_an_early_warning_not_a_bullish_confirmation(self):
+        item = bullish_pump_item(
+            stage_key="pre_ignition",
+            stage_label="极速预点火",
+            stage_rank=1,
+            stage_reason="当前5MIN前120秒已上涨11.00%。",
+            change_5m=11.0,
+        )
+        section = sudden_pump_push_section(item, "盘中连续两次确认")
+        self.assertIn("极速预点火 / 提前观察", section)
+        self.assertIn("不等于看涨确认", section)
+        self.assertNotIn("高置信短线看涨", section)
 
     def test_first_bullish_confirmation_pushes_even_when_phase_was_already_sent(self):
         item = bullish_pump_item()
@@ -161,9 +204,26 @@ class SuddenPumpScanTests(unittest.TestCase):
         mocked_create_validation.assert_not_called()
 
     def test_live_candle_requires_two_separate_confirmations(self):
-        self.assertFalse(sudden_pump_confirmation_ready("CYS/USDT", 1000, False, 10))
-        self.assertFalse(sudden_pump_confirmation_ready("CYS/USDT", 1000, False, 14))
-        self.assertTrue(sudden_pump_confirmation_ready("CYS/USDT", 1000, False, 16))
+        self.assertFalse(sudden_pump_confirmation_ready("CYS/USDT", 1000, False, 10, 100))
+        self.assertFalse(sudden_pump_confirmation_ready("CYS/USDT", 1000, False, 14, 104))
+        self.assertTrue(sudden_pump_confirmation_ready("CYS/USDT", 1000, False, 16, 106))
+        self.assertEqual(
+            SUDDEN_PUMP_CONFIRMATIONS[("CYS/USDT", 1000, "default")]["first_seen_epoch"], 100
+        )
+
+    def test_each_live_stage_requires_its_own_two_confirmations(self):
+        self.assertFalse(sudden_pump_confirmation_ready(
+            "FAST/USDT", 1000, False, 10, 100, "pre_ignition"
+        ))
+        self.assertTrue(sudden_pump_confirmation_ready(
+            "FAST/USDT", 1000, False, 16, 106, "pre_ignition"
+        ))
+        self.assertFalse(sudden_pump_confirmation_ready(
+            "FAST/USDT", 1000, False, 17, 107, "ignition"
+        ))
+        self.assertTrue(sudden_pump_confirmation_ready(
+            "FAST/USDT", 1000, False, 23, 113, "ignition"
+        ))
 
     def test_closed_candle_is_immediately_confirmed(self):
         self.assertTrue(sudden_pump_confirmation_ready("CYS/USDT", 1000, True, 10))

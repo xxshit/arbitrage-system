@@ -179,13 +179,13 @@ function showMarketRefreshCountdown(seconds){clearInterval(marketRefreshCountdow
 async function loadSpotFutures(manual=false){
   if(spotFuturesLoading)return;
   spotFuturesLoading=true;
-  const status=byId('spotFuturesUpdated'),bnOnly=byId('binanceSpotOnly').checked;
+  const status=byId('spotFuturesUpdated'),bnOnly=byId('binanceSpotOnly').checked,alphaOnly=byId('binanceAlphaOnly').checked;
   if(manual)status.textContent='正在读取已缓存的行情数据…';
   try{
-    const response=await fetch('/api/spot-futures?page='+spotFuturesPage+'&binance_spot_only='+(bnOnly?'1':'0')+'&funding_interval='+encodeURIComponent(spotFundingInterval)+'&symbol='+encodeURIComponent(spotFuturesSearch)+'&sort_by='+spotSort.key+'&sort_direction='+spotSort.direction);
+    const response=await fetch('/api/spot-futures?page='+spotFuturesPage+'&binance_spot_only='+(bnOnly?'1':'0')+'&binance_alpha_only='+(alphaOnly?'1':'0')+'&funding_interval='+encodeURIComponent(spotFundingInterval)+'&symbol='+encodeURIComponent(spotFuturesSearch)+'&sort_by='+spotSort.key+'&sort_direction='+spotSort.direction);
     const data=await response.json();
     if(!response.ok)throw new Error(data.error||'行情服务暂不可用');
-    destroyFloatingPopup();spotBasisOpenings=Object.fromEntries(data.symbols.map(group=>[group.symbol,group.basis_opening]));replaceHtmlKeepingExchangeLogos(byId('spotFuturesRows'),data.symbols.length?spotRows(data.symbols):'<tr><td colspan="11" class="loading">没有符合条件的交易对。</td></tr>');
+    destroyFloatingPopup();spotBasisOpenings=Object.fromEntries(data.symbols.map(group=>[group.symbol,group.basis_opening]));replaceHtmlKeepingExchangeLogos(byId('spotFuturesRows'),data.symbols.length?spotRows(data.symbols):`<tr><td colspan="11" class="loading">${alphaOnly?'当前条件下没有匹配的 Binance Alpha 币种。':'没有符合条件的交易对。'}</td></tr>`);
     spotFuturesHasData=true;
     updateSortHeaders();
     byId('pageInfo').textContent=`第 ${data.page} / ${data.pages} 页 · 共 ${data.total_symbols} 个币种`;
@@ -194,18 +194,19 @@ async function loadSpotFutures(manual=false){
     byId('previousPage').disabled=data.page<=1;
     byId('nextPage').disabled=data.page>=data.pages;
     const failed=Object.keys(data.errors||{});
-    const detail=failed.length?failed.join('、')+' 行情暂不可用':`已对全部 ${data.total_symbols} 个币种排序后分页 · 当前按 ${spotSortLabels[spotSort.key]} ${spotSort.direction==='desc'?'↓':'↑'} 排序`;
+    const alphaDetail=alphaOnly?` · Binance Alpha 目录${data.binance_alpha_catalog_stale?'沿用最近有效缓存':'已同步'}`:'';
+    const detail=(failed.length?failed.join('、')+' 行情暂不可用':`已对全部 ${data.total_symbols} 个币种排序后分页 · 当前按 ${spotSortLabels[spotSort.key]} ${spotSort.direction==='desc'?'↓':'↑'} 排序`)+alphaDetail;
     status.textContent=`最近更新 ${data.updated_at} · ${detail}`;
     showMarketRefreshCountdown(data.next_refresh_in_seconds);
   }catch(error){
     if(!spotFuturesHasData)byId('spotFuturesRows').innerHTML=`<tr><td colspan="11" class="loading">${error.message}</td></tr>`;
-    status.textContent=spotFuturesHasData?'本次更新失败，已保留上一组有效数据。':error.message;
+    status.textContent=spotFuturesHasData?`${error.message}，已保留上一组有效数据。`:error.message;
   }finally{spotFuturesLoading=false}
 }
 function groupSortValue(group){const rows=group.rows;if(spotSort.key==='open_spread'||spotSort.key==='close_spread')return Math.max(...rows.map(row=>Number(row[spotSort.key])));return Number(rows[0][spotSort.key])}
 function sortGroups(groups){return [...groups].sort((a,b)=>{const delta=groupSortValue(a)-groupSortValue(b);return spotSort.direction==='desc'?-delta:delta})}
 function spotSortPickerMarkup(){return `<div class="spot-sort-picker"><label><span>排序</span><select id="spotSortSelect" onchange="setSpotSortFromPicker(this.value)">${spotSortOptions.map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select></label><button id="spotSortDirection" type="button" onclick="toggleSpotSortDirection()">从高到低 ↓</button></div>`}
-function configureSpotLayoutShell(){const view=byId('spot-futures'),title=view?.querySelector('.panel-title>div:first-child');if(title&&!byId('spotSortSelect')){title.classList.add('spot-title-group');title.querySelector('h2')?.insertAdjacentHTML('afterend',spotSortPickerMarkup())}view?.querySelector('.change-sort-controls')?.remove();view?.querySelector('.funding-sort-controls')?.remove();view?.querySelector('.sort-state-row')?.remove();view?.querySelectorAll('thead .sort-header').forEach(button=>{const th=button.closest('th');if(th&&th.children.length===1)th.textContent=spotSortLabels[button.dataset.sort]||button.textContent});updateSortHeaders()}
+function configureSpotLayoutShell(){const view=byId('spot-futures'),title=view?.querySelector('.panel-title>div:first-child'),bnFilter=byId('binanceSpotOnly');if(title&&!byId('spotSortSelect')){title.classList.add('spot-title-group');title.querySelector('h2')?.insertAdjacentHTML('afterend',spotSortPickerMarkup())}if(bnFilter&&!byId('binanceAlphaOnly'))bnFilter.closest('label')?.insertAdjacentHTML('afterend','<label class="filter-check"><input id="binanceAlphaOnly" type="checkbox" onchange="setBinanceAlphaFilter()"> 只看 Binance Alpha</label>');view?.querySelector('.change-sort-controls')?.remove();view?.querySelector('.funding-sort-controls')?.remove();view?.querySelector('.sort-state-row')?.remove();view?.querySelectorAll('thead .sort-header').forEach(button=>{const th=button.closest('th');if(th&&th.children.length===1)th.textContent=spotSortLabels[button.dataset.sort]||button.textContent});updateSortHeaders()}
 function updateSortHeaders(){document.querySelectorAll('.sort-header').forEach(button=>{const active=button.dataset.sort===spotSort.key;button.classList.toggle('active',active);button.textContent=button.textContent.replace(/ [↑↓]$/,'')+(active?(spotSort.direction==='desc'?' ↓':' ↑'):'')});const select=byId('spotSortSelect'),direction=byId('spotSortDirection');if(select)select.value=spotSort.key;if(direction)direction.textContent=spotSort.direction==='desc'?'从高到低 ↓':'从低到高 ↑'}
 function setSpotSortFromPicker(key){if(!Object.prototype.hasOwnProperty.call(spotSortLabels,key))return;spotSort={key,direction:'desc'};spotFuturesPage=1;updateSortHeaders();loadSpotFutures(true)}
 function toggleSpotSortDirection(){spotSort={key:spotSort.key,direction:spotSort.direction==='desc'?'asc':'desc'};spotFuturesPage=1;updateSortHeaders();loadSpotFutures(true)}
@@ -213,6 +214,7 @@ function setSpotSort(key){spotSort=spotSort.key===key?{key,direction:spotSort.di
 function changeSpotFuturesPage(change){spotFuturesPage=Math.max(1,spotFuturesPage+change);loadSpotFutures(true)}
 function selectSpotFuturesPage(page){spotFuturesPage=Math.max(1,Number(page)||1);loadSpotFutures(true)}
 function setBinanceSpotFilter(){spotFuturesPage=1;loadSpotFutures(true)}
+function setBinanceAlphaFilter(){spotFuturesPage=1;loadSpotFutures(true)}
 function setSpotFundingInterval(interval){spotFundingInterval=interval;spotFuturesPage=1;document.querySelectorAll('.spot-period-filter').forEach(button=>button.classList.toggle('active',button.dataset.spotPeriod===interval));loadSpotFutures(true)}
 async function loadSymbolSuggestions(scope,query){const panel=byId(scope+'Suggestions'),requestId=++suggestionRequest,normalized=query.trim();if(!normalized){panel.innerHTML='';panel.classList.add('hidden');return}try{const response=await fetch('/api/symbol-suggestions?q='+encodeURIComponent(normalized));const data=await response.json();if(requestId!==suggestionRequest)return;panel.innerHTML=data.items.length?data.items.map(item=>`<button type="button" class="symbol-suggestion" onclick="selectSymbolSuggestion('${scope}','${item.symbol}','${item.label}')"><span>${item.name||item.symbol.split('/')[0]}</span><small>${item.symbol}${item.live?'':' · 暂无当前行情'}</small></button>`).join(''):'<p class="no-suggestion">没有匹配的币种</p>';panel.classList.remove('hidden')}catch(error){if(requestId!==suggestionRequest)return;panel.innerHTML='';panel.classList.add('hidden')}}
 function closeSuggestionPanels(event){if(!event.target.closest('.search-suggest-wrap'))document.querySelectorAll('.search-suggest-wrap .symbol-suggestions').forEach(panel=>{panel.innerHTML='';panel.classList.add('hidden')});if(!event.target.closest('.thought-watch-add-search')){const panel=byId('thoughtWatchAddSuggestions');if(panel){panel.innerHTML='';panel.classList.add('hidden')}}}

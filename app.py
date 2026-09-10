@@ -923,6 +923,10 @@ OKX_FUNDING_CACHE = {}
 OKX_FUNDING_CURSOR = 0
 BINANCE_OPEN_INTEREST_CACHE = {}
 BINANCE_OPEN_INTEREST_CURSOR = 0
+BINANCE_ALPHA_TOKEN_LIST_URL = "https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/cex/alpha/all/token/list"
+BINANCE_ALPHA_CATALOG_TTL_SECONDS = 10 * 60
+BINANCE_ALPHA_CATALOG_CACHE = {"symbols": frozenset(), "expires_at": 0.0, "updated_at": None}
+BINANCE_ALPHA_CATALOG_LOCK = threading.Lock()
 RWA_STOCK_SYMBOLS = set()
 STATIC_RWA_STOCK_SYMBOLS = {
     # Binance/partner TradFi perpetuals are sometimes unavailable in exchangeInfo during partial refreshes.
@@ -1109,6 +1113,46 @@ def pair_base(symbol):
 def pair_slash(symbol):
     compact = compact_pair(symbol)
     return f"{compact[:-4]}/USDT" if compact.endswith("USDT") else str(symbol or "").upper()
+
+
+def parse_binance_alpha_symbols(payload):
+    """Return currently visible Binance Alpha token symbols from the public catalog."""
+    items = payload.get("data", []) if isinstance(payload, dict) else []
+    if not isinstance(items, list):
+        return frozenset()
+    return frozenset(
+        str(item.get("symbol") or "").strip().upper()
+        for item in items
+        if isinstance(item, dict) and item.get("symbol") and item.get("offline") is not True
+    )
+
+
+def load_binance_alpha_symbols(force=False):
+    """Refresh Alpha membership at low frequency and keep the last valid catalog on errors."""
+    now = time.monotonic()
+    with BINANCE_ALPHA_CATALOG_LOCK:
+        cached = BINANCE_ALPHA_CATALOG_CACHE["symbols"]
+        if not force and cached and now < BINANCE_ALPHA_CATALOG_CACHE["expires_at"]:
+            return cached, BINANCE_ALPHA_CATALOG_CACHE["updated_at"], False
+        try:
+            symbols = parse_binance_alpha_symbols(get_json(BINANCE_ALPHA_TOKEN_LIST_URL, timeout=4))
+            if not symbols:
+                raise RuntimeError("Binance Alpha 币种目录为空")
+            updated_at = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            BINANCE_ALPHA_CATALOG_CACHE.update({
+                "symbols": symbols,
+                "expires_at": now + BINANCE_ALPHA_CATALOG_TTL_SECONDS,
+                "updated_at": updated_at,
+            })
+            return symbols, updated_at, False
+        except Exception:
+            if cached:
+                return cached, BINANCE_ALPHA_CATALOG_CACHE["updated_at"], True
+            raise RuntimeError("Binance Alpha 币种目录暂时不可用，请稍后再试。")
+
+
+def is_binance_alpha_symbol(symbol, alpha_symbols):
+    return any(candidate in alpha_symbols for candidate in delisting_base_candidates(symbol))
 
 
 def alias_scope_matches(row, exchange=None, market_type=None):
@@ -6572,6 +6616,7 @@ def spot_futures():
     page = max(request.args.get("page", 1, type=int), 1)
     page_size = 30
     binance_spot_only = request.args.get("binance_spot_only") == "1"
+    binance_alpha_only = request.args.get("binance_alpha_only") == "1"
     funding_interval = request.args.get("funding_interval", "all").upper()
     if funding_interval not in {"ALL", "1H", "4H", "8H"}:
         funding_interval = "ALL"
@@ -6604,6 +6649,14 @@ def spot_futures():
         ]
     if binance_spot_only:
         symbols = [group for group in symbols if any(row["long_exchange"] == "Binance" for row in group["rows"])]
+    alpha_catalog_updated_at = None
+    alpha_catalog_stale = False
+    if binance_alpha_only:
+        try:
+            alpha_symbols, alpha_catalog_updated_at, alpha_catalog_stale = load_binance_alpha_symbols()
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 503
+        symbols = [group for group in symbols if is_binance_alpha_symbol(group["symbol"], alpha_symbols)]
     if symbol_query:
         symbols = [
             group for group in symbols
@@ -6622,7 +6675,7 @@ def spot_futures():
     page = min(page, pages)
     start = (page - 1) * page_size
     page_symbols = symbols[start:start + page_size]
-    payload = {**snapshot, "page": page, "pages": pages, "page_size": page_size, "total_symbols": total, "binance_spot_only": binance_spot_only, "funding_interval": funding_interval, "symbol_query": symbol_query, "sort_by": sort_by, "sort_direction": sort_direction, "symbols": page_symbols}
+    payload = {**snapshot, "page": page, "pages": pages, "page_size": page_size, "total_symbols": total, "binance_spot_only": binance_spot_only, "binance_alpha_only": binance_alpha_only, "binance_alpha_catalog_updated_at": alpha_catalog_updated_at, "binance_alpha_catalog_stale": alpha_catalog_stale, "funding_interval": funding_interval, "symbol_query": symbol_query, "sort_by": sort_by, "sort_direction": sort_direction, "symbols": page_symbols}
     return jsonify(payload)
 
 

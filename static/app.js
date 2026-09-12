@@ -706,19 +706,17 @@ const pageRefreshControllers=new Map();
 let pageRefreshIndicatorTimer=null;
 function pageRefreshState(viewId){if(!pageRefreshStates.has(viewId))pageRefreshStates.set(viewId,{seconds:Number(pageRefreshProfiles[viewId]?.seconds)||0,inFlight:0,completedAt:0,cycleStartedAt:Date.now()});return pageRefreshStates.get(viewId)}
 function refreshIntervalLabel(seconds){const value=Math.max(0,Number(seconds)||0);if(value>=60&&value%60===0)return `${value/60}分钟`;return `${value}秒`}
-function refreshRemainingLabel(seconds){const value=Math.max(0,Math.ceil(seconds));if(value>=60)return `${Math.floor(value/60)}分${String(value%60).padStart(2,'0')}秒`;return `${value}秒`}
 function setPageRefreshInterval(viewId,seconds){const state=pageRefreshState(viewId),next=Math.max(0,Number(seconds)||0);if(state.seconds!==next){state.seconds=next;state.cycleStartedAt=Date.now()}if(viewId===activeViewId())renderPageRefreshIndicator(viewId)}
 function renderPageRefreshIndicator(viewId=activeViewId()){
   const profile=pageRefreshProfiles[viewId]||{label:'当前页面',seconds:0},state=pageRefreshState(viewId),status=byId('updated'),ring=document.querySelector('main>header .status .pulse');
   if(!status||!ring)return;
-  const now=Date.now(),duration=Math.max(0,state.seconds)*1000,elapsed=Math.max(0,now-state.cycleStartedAt),progress=state.inFlight?1:(duration?Math.min(1,elapsed/duration):0),remaining=duration?Math.max(0,(duration-elapsed)/1000):0,last=state.completedAt?new Date(state.completedAt).toLocaleTimeString('zh-CN',{hour12:false}):'';
+  const now=Date.now(),duration=Math.max(0,state.seconds)*1000,elapsed=Math.max(0,now-state.cycleStartedAt),progress=state.inFlight?1:(duration?Math.min(1,elapsed/duration):0),last=state.completedAt?new Date(state.completedAt).toLocaleTimeString('zh-CN',{hour12:false}):'';
   ring.classList.add('refresh-progress-ring');ring.classList.toggle('refreshing',state.inFlight>0);ring.classList.toggle('manual',!duration);ring.style.setProperty('--refresh-angle',`${progress*360}deg`);
   ring.setAttribute('role','progressbar');ring.setAttribute('aria-valuemin','0');ring.setAttribute('aria-valuemax','100');ring.setAttribute('aria-valuenow',String(Math.round(progress*100)));
-  if(state.inFlight)status.textContent=`${profile.label} · 正在刷新…`;
-  else if(!last)status.textContent=`${profile.label} · 等待首次刷新${duration?` · 每${refreshIntervalLabel(state.seconds)}`:' · 手动刷新'}`;
-  else if(duration)status.textContent=`${profile.label} · 最近刷新 ${last} · ${remaining>0?`下次 ${refreshRemainingLabel(remaining)}`:'即将刷新'}`;
-  else status.textContent=`${profile.label} · 最近刷新 ${last} · 手动刷新`;
-  ring.title=duration?`顺时针填满后刷新 · 间隔 ${refreshIntervalLabel(state.seconds)}`:'此页面只在进入或手动点击时刷新';
+  const statusText=!last?`${profile.label} · 等待首次刷新${duration?'':' · 手动刷新'}`:`${profile.label} · 最近刷新 ${last}${duration?'':' · 手动刷新'}`;
+  if(status.textContent!==statusText)status.textContent=statusText;
+  ring.setAttribute('aria-valuetext',state.inFlight?'正在刷新':(duration?`刷新周期已进行 ${Math.round(progress*100)}%`:'手动刷新'));
+  ring.title=state.inFlight?'正在刷新':(duration?`顺时针填满后刷新 · 间隔 ${refreshIntervalLabel(state.seconds)}`:'此页面只在进入或手动点击时刷新');
 }
 function beginPageRefresh(viewId){const state=pageRefreshState(viewId);state.inFlight+=1;renderPageRefreshIndicator(viewId)}
 function finishPageRefresh(viewId){const state=pageRefreshState(viewId);state.inFlight=Math.max(0,state.inFlight-1);if(!state.inFlight){state.completedAt=Date.now();state.cycleStartedAt=state.completedAt;pageRefreshControllers.get(viewId)?.schedule()}renderPageRefreshIndicator(viewId)}

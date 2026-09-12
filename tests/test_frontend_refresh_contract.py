@@ -38,12 +38,15 @@ class FrontendRefreshContractTests(unittest.TestCase):
         finish = function_source("finishPageRefresh", "installPageRefreshTracking")
         install = function_source("installPageRefreshTracking", "startConfiguredPageTimers")
         self.assertIn("progress*360", render)
-        self.assertIn("refreshRemainingLabel", render)
+        self.assertNotIn("下次", render)
+        self.assertNotIn("即将刷新", render)
+        self.assertIn("if(status.textContent!==statusText)", render)
         self.assertIn("state.completedAt=Date.now()", finish)
         self.assertIn("state.cycleStartedAt=state.completedAt", finish)
         self.assertIn("try{return await original.apply(this,args)}finally{finishPageRefresh(viewId)}", install)
         self.assertIn("conic-gradient(from -90deg", STYLE_CSS)
         self.assertIn("--refresh-angle", STYLE_CSS)
+        self.assertIn("align-self:stretch", STYLE_CSS)
 
     def test_auto_refresh_waits_for_completion_before_next_cycle(self):
         start = APP_JS.index("async function startConfiguredPageTimers")
@@ -53,7 +56,7 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertIn("finally{if(!controller.stopped)controller.schedule()}", source)
         self.assertIn("setTimeout", source)
         self.assertNotIn("setInterval(callback", source)
-        self.assertIn("20260912-page-refresh-ring", INDEX_HTML)
+        self.assertIn("20260912-stable-refresh-ring", INDEX_HTML)
 
     def test_clearing_search_invalidates_inflight_suggestion_request(self):
         source = function_source("loadSymbolSuggestions", "closeSuggestionPanels")

@@ -680,9 +680,62 @@ document.addEventListener('touchmove',event=>{if(!tradeChartDrag||!event.touches
 document.addEventListener('touchend',tradeChartDragEnd);
 document.addEventListener('wheel',event=>{const scroller=event.target.closest?.('.trade-chart-scroll');if(!scroller)return;event.preventDefault();const current=Number(scroller.dataset.offset)||0;tradeChartSetOffset(scroller,current+(Math.abs(event.deltaY)>Math.abs(event.deltaX)?event.deltaY:event.deltaX))},{passive:false});
 const activeViewId=()=>document.querySelector('.view.active')?.id||'dashboard';
+const pageRefreshProfiles={
+  dashboard:{label:'套利看板',seconds:5,names:['loadDashboard']},
+  'onchain-opportunities':{label:'链上机会',seconds:300,names:['loadOnchainOpportunities']},
+  'spot-futures':{label:'现多期空',seconds:5,names:['loadSpotFutures']},
+  'dual-futures':{label:'期多期空',seconds:5,names:['loadDualFutures']},
+  thinking:{label:'套利思维',seconds:30,names:['loadSimpleThinking']},
+  'funding-trend':{label:'主升正资费榜',seconds:60,names:['loadFundingTrend']},
+  'trade-validation':{label:'趋势验证',seconds:30,names:['loadTradeValidation']},
+  alerts:{label:'报警中心',seconds:5,names:['loadAlerts']},
+  'daily-thoughts':{label:'思路分析',seconds:300,names:['loadThoughtAnalysis']},
+  chat:{label:'协作记录',seconds:3,names:['loadChat','loadChatUsers']},
+  'security-notifications':{label:'安全通知',seconds:30,names:['loadSecurityAlerts']},
+  'daily-trends':{label:'趋势推送',seconds:0,names:['loadDailyTrends']},
+  'daily-listings':{label:'上下架信息',seconds:0,names:['loadDailyListings']},
+  strategies:{label:'策略管理',seconds:0,names:['loadStrategies']},
+  'token-hedge':{label:'官方动态与解锁',seconds:0,names:['loadTokenHedgeProfiles']},
+  'runtime-rules':{label:'运行规则',seconds:0,names:['loadRuntimeRules']},
+  'account-management':{label:'账号管理',seconds:0,names:['loadAccountManagement']},
+  'gainers-losers':{label:'涨跌幅榜',seconds:0,names:['loadGainers']},
+  risk:{label:'风险说明',seconds:0,names:[]},
+};
+const pageRefreshStates=new Map();
+const pageRefreshControllers=new Map();
+let pageRefreshIndicatorTimer=null;
+function pageRefreshState(viewId){if(!pageRefreshStates.has(viewId))pageRefreshStates.set(viewId,{seconds:Number(pageRefreshProfiles[viewId]?.seconds)||0,inFlight:0,completedAt:0,cycleStartedAt:Date.now()});return pageRefreshStates.get(viewId)}
+function refreshIntervalLabel(seconds){const value=Math.max(0,Number(seconds)||0);if(value>=60&&value%60===0)return `${value/60}分钟`;return `${value}秒`}
+function refreshRemainingLabel(seconds){const value=Math.max(0,Math.ceil(seconds));if(value>=60)return `${Math.floor(value/60)}分${String(value%60).padStart(2,'0')}秒`;return `${value}秒`}
+function setPageRefreshInterval(viewId,seconds){const state=pageRefreshState(viewId),next=Math.max(0,Number(seconds)||0);if(state.seconds!==next){state.seconds=next;state.cycleStartedAt=Date.now()}if(viewId===activeViewId())renderPageRefreshIndicator(viewId)}
+function renderPageRefreshIndicator(viewId=activeViewId()){
+  const profile=pageRefreshProfiles[viewId]||{label:'当前页面',seconds:0},state=pageRefreshState(viewId),status=byId('updated'),ring=document.querySelector('main>header .status .pulse');
+  if(!status||!ring)return;
+  const now=Date.now(),duration=Math.max(0,state.seconds)*1000,elapsed=Math.max(0,now-state.cycleStartedAt),progress=state.inFlight?1:(duration?Math.min(1,elapsed/duration):0),remaining=duration?Math.max(0,(duration-elapsed)/1000):0,last=state.completedAt?new Date(state.completedAt).toLocaleTimeString('zh-CN',{hour12:false}):'';
+  ring.classList.add('refresh-progress-ring');ring.classList.toggle('refreshing',state.inFlight>0);ring.classList.toggle('manual',!duration);ring.style.setProperty('--refresh-angle',`${progress*360}deg`);
+  ring.setAttribute('role','progressbar');ring.setAttribute('aria-valuemin','0');ring.setAttribute('aria-valuemax','100');ring.setAttribute('aria-valuenow',String(Math.round(progress*100)));
+  if(state.inFlight)status.textContent=`${profile.label} · 正在刷新…`;
+  else if(!last)status.textContent=`${profile.label} · 等待首次刷新${duration?` · 每${refreshIntervalLabel(state.seconds)}`:' · 手动刷新'}`;
+  else if(duration)status.textContent=`${profile.label} · 最近刷新 ${last} · ${remaining>0?`下次 ${refreshRemainingLabel(remaining)}`:'即将刷新'}`;
+  else status.textContent=`${profile.label} · 最近刷新 ${last} · 手动刷新`;
+  ring.title=duration?`顺时针填满后刷新 · 间隔 ${refreshIntervalLabel(state.seconds)}`:'此页面只在进入或手动点击时刷新';
+}
+function beginPageRefresh(viewId){const state=pageRefreshState(viewId);state.inFlight+=1;renderPageRefreshIndicator(viewId)}
+function finishPageRefresh(viewId){const state=pageRefreshState(viewId);state.inFlight=Math.max(0,state.inFlight-1);if(!state.inFlight){state.completedAt=Date.now();state.cycleStartedAt=state.completedAt;pageRefreshControllers.get(viewId)?.schedule()}renderPageRefreshIndicator(viewId)}
+function installPageRefreshTracking(){
+  Object.entries(pageRefreshProfiles).forEach(([viewId,profile])=>profile.names.forEach(name=>{const original=window[name];if(typeof original!=='function'||original.pageRefreshTracked)return;const tracked=async function(...args){beginPageRefresh(viewId);try{return await original.apply(this,args)}finally{finishPageRefresh(viewId)}};tracked.pageRefreshTracked=true;window[name]=tracked}));
+  document.querySelectorAll('nav a[data-view]').forEach(link=>link.addEventListener('click',()=>renderPageRefreshIndicator(link.dataset.view)));
+  clearInterval(pageRefreshIndicatorTimer);pageRefreshIndicatorTimer=setInterval(()=>renderPageRefreshIndicator(),100);renderPageRefreshIndicator();
+}
 let configuredPageTimers=[];
-async function startConfiguredPageTimers(){configuredPageTimers.forEach(clearInterval);configuredPageTimers=[];let values={spot_market_refresh:5,dual_market_refresh:5,browser_alert_refresh:5,thought_watch_scan:300,onchain_opportunity_refresh:300};try{const data=await (await fetch('/api/runtime-rules')).json();data.items?.forEach(item=>{if(item.enabled&&Number(item.value)>0)values[item.key]=Number(item.value)})}catch(error){}const every=(seconds,callback)=>configuredPageTimers.push(setInterval(callback,Math.max(2,seconds)*1000));every(values.spot_market_refresh,()=>{if(activeViewId()==='dashboard')loadDashboard()});every(values.spot_market_refresh,()=>{if(activeViewId()==='spot-futures')loadSpotFutures()});every(values.dual_market_refresh,()=>{if(activeViewId()==='dual-futures')loadDualFutures()});every(values.onchain_opportunity_refresh,()=>{if(activeViewId()==='onchain-opportunities')loadOnchainOpportunities()});every(values.browser_alert_refresh,loadAlerts);every(30,()=>{if(activeViewId()==='thinking')loadSimpleThinking()});every(60,()=>{if(activeViewId()==='funding-trend')loadFundingTrend()});every(30,()=>{if(activeViewId()==='trade-validation')loadTradeValidation()});every(30,()=>{if(authState.is_admin)loadSecurityAlerts(false)});every(values.thought_watch_scan,()=>{if(activeViewId()==='daily-thoughts')loadThoughtAnalysis()});every(300,()=>loadDelistedMarketSymbols(true))}
+async function startConfiguredPageTimers(){
+  configuredPageTimers.forEach(controller=>{controller.stopped=true;clearTimeout(controller.timer)});configuredPageTimers=[];pageRefreshControllers.clear();
+  let values={spot_market_refresh:5,dual_market_refresh:5,browser_alert_refresh:5,thought_watch_scan:300,onchain_opportunity_refresh:300};try{const data=await (await fetch('/api/runtime-rules')).json();data.items?.forEach(item=>{if(item.enabled&&Number(item.value)>0)values[item.key]=Number(item.value)})}catch(error){}
+  const every=(viewId,seconds,callback,allowed=()=>true)=>{const delay=Math.max(2,Number(seconds)||0)*1000,controller={timer:null,stopped:false,schedule:null};setPageRefreshInterval(viewId,delay/1000);controller.schedule=()=>{if(controller.stopped)return;clearTimeout(controller.timer);controller.timer=setTimeout(async()=>{if(controller.stopped)return;try{if(allowed())await callback()}catch(error){}finally{if(!controller.stopped)controller.schedule()}},delay)};configuredPageTimers.push(controller);pageRefreshControllers.set(viewId,controller);controller.schedule()};
+  every('dashboard',values.spot_market_refresh,()=>loadDashboard(),()=>activeViewId()==='dashboard');every('spot-futures',values.spot_market_refresh,()=>loadSpotFutures(),()=>activeViewId()==='spot-futures');every('dual-futures',values.dual_market_refresh,()=>loadDualFutures(),()=>activeViewId()==='dual-futures');every('onchain-opportunities',values.onchain_opportunity_refresh,()=>loadOnchainOpportunities(),()=>activeViewId()==='onchain-opportunities');every('alerts',values.browser_alert_refresh,()=>loadAlerts());every('thinking',30,()=>loadSimpleThinking(),()=>activeViewId()==='thinking');every('funding-trend',60,()=>loadFundingTrend(),()=>activeViewId()==='funding-trend');every('trade-validation',30,()=>loadTradeValidation(),()=>activeViewId()==='trade-validation');every('security-notifications',30,()=>loadSecurityAlerts(false),()=>authState.is_admin);every('daily-thoughts',values.thought_watch_scan,()=>loadThoughtAnalysis(),()=>activeViewId()==='daily-thoughts');
+  const metadataController={timer:null,stopped:false};const scheduleMetadata=()=>{if(metadataController.stopped)return;metadataController.timer=setTimeout(async()=>{try{await loadDelistedMarketSymbols(true)}finally{scheduleMetadata()}},300000)};configuredPageTimers.push(metadataController);scheduleMetadata();
+}
 const delistingWarningObserver=new MutationObserver(records=>records.forEach(record=>record.addedNodes.forEach(node=>{if(node.nodeType===Node.ELEMENT_NODE)applyDelistingWarnings(node)})));
 delistingWarningObserver.observe(document.body,{childList:true,subtree:true});
-syncMobileViewportHeight();updateMobileViewTitle(document.querySelector('aside nav a.active'),activeViewId());syncMobileViewState(activeViewId());loadAuthState().then(async()=>{if(!await ensureCurrentDeviceBinding())return;setupChatPush();loadChatUsers().then(startChatPolling).catch(()=>{});if(authState.is_admin)loadSecurityAlerts(false)});navigator.serviceWorker?.addEventListener('message',event=>{if(event.data?.type!=='chat-push-received')return;loadChatUsers().catch(()=>{});if(chatPeerId)loadChatMessages('newer').catch(()=>{})});updateSidebarSubnav(activeViewId());renderGainersShell();configureSpotLayoutShell();renderDualFuturesShell();configureDualLayoutShell();ensureDualFundingHistoryHeader();addDualLiquidityHeader();addDualBasisSortControls();addBasisOpeningHeaders();installGroupFrameObservers();updateSoundControls();updateSortHeaders();updateDualSortHeaders();loadDelistedMarketSymbols().finally(loadDashboard);loadAlerts(true);startConfiguredPageTimers();
+installPageRefreshTracking();syncMobileViewportHeight();updateMobileViewTitle(document.querySelector('aside nav a.active'),activeViewId());syncMobileViewState(activeViewId());loadAuthState().then(async()=>{if(!await ensureCurrentDeviceBinding())return;setupChatPush();loadChatUsers().then(startChatPolling).catch(()=>{});if(authState.is_admin)loadSecurityAlerts(false)});navigator.serviceWorker?.addEventListener('message',event=>{if(event.data?.type!=='chat-push-received')return;loadChatUsers().catch(()=>{});if(chatPeerId)loadChatMessages('newer').catch(()=>{})});updateSidebarSubnav(activeViewId());renderGainersShell();configureSpotLayoutShell();renderDualFuturesShell();configureDualLayoutShell();ensureDualFundingHistoryHeader();addDualLiquidityHeader();addDualBasisSortControls();addBasisOpeningHeaders();installGroupFrameObservers();updateSoundControls();updateSortHeaders();updateDualSortHeaders();loadDelistedMarketSymbols().finally(loadDashboard);loadAlerts(true);startConfiguredPageTimers();
 document.addEventListener('click',event=>{if(event.target.id==='symbolDetailModal')closeSymbolDetail()});

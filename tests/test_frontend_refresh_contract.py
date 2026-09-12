@@ -14,6 +14,47 @@ def function_source(name, next_name):
 
 
 class FrontendRefreshContractTests(unittest.TestCase):
+    def test_every_view_has_a_refresh_progress_profile(self):
+        view_ids = set()
+        marker = 'data-view="'
+        cursor = 0
+        while True:
+            cursor = INDEX_HTML.find(marker, cursor)
+            if cursor < 0:
+                break
+            start = cursor + len(marker)
+            end = INDEX_HTML.index('"', start)
+            view_ids.add(INDEX_HTML[start:end])
+            cursor = end + 1
+
+        profile_start = APP_JS.index("const pageRefreshProfiles=")
+        profile_end = APP_JS.index("const pageRefreshStates=", profile_start)
+        profiles = APP_JS[profile_start:profile_end]
+        for view_id in view_ids:
+            self.assertIn(view_id, profiles)
+
+    def test_refresh_ring_fills_clockwise_and_resets_after_request_finishes(self):
+        render = function_source("renderPageRefreshIndicator", "beginPageRefresh")
+        finish = function_source("finishPageRefresh", "installPageRefreshTracking")
+        install = function_source("installPageRefreshTracking", "startConfiguredPageTimers")
+        self.assertIn("progress*360", render)
+        self.assertIn("refreshRemainingLabel", render)
+        self.assertIn("state.completedAt=Date.now()", finish)
+        self.assertIn("state.cycleStartedAt=state.completedAt", finish)
+        self.assertIn("try{return await original.apply(this,args)}finally{finishPageRefresh(viewId)}", install)
+        self.assertIn("conic-gradient(from -90deg", STYLE_CSS)
+        self.assertIn("--refresh-angle", STYLE_CSS)
+
+    def test_auto_refresh_waits_for_completion_before_next_cycle(self):
+        start = APP_JS.index("async function startConfiguredPageTimers")
+        end = APP_JS.index("const delistingWarningObserver", start)
+        source = APP_JS[start:end]
+        self.assertIn("await callback()", source)
+        self.assertIn("finally{if(!controller.stopped)controller.schedule()}", source)
+        self.assertIn("setTimeout", source)
+        self.assertNotIn("setInterval(callback", source)
+        self.assertIn("20260912-page-refresh-ring", INDEX_HTML)
+
     def test_clearing_search_invalidates_inflight_suggestion_request(self):
         source = function_source("loadSymbolSuggestions", "closeSuggestionPanels")
         self.assertLess(source.index("requestId=++suggestionRequest"), source.index("if(!normalized)"))

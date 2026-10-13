@@ -56,7 +56,7 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertIn("finally{if(!controller.stopped)controller.schedule()}", source)
         self.assertIn("setTimeout", source)
         self.assertNotIn("setInterval(callback", source)
-        self.assertIn("20260912-stable-refresh-ring", INDEX_HTML)
+        self.assertIn("20261013-hedge-positions", INDEX_HTML)
 
     def test_clearing_search_invalidates_inflight_suggestion_request(self):
         source = function_source("loadSymbolSuggestions", "closeSuggestionPanels")
@@ -123,7 +123,7 @@ class FrontendRefreshContractTests(unittest.TestCase):
 
     def test_dual_group_divider_matches_five_column_layout(self):
         source = function_source("applyGroupFrameClasses", "installGroupFrameObservers")
-        self.assertIn("columns=prefix==='spot'?11:5", source)
+        self.assertIn("columns=prefix==='spot'?12:5", source)
 
     def test_symbol_detail_funding_query_uses_dates_and_both_exchange_sides(self):
         request_source = function_source("detailFundingRequest", "fundingEventLegs")

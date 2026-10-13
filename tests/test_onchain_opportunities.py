@@ -118,7 +118,7 @@ class OnchainOpportunityTests(unittest.TestCase):
         self.assertIn(".onchain-opportunity-card", STYLE_CSS)
         self.assertIn(".onchain-change-grid{display:grid;grid-template-columns:repeat(2", STYLE_CSS)
         self.assertIn("overflow-wrap:anywhere", STYLE_CSS)
-        self.assertIn("20260906-onchain-price-layout", INDEX_HTML)
+        self.assertIn("20261013-hedge-positions", INDEX_HTML)
         self.assertIn("@media(max-width:760px)", STYLE_CSS)
 
 

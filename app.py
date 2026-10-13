@@ -720,6 +720,41 @@ class UserAccount(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
+class HedgePosition(db.Model):
+    """One complete spot-long / perpetual-short hedge owned by one account."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    symbol = db.Column(db.String(30), nullable=False, index=True)
+    spot_exchange = db.Column(db.String(30), nullable=False)
+    futures_exchange = db.Column(db.String(30), nullable=False, default="Binance")
+    source = db.Column(db.String(20), nullable=False, default="web")
+    execution_mode = db.Column(db.String(20), nullable=False, default="live")
+    status = db.Column(db.String(20), nullable=False, default="pending", index=True)
+    quote_amount = db.Column(db.Float)
+    leverage = db.Column(db.Float, nullable=False, default=1.0)
+    spot_quantity = db.Column(db.Float)
+    futures_quantity = db.Column(db.Float)
+    spot_entry_price = db.Column(db.Float)
+    futures_entry_price = db.Column(db.Float)
+    spot_exit_price = db.Column(db.Float)
+    futures_exit_price = db.Column(db.Float)
+    spot_notional = db.Column(db.Float)
+    futures_notional = db.Column(db.Float)
+    hedge_gap_usdt = db.Column(db.Float)
+    opening_spread = db.Column(db.Float)
+    funding_rate_open = db.Column(db.Float)
+    funding_income = db.Column(db.Float, nullable=False, default=0.0)
+    spot_fee = db.Column(db.Float, nullable=False, default=0.0)
+    futures_fee = db.Column(db.Float, nullable=False, default=0.0)
+    realized_pnl = db.Column(db.Float, nullable=False, default=0.0)
+    spot_order_id = db.Column(db.String(80))
+    futures_order_id = db.Column(db.String(80))
+    opened_at = db.Column(db.DateTime)
+    closed_at = db.Column(db.DateTime)
+    created_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, index=True)
+    updated_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False, onupdate=utc_now_naive)
+
+
 class AccountSecurityEvent(db.Model):
     """Password and session security audit without ever storing password material."""
     id = db.Column(db.Integer, primary_key=True)
@@ -6677,6 +6712,92 @@ def spot_futures():
     page_symbols = symbols[start:start + page_size]
     payload = {**snapshot, "page": page, "pages": pages, "page_size": page_size, "total_symbols": total, "binance_spot_only": binance_spot_only, "binance_alpha_only": binance_alpha_only, "binance_alpha_catalog_updated_at": alpha_catalog_updated_at, "binance_alpha_catalog_stale": alpha_catalog_stale, "funding_interval": funding_interval, "symbol_query": symbol_query, "sort_by": sort_by, "sort_direction": sort_direction, "symbols": page_symbols}
     return jsonify(payload)
+
+
+HEDGE_CURRENT_STATUSES = {"pending", "opening", "open", "closing", "attention"}
+HEDGE_STATUS_LABELS = {
+    "pending": "待执行",
+    "opening": "建仓中",
+    "open": "持仓中",
+    "closing": "平仓中",
+    "attention": "需要处理",
+    "closed": "已平仓",
+    "cancelled": "已取消",
+    "failed": "执行失败",
+}
+
+
+def hedge_position_payload(row):
+    total_fees = float(row.spot_fee or 0) + float(row.futures_fee or 0)
+    net_result = float(row.realized_pnl or 0) + float(row.funding_income or 0) - total_fees
+    return {
+        "id": row.id,
+        "symbol": row.symbol,
+        "spot_exchange": row.spot_exchange,
+        "futures_exchange": row.futures_exchange,
+        "source": row.source,
+        "execution_mode": row.execution_mode,
+        "status": row.status,
+        "status_label": HEDGE_STATUS_LABELS.get(row.status, row.status),
+        "quote_amount": row.quote_amount,
+        "leverage": row.leverage,
+        "spot_quantity": row.spot_quantity,
+        "futures_quantity": row.futures_quantity,
+        "spot_entry_price": row.spot_entry_price,
+        "futures_entry_price": row.futures_entry_price,
+        "spot_exit_price": row.spot_exit_price,
+        "futures_exit_price": row.futures_exit_price,
+        "spot_notional": row.spot_notional,
+        "futures_notional": row.futures_notional,
+        "hedge_gap_usdt": row.hedge_gap_usdt,
+        "opening_spread": row.opening_spread,
+        "funding_rate_open": row.funding_rate_open,
+        "funding_income": row.funding_income,
+        "spot_fee": row.spot_fee,
+        "futures_fee": row.futures_fee,
+        "total_fees": total_fees,
+        "realized_pnl": row.realized_pnl,
+        "net_result": net_result,
+        "spot_order_id": row.spot_order_id,
+        "futures_order_id": row.futures_order_id,
+        "opened_at": format_shanghai_time(row.opened_at),
+        "closed_at": format_shanghai_time(row.closed_at),
+        "created_at": format_shanghai_time(row.created_at),
+        "updated_at": format_shanghai_time(row.updated_at),
+    }
+
+
+@app.get("/api/hedge-positions")
+def hedge_positions_api():
+    """Return every hedge recorded for the signed-in account, including history."""
+    rows = HedgePosition.query.filter_by(user_id=current_user().id).order_by(
+        HedgePosition.created_at.desc(), HedgePosition.id.desc()
+    ).all()
+    current_rows = [row for row in rows if row.status in HEDGE_CURRENT_STATUSES]
+    history_rows = [row for row in rows if row.status not in HEDGE_CURRENT_STATUSES]
+    return jsonify({
+        "execution": {
+            "enabled": False,
+            "mode": "preview_only",
+            "reason": "尚未配置币安私有交易 API；建立按钮只生成双腿订单预览，不会提交真实订单。",
+        },
+        "summary": {
+            "current_count": len(current_rows),
+            "history_count": len(history_rows),
+            "spot_notional": sum(float(row.spot_notional or 0) for row in current_rows),
+            "futures_notional": sum(float(row.futures_notional or 0) for row in current_rows),
+            "hedge_gap_usdt": sum(float(row.hedge_gap_usdt or 0) for row in current_rows),
+            "funding_income": sum(float(row.funding_income or 0) for row in rows),
+            "total_fees": sum(float(row.spot_fee or 0) + float(row.futures_fee or 0) for row in rows),
+            "net_result": sum(
+                float(row.realized_pnl or 0) + float(row.funding_income or 0)
+                - float(row.spot_fee or 0) - float(row.futures_fee or 0)
+                for row in history_rows
+            ),
+        },
+        "current": [hedge_position_payload(row) for row in current_rows],
+        "history": [hedge_position_payload(row) for row in history_rows],
+    })
 
 
 @app.get("/api/dual-futures")

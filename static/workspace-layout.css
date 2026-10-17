@@ -1,0 +1,369 @@
+/* Scoped layout layer: no data formatting, formula, access or polling changes. */
+.workspace-layout {
+  --desk-surface: #fffef9;
+  --desk-line: #dce3da;
+  --desk-muted: #627785;
+  --desk-ink: #163d55;
+  --desk-radius: 12px;
+}
+.workspace-layout main {min-width:0;padding:28px 30px 40px}
+.workspace-layout main > header {align-items:start;gap:24px;margin-bottom:18px;padding-bottom:16px;border-bottom:1px solid var(--desk-line)}
+.workspace-layout main > header h1 {font-size:28px;line-height:1.25;margin:5px 0 8px}
+.workspace-layout main > header .sub {font-size:12px;line-height:1.7;max-width:660px}
+.workspace-layout .header-actions {gap:9px}
+.workspace-layout .section-workspace-bar {margin:0 0 18px;padding:11px 14px;background:#f6f9f3}
+.workspace-layout .section-workspace-info p {font-size:11px}
+.workspace-layout .layout-view {min-width:0;scroll-margin-top:18px}
+.layout-view :is(.panel,.onchain-opportunity-card,.funding-trend-card,.thought-watch-card,.token-hedge-card,.strategy) {border-radius:var(--desk-radius)}
+.layout-view .panel {min-width:0;padding:18px;border-color:var(--desk-line);background:var(--desk-surface)}
+.layout-view .panel-title {align-items:start;gap:14px;margin-bottom:16px}
+.layout-view .panel-title h2 {font-size:19px;line-height:1.35}
+.layout-view .panel-title .sub {max-width:850px;font-size:12px;line-height:1.7}
+.layout-view :is(.loading,.empty-alert,.position-empty) {box-sizing:border-box;padding:22px 16px;line-height:1.8;font-size:12px;overflow-wrap:anywhere}
+.layout-view :is(.numeric,.price-change-cell,.liquidity-stack,.position-summary,.gainer-row,.funding-trend-grid) {font-variant-numeric:tabular-nums}
+.layout-view :is(input,select,textarea) {box-sizing:border-box;min-width:0}
+.layout-view :is(button,a,input,select,summary):focus-visible {outline:2px solid #139b91;outline-offset:3px}
+.layout-view :is(h2,h3,.runtime-rule-group,#tradeValidation,#pushSignalValidation,#basisTracking,#alertEvents) {scroll-margin-top:22px}
+.layout-section-outline {display:flex;flex-wrap:wrap;gap:7px;margin:0 0 16px;padding:0;background:transparent}
+.layout-section-outline button {border:1px solid #d1ded6;border-radius:20px;background:#f7faf5;padding:7px 13px;color:#42685f;font-size:11px;min-height:32px}
+.layout-section-outline button:hover {background:#e4f2ea;border-color:#91c6b4}
+.layout-reading-guide {margin:18px 0;border:1px solid var(--desk-line);border-radius:10px;background:#f5f8f2}
+.layout-reading-guide > summary {padding:13px 16px;cursor:pointer;font-size:12px;font-weight:700;color:#44675e}
+.layout-reading-guide > :not(summary) {margin:0;padding:16px;border:0;background:transparent}
+.layout-reading-guide .strategy-grid {gap:14px}
+.layout-reading-guide .panel {background:var(--desk-surface);border:1px solid var(--desk-line)}
+
+/* 01 Opportunity dashboard: context, balanced rankings, then executable quotes. */
+.layout-view#dashboard > .panel {padding:0;border:0;background:transparent;box-shadow:none}
+.layout-view#dashboard > .panel > .panel-title {margin-bottom:14px}
+.layout-view#dashboard .major-market-overview {gap:12px;margin-bottom:18px}
+.layout-view#dashboard .major-market-card {min-width:0;padding:16px;border-radius:12px;background:var(--desk-surface)}
+.layout-view#dashboard .opportunity-signal-grid {grid-template-columns:minmax(0,1.08fr) minmax(0,1fr);gap:16px;margin:18px 0}
+.layout-view#dashboard :is(.momentum-board,.oi-market-board) {min-width:0;border:1px solid var(--desk-line);border-radius:12px;padding:16px;background:var(--desk-surface)}
+.layout-view#dashboard :is(.momentum-opportunities,.oi-market-opportunities) {max-height:560px;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
+.layout-view#dashboard .table-wrap {border:1px solid var(--desk-line);border-radius:12px;background:var(--desk-surface)}
+.layout-view#dashboard th {white-space:nowrap;font-size:11px}
+
+/* 02 Onchain: filters, complete price, two-by-two changes, independent risk. */
+.layout-view#onchain-opportunities .onchain-summary {grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.layout-view#onchain-opportunities .onchain-summary article {min-width:0;padding:14px;border-radius:10px}
+.layout-view#onchain-opportunities .onchain-toolbar {display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px;margin:16px 0}
+.layout-view#onchain-opportunities .onchain-chain-filters {display:flex;flex-wrap:wrap;gap:6px}
+.layout-view#onchain-opportunities .onchain-search {flex:0 1 310px;min-width:220px}
+.layout-view#onchain-opportunities .onchain-opportunity-list {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.layout-view#onchain-opportunities .onchain-opportunity-card {display:grid;grid-template-columns:46px minmax(0,1fr);grid-template-areas:'rank identity' 'market market' 'depth depth' 'score score' 'risk risk';gap:14px;min-width:0;padding:18px;background:var(--desk-surface)}
+.layout-view#onchain-opportunities .onchain-rank {grid-area:rank;min-width:0;border:0;padding:0;align-self:start}
+.layout-view#onchain-opportunities .onchain-identity {min-width:0}
+.layout-view#onchain-opportunities .onchain-identity {grid-area:identity}
+.layout-view#onchain-opportunities .onchain-identity > div {display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.layout-view#onchain-opportunities .onchain-identity b {max-width:none;white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}
+.layout-view#onchain-opportunities .onchain-identity small {white-space:normal;overflow:visible;line-height:1.7;overflow-wrap:anywhere}
+.layout-view#onchain-opportunities .onchain-identity :is(h3,p) {overflow-wrap:anywhere}
+.layout-view#onchain-opportunities .onchain-market {grid-area:market;display:grid;grid-template-columns:1fr;min-width:0;gap:10px}
+.layout-view#onchain-opportunities .onchain-price {min-width:0;max-width:100%;white-space:normal;overflow:visible;overflow-wrap:anywhere;word-break:break-word;font-variant-numeric:tabular-nums}
+.layout-view#onchain-opportunities .onchain-price b {font-size:23px;line-height:1.4;white-space:normal;overflow-wrap:anywhere}
+.layout-view#onchain-opportunities .onchain-change-grid {grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+.layout-view#onchain-opportunities .onchain-depth {grid-area:depth;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));min-width:0;gap:8px}
+.layout-view#onchain-opportunities .onchain-score-breakdown {grid-area:score;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));min-width:0;gap:7px}
+.layout-view#onchain-opportunities .onchain-score-breakdown > span {display:grid;grid-template-columns:minmax(0,1fr);gap:3px;min-width:0}
+.layout-view#onchain-opportunities .onchain-score-breakdown em {white-space:normal;overflow-wrap:anywhere}
+.layout-view#onchain-opportunities .onchain-risk {grid-area:risk;min-width:0;padding-top:12px;border-top:1px solid var(--desk-line);line-height:1.7}
+
+/* 03 / 04 Market comparison: separate filter deck, bounded table, frozen symbol. */
+.layout-view:is(#spot-futures,#dual-futures) > .panel {padding:16px}
+.layout-view:is(#spot-futures,#dual-futures) .panel-title {flex-wrap:wrap;align-items:end;padding-bottom:14px;border-bottom:1px solid var(--desk-line)}
+.layout-view:is(#spot-futures,#dual-futures) :is(.spot-title-group,.dual-title-group) {display:flex;flex-wrap:wrap;align-items:end;gap:10px}
+.layout-view:is(#spot-futures,#dual-futures) :is(.spot-title-group,.dual-title-group) > .eyebrow {flex-basis:100%;margin:0}
+.layout-view:is(#spot-futures,#dual-futures) .spot-actions {display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:9px;min-width:0}
+.layout-view:is(#spot-futures,#dual-futures) .spot-actions .search-suggest-wrap {min-width:200px;flex:1 1 210px}
+.layout-view:is(#spot-futures,#dual-futures) .filter-check {white-space:nowrap;font-size:11px;min-height:34px}
+.layout-view:is(#spot-futures,#dual-futures) .table-wrap {max-height:clamp(360px,72dvh,920px);overflow:auto;isolation:isolate;border:1px solid var(--desk-line);border-radius:9px;scrollbar-width:thin}
+.layout-view:is(#spot-futures,#dual-futures) table {margin:0;border-collapse:separate;border-spacing:0}
+.layout-view:is(#spot-futures,#dual-futures) thead th {position:sticky;top:0;z-index:4;background:#eaf1ea;box-shadow:0 1px #ccd9cf;font-size:11px;line-height:1.5}
+.layout-view:is(#spot-futures,#dual-futures) thead th:first-child {left:0;z-index:6}
+.layout-view:is(#spot-futures,#dual-futures) td.symbol {position:sticky;left:0;z-index:2;background:#fafcf7;box-shadow:1px 0 #dce5da;min-width:134px}
+.layout-view:is(#spot-futures,#dual-futures) td {font-size:11px;line-height:1.65}
+.layout-view:is(#spot-futures,#dual-futures) td.numeric {white-space:nowrap;font-weight:700}
+.layout-view:is(#spot-futures,#dual-futures) :is(.pagination,.data-status) {flex-wrap:wrap;gap:10px;line-height:1.7}
+.layout-view#spot-futures .hedge-build-button {white-space:nowrap;min-height:32px;padding:7px 10px}
+.layout-view#dual-futures .dual-exchange-card {min-width:0;border-radius:8px}
+.layout-view#dual-futures .dual-result-stack {min-width:170px}
+
+/* 05 Hedge ledger: risk summary, two legs, then realized history. */
+.layout-view#my-positions .position-summary {grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.layout-view#my-positions .position-summary article {min-width:0;padding:16px;border-radius:10px}
+.layout-view#my-positions .position-tabs {display:flex;gap:8px;margin:18px 0}
+.layout-view#my-positions .position-tabs button {padding:11px 18px;min-height:42px}
+.layout-view#my-positions .hedge-position-card {padding:18px;margin-bottom:14px;background:var(--desk-surface)}
+.layout-view#my-positions .hedge-position-head {align-items:start;gap:12px}
+.layout-view#my-positions .hedge-position-legs {gap:14px;margin:16px 0}
+.layout-view#my-positions .position-leg {min-width:0;padding:14px;border-radius:9px}
+.layout-view#my-positions .position-leg dd {overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.layout-view#my-positions .hedge-position-result {gap:9px;padding-top:14px;border-top:1px solid var(--desk-line)}
+
+/* 06 Funding trend: three explicit metric families, no hidden or recomputed data. */
+.layout-view#funding-trend > .panel {padding:0;border:0;background:transparent}
+.layout-view#funding-trend .funding-trend-list {grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.layout-view#funding-trend .funding-trend-updated {grid-column:1/-1;margin:0;font-size:11px;line-height:1.7}
+.layout-view#funding-trend .funding-trend-card {min-width:0;margin:0;padding:17px;background:var(--desk-surface)}
+.layout-view#funding-trend .funding-trend-head {align-items:start;gap:8px;flex-wrap:wrap}
+.layout-view#funding-trend .funding-trend-grid {display:grid;grid-template-columns:1fr;gap:12px;margin-top:14px}
+.layout-view#funding-trend .layout-metric-group {padding:12px;border:1px solid #e2e9de;border-radius:8px;background:#f7faf4}
+.layout-view#funding-trend .layout-metric-group h4 {margin:0 0 9px;font-size:11px;color:#517365}
+.layout-view#funding-trend .layout-metric-values {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px}
+.layout-view#funding-trend .layout-metric-values > span {display:flex;flex-wrap:wrap;justify-content:space-between;gap:5px;font-size:11px}
+
+/* 07 Validation: public push evidence and virtual-trade results stay separate. */
+.layout-view#trade-validation :is(.push-signal-panel,.trade-symbol-group) {padding:18px;border:1px solid var(--desk-line);border-radius:12px;background:var(--desk-surface)}
+.layout-view#trade-validation #pushSignalValidation {margin-bottom:20px}
+.layout-view#trade-validation :is(.push-signal-summary,.trade-validation-summary) {gap:12px}
+.layout-view#trade-validation :is(.push-signal-summary,.trade-validation-summary) > article {min-width:0;padding:14px}
+.layout-view#trade-validation .trade-plan-list {display:grid;gap:14px}
+.layout-view#trade-validation :is(.trade-symbol-head,.trade-plan-head) {flex-wrap:wrap;align-items:start;gap:12px}
+.layout-view#trade-validation .trade-level-grid {gap:9px}
+.layout-view#trade-validation .trade-symbol-trades {margin-top:14px}
+.layout-view#trade-validation .trade-thesis {line-height:1.8;overflow-wrap:anywhere}
+
+/* 08 Arbitrage thinking: paired strategies, leg comparison, optional methodology. */
+.layout-view#thinking > .strategy-hero {padding:16px 18px;margin-bottom:14px;background:#eaf3ec;border-radius:10px;color:var(--desk-ink)}
+.layout-view#thinking > .strategy-hero h2 {font-size:19px;color:var(--desk-ink)}
+.layout-view#thinking > .strategy-hero p {color:#5b7768}
+.layout-view#thinking .simple-thinking {padding:0;border:0;background:transparent}
+.layout-view#thinking .thinking-columns {gap:16px;align-items:start}
+.layout-view#thinking .thinking-columns > section {min-width:0;padding:16px;border:1px solid var(--desk-line);border-radius:12px;background:var(--desk-surface)}
+.layout-view#thinking .thinking-columns > section > h3 {margin:0 0 14px;font-size:16px}
+.layout-view#thinking .thinking-sort-controls {grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px}
+.layout-view#thinking .thinking-columns > section > article {display:grid;grid-template-columns:minmax(0,1fr);gap:12px;min-width:0;margin-bottom:12px;padding:13px;border-radius:9px}
+.layout-view#thinking .thinking-columns > section > article > :is(b,span,div) {min-width:0;max-width:100%;grid-column:auto;white-space:normal}
+.layout-view#thinking .thinking-columns > section > article > span {font-size:12px;line-height:1.75;overflow-wrap:anywhere}
+.layout-view#thinking .thinking-funding {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+.layout-view#thinking .thinking-funding > span {min-width:0;display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px;font-size:11px;white-space:normal}
+.layout-view#thinking .thinking-funding > span b {width:auto;min-width:0;font-size:12px}
+.layout-view#thinking .thinking-liquidity {gap:8px;margin-top:12px}
+.layout-view#thinking .thinking-leg {min-width:0;padding:10px}
+
+/* 09 Daily trends: focus candidates first, independent timeframe boards. */
+.layout-view#daily-trends .horn-grids {grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.layout-view#daily-trends .early-focus-panel {grid-column:1/-1;background:#f4faf2;border-top:3px solid #3aa889}
+.layout-view#daily-trends .early-focus-list {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.layout-view#daily-trends .early-focus-item {min-width:0;margin:0;padding:15px}
+.layout-view#daily-trends .horn-list {overflow:auto;scrollbar-width:thin}
+.layout-view#daily-trends .horn-list article {min-width:0;line-height:1.7}
+.layout-view#daily-trends .horn-symbol-cell {min-width:0;overflow-wrap:anywhere}
+
+/* 10 Thought research: active watchlist, stopped archive and review separately. */
+.layout-view#daily-thoughts .thought-watch-manager {padding:18px;border:1px solid var(--desk-line);border-radius:12px;background:var(--desk-surface)}
+.layout-view#daily-thoughts .thought-watch-title {flex-wrap:wrap;align-items:start;gap:12px}
+.layout-view#daily-thoughts .thought-watch-grid {grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.layout-view#daily-thoughts .thought-watch-card {min-width:0;padding:15px}
+.layout-view#daily-thoughts .thought-watch-stopped {margin-top:16px;padding-top:14px;border-top:1px solid var(--desk-line)}
+.layout-view#daily-thoughts .thought-record-list {margin-top:22px}
+.layout-view#daily-thoughts .thought-summary {gap:12px;min-height:68px;padding:14px;align-items:start}
+.layout-view#daily-thoughts .thought-summary > span {min-width:0}
+.layout-view#daily-thoughts .thought-summary i {white-space:normal;overflow:visible;line-height:1.7}
+.layout-view#daily-thoughts .thought-detail {padding:18px;line-height:1.8}
+.layout-view#daily-thoughts .thought-horizon-grid {gap:12px}
+
+/* 11 Listings: exchange groups, publication vs. execution time, full source title. */
+.layout-view#daily-listings > .panel {padding:16px}
+.layout-view#daily-listings .listing-exchange {border-color:var(--desk-line);border-radius:10px;margin:0 0 16px}
+.layout-view#daily-listings .listing-exchange h3 {padding:13px 15px;background:#edf3e9}
+.layout-view#daily-listings .listing-exchange article {display:grid;grid-template-columns:minmax(130px,1fr) auto;gap:8px 14px;align-items:start;padding:15px!important}
+.layout-view#daily-listings .listing-exchange article > small {grid-column:1/-1;white-space:normal;line-height:1.85;overflow-wrap:anywhere}
+.layout-view#daily-listings .listing-exchange article a {white-space:normal;overflow-wrap:anywhere}
+
+/* 12 Movers: one six-column desktop contract, labelled cards on small screens. */
+.layout-view#gainers-losers .gainers-periods {display:flex;flex-wrap:wrap;gap:7px;margin:0 0 16px}
+.layout-view#gainers-losers .daily-grid {grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.layout-view#gainers-losers .layout-ranking-title {font-size:17px;margin:5px 0 16px}
+.layout-view#gainers-losers .layout-ranking-scroll {min-width:0;overflow:auto;scrollbar-width:thin}
+.layout-view#gainers-losers :is(.gainer-table-head,.daily-list .gainer-row) {display:grid!important;grid-template-columns:28px minmax(110px,1fr) 64px 110px 100px 112px!important;min-width:574px!important;gap:8px;align-items:center}
+.layout-view#gainers-losers .gainer-table-head {padding:10px 7px;border-radius:6px;background:#eaf1e7;font-size:10px}
+.layout-view#gainers-losers .gainer-row {padding:12px 7px;font-size:11px;white-space:nowrap}
+
+/* 13 Official research: confirmed facts and trading hypotheses are not blended. */
+.layout-view#token-hedge .token-hedge-grid {grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+.layout-view#token-hedge .token-hedge-card {min-width:0;padding:19px;background:var(--desk-surface)}
+.layout-view#token-hedge .token-hedge-card > section {padding:14px 0;border-top:1px solid var(--desk-line)}
+.layout-view#token-hedge .token-hedge-card h4 {margin:0 0 9px;font-size:13px}
+.layout-view#token-hedge .token-hedge-thesis {margin:10px 0;padding:14px!important;border-radius:8px;background:#fff6e5}
+.layout-view#token-hedge .token-hedge-card :is(p,li) {line-height:1.85;overflow-wrap:anywhere}
+.layout-view#token-hedge .token-hedge-sources {display:flex;flex-wrap:wrap;gap:7px}
+
+/* 14 Alerts: retain complete symbol cards rather than hiding data in inner scrolls. */
+.layout-view#alerts .alert-summary {gap:12px;margin-bottom:18px}
+.layout-view#alerts .alert-master-detail {grid-template-columns:minmax(280px,.8fr) minmax(0,1.4fr)!important;gap:14px;background:transparent;border:0;align-items:start}
+.layout-view#alerts .alert-symbol-list {padding:10px!important;border:1px solid var(--desk-line);border-radius:10px;max-height:none!important;overflow:visible!important}
+.layout-view#alerts .alert-symbol-option {padding:13px;min-width:0}
+.layout-view#alerts .alert-detail-pane {min-width:0;padding:0}
+.layout-view#alerts .alert-detail-card {padding:17px;border-radius:10px}
+.layout-view#alerts :is(.alert-latest-metrics,.alert-move-peaks) {gap:7px}
+.layout-view#alerts .basis-side-grid {grid-template-columns:minmax(0,1.5fr) minmax(220px,1fr);gap:16px}
+.layout-view#alerts .alert-timeline {min-width:0;max-width:100%;box-sizing:border-box}
+.layout-view#alerts .alert-timeline-node {min-width:0;max-width:100%;line-height:1.8}
+.layout-view#alerts .alert-timeline-node > div {min-width:0}
+.layout-view#alerts .alert-exchange-pair {min-width:0;flex-wrap:wrap;white-space:normal}
+
+/* 15 Collaboration: improve desktop reading without touching mobile keyboard logic. */
+.layout-view#chat {grid-template-columns:minmax(0,1fr)}
+.layout-view#chat .chat-shell {min-width:0;max-width:100%;border-radius:12px;border-color:var(--desk-line)}
+.layout-view#chat :is(.chat-audio-gate,.chat-push-gate) {min-width:0;max-width:100%;overflow-wrap:anywhere}
+.layout-view#chat :is(.chat-audio-gate,.chat-push-gate) > div {min-width:0}
+.layout-view#chat .chat-peers {min-width:0;background:#f2f6ef}
+.layout-view#chat .chat-peer-copy {min-width:0}
+.layout-view#chat .chat-peer {padding:13px 12px}
+.layout-view#chat .chat-conversation {min-width:0}
+.layout-view#chat .chat-message-content {overflow-wrap:anywhere;line-height:1.75}
+.layout-view#chat .chat-compose-row {gap:9px}
+.layout-view#chat .chat-input-wrap {min-width:0}
+
+/* 16 Security notifications: report identity, time and source on separate lines. */
+.layout-view#security-notifications .security-alert-summary {gap:12px;margin-bottom:16px}
+.layout-view#security-notifications .security-alert-list {display:grid;gap:12px;padding:16px}
+.layout-view#security-notifications .security-alert-item {min-width:0;margin:0;padding:16px;border:1px solid var(--desk-line);border-radius:9px}
+.layout-view#security-notifications .security-alert-item > div {min-width:0;grid-template-columns:minmax(0,1fr)}
+.layout-view#security-notifications .security-alert-item > div > div {display:flex;flex-wrap:wrap;gap:9px;align-items:center}
+.layout-view#security-notifications .security-alert-item :is(p,code,small) {white-space:normal;overflow-wrap:anywhere;line-height:1.8}
+.layout-view#security-notifications .security-alert-item code {width:100%;min-width:0;max-width:100%;box-sizing:border-box}
+.layout-view#security-notifications .security-alert-item.unread {border-left:4px solid #d88d34;background:#fffaf0}
+
+/* 17 Strategy management: state and action separate from the strategy description. */
+.layout-view#strategies > .panel {padding:18px}
+.layout-view#strategies .strategies {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.layout-view#strategies .strategy {display:flex;align-items:start;gap:14px;min-width:0;margin:0;padding:18px;border:1px solid var(--desk-line);background:#f6faf3}
+.layout-view#strategies .strategy > div {min-width:0;flex:1}
+.layout-view#strategies .strategy h3 {display:flex;flex-wrap:wrap;gap:9px;align-items:center;line-height:1.6;font-size:15px}
+.layout-view#strategies .strategy p {line-height:1.8;overflow-wrap:anywhere}
+.layout-view#strategies .strategy > button {flex-shrink:0;min-height:36px}
+
+/* 18 Runtime rules: category jumps, readable schedules, compact save controls. */
+.layout-view#runtime-rules .rule-summary {gap:12px;grid-template-columns:repeat(3,minmax(0,1fr));margin-bottom:18px}
+.layout-view#runtime-rules .runtime-rule-group {margin-bottom:20px}
+.layout-view#runtime-rules .runtime-rule-group > h3 {margin:0 0 12px;font-size:16px}
+.layout-view#runtime-rules .runtime-rule-group > div {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.layout-view#runtime-rules .runtime-rule-card {min-width:0;padding:16px;border-color:var(--desk-line);border-radius:10px;background:var(--desk-surface)}
+.layout-view#runtime-rules .rule-card-head {flex-wrap:wrap;align-items:start;gap:9px}
+.layout-view#runtime-rules .runtime-rule-card p {line-height:1.8;min-height:0}
+.layout-view#runtime-rules .rule-editor {display:flex;gap:8px;align-items:center}
+.layout-view#runtime-rules .rule-editor > input {flex:1;width:100%;min-width:0}
+.layout-view#runtime-rules .rule-editor > button {flex-shrink:0;min-height:36px}
+.layout-view#runtime-rules .symbol-alias-form {gap:12px}
+.layout-view#runtime-rules .symbol-alias-item p {overflow-wrap:anywhere}
+
+/* 19 Accounts: users/devices first; invitations and destructive controls distinct. */
+.layout-view#account-management .account-summary {gap:12px;margin:0 0 16px}
+.layout-view#account-management .account-level-guide {gap:12px;margin-bottom:18px}
+.layout-view#account-management .account-level-guide article {min-width:0;padding:14px;line-height:1.8}
+.layout-view#account-management .account-admin-grid {grid-template-columns:minmax(280px,.7fr) minmax(0,1.6fr);gap:16px;align-items:start}
+.layout-view#account-management .account-user-item {min-width:0;padding:16px;border-radius:10px}
+.layout-view#account-management :is(.account-user-item,.account-device-slot) :is(code,small,p) {white-space:normal;overflow-wrap:anywhere;line-height:1.75}
+.layout-view#account-management :is(.account-device-slot code,.account-invite-code code) {width:auto;min-width:0;max-width:100%;overflow-wrap:anywhere}
+.layout-view#account-management .account-user-item > div > p {min-width:0}
+.layout-view#account-management .account-user-item > div > p > b {overflow-wrap:anywhere}
+.layout-view#account-management .account-security-actions {padding:12px;background:#fbf4e8;border:1px solid #ead6b9;border-radius:8px}
+.layout-view#account-management .account-device-grid {gap:10px}
+.layout-view#account-management .account-invite-code {overflow-wrap:anywhere;white-space:normal}
+
+/* 20 Risk: a scannable boundary card for each independent type of uncertainty. */
+.layout-view#risk .risk-overview {padding:20px;border:1px solid #d2dfd4;border-radius:12px;background:#f1f7ee;margin-bottom:16px}
+.layout-view#risk .risk-overview h2 {margin:0 0 9px;font-size:20px}
+.layout-view#risk .risk-overview p {margin:0;color:#5e7567;font-size:13px;line-height:1.8}
+.layout-view#risk .risk-layout-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.layout-view#risk .risk-layout-grid article {padding:20px;border:1px solid var(--desk-line);border-radius:12px;background:var(--desk-surface)}
+.layout-view#risk .risk-layout-grid small {color:#4e8c77;font-size:10px;font-weight:800;letter-spacing:.1em}
+.layout-view#risk .risk-layout-grid h3 {font-size:16px;margin:8px 0 12px}
+.layout-view#risk .risk-layout-grid p {color:var(--desk-muted);font-size:13px;line-height:1.9;margin:0}
+
+@media(min-width:1600px) {
+  .layout-view#onchain-opportunities .onchain-opportunity-list {grid-template-columns:repeat(3,minmax(0,1fr))}
+  .layout-view#daily-thoughts .thought-watch-grid {grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+@media(max-width:1180px) {
+  .workspace-layout main {padding:24px 20px 32px}
+  .layout-view#dashboard .opportunity-signal-grid {grid-template-columns:1fr}
+  .layout-view#gainers-losers .daily-grid {grid-template-columns:1fr}
+  .layout-view#token-hedge .token-hedge-grid {grid-template-columns:1fr}
+  .layout-view#alerts .alert-master-detail {grid-template-columns:minmax(240px,.85fr) minmax(0,1.3fr)!important}
+  .layout-view#account-management .account-admin-grid {grid-template-columns:1fr}
+  .layout-view#account-management .account-invite-panel {order:2}
+}
+@media(max-width:900px) {
+  .layout-view#onchain-opportunities .onchain-opportunity-list {grid-template-columns:1fr}
+  .layout-view#funding-trend .funding-trend-list {grid-template-columns:1fr}
+  .layout-view#alerts .basis-side-grid {grid-template-columns:1fr}
+}
+@media(max-width:760px) {
+  .workspace-layout main {padding:14px 12px 30px}
+  .workspace-layout main > header {gap:14px;margin-bottom:14px;padding-bottom:14px}
+  .workspace-layout main > header h1 {font-size:24px}
+  .workspace-layout main > header .sub {font-size:12px}
+  .workspace-layout .header-actions {display:grid;grid-template-columns:minmax(0,1fr);gap:8px;width:100%;min-width:0}
+  .workspace-layout .header-actions .account-chip {width:100%;box-sizing:border-box;justify-content:space-between}
+  .workspace-layout .header-actions .sound-actions {display:flex;flex-wrap:wrap;gap:6px;width:100%;min-width:0;justify-content:flex-start}
+  .workspace-layout .header-actions .sound-actions :is(.sound-choice,.sound-test) {flex:1 1 0;width:auto;min-width:0;min-height:36px;padding:7px 5px;font-size:10px;white-space:nowrap}
+  .workspace-layout .header-actions .status {width:100%;min-width:0;max-width:100%}
+  .workspace-layout .section-workspace-bar {padding:11px 12px;gap:10px;margin-bottom:14px}
+  .workspace-layout .section-workspace-info p {font-size:11px;line-height:1.7}
+  .layout-view .panel {padding:14px}
+  .layout-view .panel-title {display:flex!important;flex-wrap:wrap;align-items:start;gap:12px}
+  .layout-view .panel-title > div {min-width:0;max-width:100%}
+  .layout-view .panel-title h2 {font-size:18px}
+  .layout-view .panel-title > button {width:auto;min-height:40px;padding:9px 12px}
+  .layout-section-outline {gap:6px;margin-bottom:14px}
+  .layout-section-outline button {min-height:40px;padding:9px 12px}
+  .layout-view#dashboard .major-market-overview {grid-template-columns:1fr;gap:10px}
+  .layout-view#dashboard .major-market-grid {grid-template-columns:1fr;gap:10px}
+  .layout-view#dashboard :is(.momentum-board,.oi-market-board) {padding:12px}
+  .layout-view#dashboard :is(.momentum-opportunities,.oi-market-opportunities) {max-height:none;overflow:visible}
+  .layout-view#onchain-opportunities .onchain-summary {grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+  .layout-view#onchain-opportunities .onchain-search {min-width:0;flex:1 1 100%}
+  .layout-view#onchain-opportunities .onchain-opportunity-card {padding:15px}
+  .layout-view#onchain-opportunities .onchain-price b {font-size:21px}
+  .layout-view#onchain-opportunities .onchain-depth {grid-template-columns:repeat(2,minmax(0,1fr))}
+  .layout-view:is(#spot-futures,#dual-futures) > .panel {padding:12px}
+  .layout-view:is(#spot-futures,#dual-futures) .spot-actions {width:100%;justify-content:flex-start;gap:9px}
+  .layout-view:is(#spot-futures,#dual-futures) .spot-actions .search-suggest-wrap {flex:1 1 100%;min-width:0;order:-1}
+  .layout-view:is(#spot-futures,#dual-futures) .filter-check {font-size:12px;min-height:40px}
+  .layout-view:is(#spot-futures,#dual-futures) .table-wrap {max-height:70dvh;min-height:240px}
+  .layout-view:is(#spot-futures,#dual-futures) td.symbol {min-width:112px;max-width:150px}
+  .layout-view#my-positions .position-summary {grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+  .layout-view#my-positions .hedge-position-card {padding:14px}
+  .layout-view#my-positions .hedge-position-legs {grid-template-columns:1fr}
+  .layout-view#my-positions .position-tabs button {flex:1;padding:11px 10px}
+  .layout-view#trade-validation :is(.push-signal-panel,.trade-symbol-group) {padding:14px}
+  .layout-view#trade-validation .trade-level-grid {grid-template-columns:repeat(2,minmax(0,1fr))}
+  .layout-view#thinking .thinking-columns {grid-template-columns:1fr}
+  .layout-view#thinking .thinking-columns > section {padding:14px}
+  .layout-view#daily-trends .horn-grids {grid-template-columns:1fr}
+  .layout-view#daily-trends .early-focus-list {grid-template-columns:1fr}
+  .layout-view#daily-thoughts .thought-watch-grid {grid-template-columns:1fr}
+  .layout-view#daily-thoughts .thought-watch-manager {padding:14px}
+  .layout-view#daily-thoughts .thought-summary {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:13px}
+  .layout-view#daily-thoughts .thought-summary > span {grid-column:1/-1}
+  .layout-view#daily-thoughts .thought-detail {padding:14px}
+  .layout-view#daily-listings .listing-exchange article {padding:13px!important;grid-template-columns:minmax(0,1fr) auto}
+  .layout-view#gainers-losers .gainer-table-head {display:none!important}
+  .layout-view#gainers-losers .daily-list .gainer-row {grid-template-columns:26px minmax(0,1fr) auto!important;min-width:0!important;gap:8px;padding:14px 3px;white-space:normal}
+  .layout-view#gainers-losers .gainer-row > i {grid-column:1;grid-row:1/4;align-self:start}
+  .layout-view#gainers-losers .gainer-row > b {grid-column:2;grid-row:1;overflow-wrap:anywhere}
+  .layout-view#gainers-losers .gainer-score {grid-column:3;grid-row:1;font-size:11px}
+  .layout-view#gainers-losers .gainer-score::before {content:'结构分 ';color:#7a8a80;font-weight:400;font-size:10px}
+  .layout-view#gainers-losers .gainer-row > span:nth-of-type(1) {grid-column:2;grid-row:2;overflow-wrap:anywhere}
+  .layout-view#gainers-losers .gainer-row > span:nth-of-type(1)::before {content:'价格 ';color:#7a8a80;font-size:10px}
+  .layout-view#gainers-losers .gainer-row > span:nth-of-type(2) {grid-column:3;grid-row:2;text-align:right}
+  .layout-view#gainers-losers .gainer-row > span:last-child {grid-column:2/4;grid-row:3;color:#6a8072;font-size:11px}
+  .layout-view#gainers-losers .gainer-row > span:last-child::before {content:'24H成交额 ';color:#7a8a80;font-size:10px}
+  .layout-view#alerts .alert-master-detail {grid-template-columns:1fr!important}
+  .layout-view#alerts .alert-symbol-list {grid-template-columns:1fr}
+  .layout-view#alerts .alert-detail-card {padding:14px}
+  .layout-view#strategies .strategies {grid-template-columns:1fr}
+  .layout-view#runtime-rules .runtime-rule-group > div {grid-template-columns:1fr}
+  .layout-view#runtime-rules .rule-summary {grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+  .layout-view#runtime-rules .rule-summary article {display:block;padding:12px 9px}
+  .layout-view#runtime-rules .rule-summary span {display:block;margin-top:5px;font-size:10px}
+  .layout-view#security-notifications .security-alert-item {padding:13px}
+  .layout-view#risk .risk-layout-grid {grid-template-columns:1fr}
+}
+@media(prefers-reduced-motion:reduce) {
+  .layout-view {scroll-behavior:auto}
+}

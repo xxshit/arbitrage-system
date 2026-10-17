@@ -1,0 +1,92 @@
+/* Isolated synthetic GET fixtures; never forward requests or execute writes. */
+(() => {
+  'use strict';
+  delete window.PushManager;
+  const now = () => Date.now() / 1000;
+  const stamp = '2026-10-18 10:30:00';
+  const symbols = ['DEMO/USDT','SAMPLE/USDT','LONGTOKEN/USDT','SMALL/USDT'];
+  const base = {long_exchange:'Gate',short_exchange:'Binance',long_ask:1.23456789,long_bid:1.2344,short_ask:1.246,short_bid:1.245,
+    basis:0.83,funding_rate:0.025,funding_previous:0.021,funding_24h:0.14,funding_3d:0.42,funding_7d:0.98,funding_30d:3.8,
+    funding_interval_hours:4,next_funding_time:'2026-10-18 12:00:00',spot_volume:18200000,futures_volume:37600000,futures_open_interest:14300000,
+    open_spread:0.85,close_spread:-0.93,change_5m:0.42,change_15m:0.7,change_30m:1.2,change_1h:2.1,change_12h:4.6,change_24h:7.9,change_3d:12.6,change_7d:18.4};
+  const spot = symbols.map((symbol,index) => ({symbol,rows:[{...base,long_ask:base.long_ask+index/10},{...base,long_exchange:'Bitget',open_spread:0.75}]}));
+  const dual = symbols.map(symbol => ({symbol,binance_change_5m:0.42,binance_change_15m:0.7,binance_change_30m:1.2,binance_change_1h:2.1,rows:[
+    {...base,long_exchange:'Bybit',long_basis:-0.2,short_basis:0.83,long_open_interest:12000000,short_open_interest:14300000,long_volume:25000000,short_volume:37600000,
+      long_funding_rate:0.01,short_funding_rate:0.025,long_funding_interval_hours:4,short_funding_interval_hours:4,long_next_funding_time:stamp,short_next_funding_time:stamp,
+      funding_difference:0.015,funding_difference_previous:0.012,funding_difference_24h:0.09,funding_difference_3d:0.27,funding_difference_7d:0.6,funding_difference_30d:2.4,funding_settlement_label:'双方结算 · 12:00'},
+  ]}));
+  const funding = symbols.map((symbol,index) => ({symbol,long_exchange:'Gate',score:85-index*7,level:index?'观察机会':'重点机会',funding_interval:4,
+    change_24h:7.9,change_3d:12.6,funding_current:0.025,funding_previous:0.021,funding_24h:0.14,funding_3d:0.42,basis:0.83,open_spread:0.85,
+    oi_change_12h:9.4,volume_change_12h:26.5,futures_open_interest:14300000,futures_volume:37600000}));
+  const simple = symbols.slice(0,3).map(symbol => ({...base,symbol,long_is_spot:true,long_volume:18200000,short_volume:37600000,short_open_interest:14300000,
+    long_interval:null,short_interval:4,funding_current:0.025}));
+  const event = {symbol:'DEMO/USDT',strategy:'spot_futures',type:'rapid_basis',basis:1.4,open_spread:0.85,close_spread:-0.93,created_at:stamp,
+    long_exchange:'Gate',short_exchange:'Binance',long_market:'现货',short_market:'合约',short_interval:4,funding_interval_hours:4,remaining_seconds:90,expires_at_epoch:now()+90};
+  const alertGroups = symbols.map(symbol => ({symbol,alert_count:3,latest:{...event,symbol},timeline:[{...event,symbol},{...event,symbol,created_at:'2026-10-18 10:25:00'}],move_peaks:{open_spread:1.3,basis:1.4}}));
+  const plans = symbols.slice(0,2).map((symbol,index) => ({id:index+1,symbol,direction:index?'short':'long',status:'open',horizon:'short',pnl:1.8,
+    leverage:1,entry_price:1.23,current_price:1.25,stop_price:1.16,take_profit_1:1.35,take_profit_2:1.42,max_hold_minutes:60,thesis:'合成样本，用于检查长说明、多腿数值和详细记录的布局。'}));
+  const user = {id:1,username:'preview_admin',role:'admin',active:true,account_level:'lv3',created_at:stamp,last_login_at:stamp,
+    last_login_ip:'192.0.2.10',last_login_location:'示例地址 · 文档保留IP，不是真实用户',devices:{}};
+  const profile = {symbol:'DEMO/USDT',name:'合成研究样本',status:'公开资料观察',risk_level:'高',official_facts:['这里只使用合成样本检查版式。','事实区与推演区保持分离。'],
+    market_thesis:'此处是合成的推演说明，不是实际币种分析、投资建议或交易信号。',watch_rules:['保留原有数据字段和研究边界。'],sources:[{label:'示例来源',url:'https://example.com/'}]};
+  const watch = {symbol:'DEMO/USDT',active:true,note:'合成布局样本',started_at:stamp,duration_seconds:5400,start_price:1.23,current_price:1.25,
+    change_pct:1.63,high_price:1.28,high_change_pct:4.07,low_price:1.2,low_change_pct:-2.44,last_push_at:stamp};
+  const onchain = symbols.map((symbol,index) => ({token_symbol:symbol.split('/')[0],token_name:'合成链上布局样本',quote_symbol:'USDT',token_address:'0x1234567890abcdef1234567890abcdef12345678',
+    network:['bsc','solana','base','eth'][index],chain_label:['BSC','Solana','Base','Ethereum'][index],dex_id:'preview-dex',pair_created_at:stamp,captured_at:stamp,
+    price_usd:index===0?'0.0000000001234567890123456789':'1.23456789',opportunity_score:82-index*6,risk_level:index?'注意风险':'极高',score_components:{liquidity:22,activity:20,buy_pressure:12,momentum:28},
+    price_change_5m:3.2,price_change_1h:7.8,price_change_6h:13.4,price_change_24h:22.1,liquidity_usd:4500000,volume_24h_usd:2700000,turnover:0.6,buy_ratio:63,source_url:'https://example.com/pool'}));
+  const fixtures = {
+    '/api/auth/me':{user_id:1,username:'preview_admin',is_admin:true,account_level:'lv3',csrf_token:'synthetic-only',device_lock_required:false,chat_nav_hidden:false},
+    '/api/market-metadata/delisted-symbols':{symbols:[]},
+    '/api/spot-futures':{symbols:spot,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:4,page:1,pages:1,next_refresh_in_seconds:5},
+    '/api/dual-futures':{symbols:dual,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:4,page:1,pages:1,include_bybit_okx:false,next_refresh_in_seconds:5},
+    '/api/arbitrage-thinking/funding-trend':{items:funding,updated_at:stamp},
+    '/api/arbitrage-thinking/simple':{spot_simple:simple,dual_simple:simple.map(item=>({...item,long_exchange:'Bybit',long_is_spot:false,long_interval:4,long_open_interest:12000000}))},
+    '/api/onchain-opportunities':{items:onchain,updated_at:stamp,stale:false,chains:[{id:'all',label:'全部',count:4},{id:'bsc',label:'BSC',count:1},{id:'solana',label:'Solana',count:1},{id:'base',label:'Base',count:1},{id:'eth',label:'Ethereum',count:1}]},
+    '/api/alerts':{checked_at_epoch:now(),active_events:[event],events:alertGroups,basis_tracking:[{symbol:'DEMO/USDT',strategy:'spot_futures',max_basis:1.4,last_level:1.4,max_at:stamp}]},
+    '/api/hedge-positions':{checked_at_epoch:now(),execution:{enabled:false,reason:'隔离布局样本；真实下单未启用。'},summary:{current_count:1,history_count:1,spot_notional:100,futures_notional:100,hedge_gap_usdt:0,funding_income:0.35,fees:0.12,history_net_result:1.8},
+      current:[{id:1,symbol:'DEMO/USDT',spot_exchange:'Gate',futures_exchange:'Binance',status:'open',status_label:'合成持仓',spot_quantity:80,futures_quantity:80,spot_entry_price:1.23,futures_entry_price:1.24,spot_notional:98.4,futures_notional:99.2,hedge_gap_usdt:0.8,opening_spread:0.81,funding_income:0.35,spot_fee:0.05,futures_fee:0.04,spot_order_id:'PREVIEW-SPOT-ORDER-LONG-IDENTIFIER',futures_order_id:'PREVIEW-FUTURES-ORDER-LONG-IDENTIFIER',opened_at:stamp}],
+      history:[{id:2,symbol:'SAMPLE/USDT',status:'closed',status_label:'合成已平仓',spot_exchange:'Gate',futures_exchange:'Binance',net_result:1.8,closed_at:stamp}]},
+    '/api/trade-validation':{plans,summary:{}},
+    '/api/push-signal-validation':{rule_note:'合成统计，不代表真实胜率。',summary:[{category_label:'5MIN急涨',subtype_label:'点火',win_rate:50,decided:2,wins:1,losses:1,neutral:0,pending:1,insufficient_data:0}],items:[],automation:{last_success_at:stamp}},
+    '/api/token-hedge/profiles':{profiles:[profile,{...profile,symbol:'SAMPLE/USDT',name:'另一个合成研究样本'}]},
+    '/api/strategies':[{id:1,name:'价差监控合成样本',enabled:true,mode:'现多期空',symbol:'DEMO/USDT'},{id:2,name:'跨所监控合成样本',enabled:false,mode:'期多期空',symbol:'SAMPLE/USDT'}],
+    '/api/runtime-rules':{is_admin:true,items:[
+      {key:'spot_market_refresh',label:'现多期空刷新',category:'行情采集',description:'保持真实运行规则，只在预览检查输入与保存按钮排版。',schedule_type:'interval',value:'5',unit:'秒',editable:true,enabled:true},
+      {key:'dual_market_refresh',label:'期多期空刷新',category:'行情采集',description:'行情与持仓采用独立的更新周期。',schedule_type:'interval',value:'5',unit:'秒',editable:true,enabled:true},
+      {key:'thought_watch_scan',label:'思路扫描周期',category:'趋势研究',description:'研究任务不能假装是实时盘口。',schedule_type:'interval',value:'300',unit:'秒',editable:true,enabled:true},
+      {key:'chat_nav_hidden',label:'协作入口',category:'协作与隐私',description:'账号级显示规则；本预览不接受保存。',schedule_type:'toggle',value:'0',editable:true,enabled:true},
+    ]},
+    '/api/symbol-aliases':{items:[]},
+    '/api/admin/invites':{items:[{prefix:'PREVIEW',created_at:stamp,expires_at:'2026-10-25 10:30:00',used:false,status:'available'}]},
+    '/api/admin/users':{items:[user,{...user,id:2,username:'preview_viewer',role:'viewer',account_level:'lv1'}]},
+    '/api/admin/security-alerts':{unread:0,items:[{username:'preview_viewer',read:true,device_kind_label:'电脑',created_at:stamp,attempted_device_id:'synthetic-device-fingerprint-long-identifier',client_label:'合成浏览器',source_ip:'192.0.2.20',source_location:'示例地址 · 文档保留IP'}]},
+    '/api/chat/users':{unread_total:0,items:[{id:2,username:'preview_peer',display_name:'合成联系人',last_message:'仅用于阅读与键盘布局检查。',online:true,unread:0}]},
+    '/api/chat/messages':{items:[{id:1,sender_id:2,recipient_id:1,body:'这是合成消息，不会连接真实聊天或保存数据。',created_at:stamp},{id:2,sender_id:1,recipient_id:2,body:'检查长文本换行、阅读区以及输入区域的布局。',created_at:stamp,read_by_peer:true,read_at:stamp}],has_more_before:false},
+    '/api/chat/push/config':{available:false},
+    '/api/daily-report/trends':{early_focus:[{symbol:'DEMO/USDT',signal_type:'early_focus',stage_number:0,stage_label:'启动前观察',price_change_5:4.2,oi_change_5:3.1,ratio_change_5:-1.4,cvd_change_5:2.6,volume_ratio:2.1,stage_reason:'合成结构样本，仅用于显示布局。'}],horn_30m:[{symbol:'SAMPLE/USDT',score:75,price_change:8.1,oi_change:5.2,ratio_change:-2.3,cvd_confirmed:true}],horn_4h:[],horn_continue:[],automation_status:[]},
+    '/api/daily-report/listings':{events:[{exchange:'Binance',symbol:'DEMO/USDT',type:'上架',occurred_at:stamp,effective_at:'2026-10-20 12:00:00',title:'合成公告标题：核对发布时间、执行时间与完整原文链接的显示',source_url:'https://example.com/announcement'},{exchange:'Bybit',symbol:'SAMPLE/USDT',type:'下架',occurred_at:stamp,effective_time_status:'not_stated',title:'合成下架公告：未注明执行时刻',source_url:'https://example.com/announcement-2'}],automation_status:[]},
+    '/api/thought-watchlist':{items:[watch,{...watch,symbol:'SAMPLE/USDT',active:false,stopped_at:stamp,stop_price:1.25}],updated_at:stamp},
+    '/api/daily-report/thoughts':{items:[{symbol:'DEMO/USDT',side:'观察',trade_status:'合成研究',last:1.25,entry:1.23,thought_summary:'合成的思路摘要：明确区分当前证据、待验证条件与已经失效的判断。',thesis_win_rate:{rate:50,note:'仅合成样本'},user_mistakes:[],assistant_mistakes:[],take_profit:[],stop_loss:[],review_notes:[],source:'fixture'}]},
+    '/api/gainers-losers':{rising:symbols.map((symbol,index)=>({symbol,score:80-index*6,score_label:'合成结构分',price:1.23456789,change:6.2-index,volume_24h:15700000})),falling:symbols.map((symbol,index)=>({symbol,score:40-index*4,price:0.0000123456789,change:-5.2-index,volume_24h:8700000}))},
+  };
+  fixtures['/api/dashboard']={market_updated_at_epoch:now(),market_stale:false,market_incomplete:false,summary:{best_spread:0.21,markets_scanned:9,active_strategies:1,mode:'合成预览'},
+    majors:['BTC/USDT','ETH/USDT','SOL/USDT'].map((symbol,index)=>({symbol,price:[81600,2420,104][index],change_24h:1.5,funding_rate:0.01,basis:0.02,open_interest:14300000,long_short_ratio:1.73,quote_updated_at_epoch:now(),analysis_updated_at_epoch:now(),windows:{'30m':{price_change:0.6},'4h':{price_change:1.2}},forecast:{stance:'观察',forecast:'合成大盘样本，仅用于版式检查。',reason:'检查价格、结构时间与多项指标的层级。'}})),
+    momentum_updated_at:stamp,momentum_opportunities:symbols.map(symbol=>({symbol,label:'合成结构',score:76,components:{price:22,open_interest:20,ratio:16,cvd:18},oi_change_4h:3,ratio_change_4h:-2,cvd_ratio_4h:4,reason:'持仓增加 · 人数比下降 · CVD主动买入'})),
+    oi_market_cap_updated_at:stamp,oi_market_cap_coverage:4,oi_market_cap_opportunities:symbols.map(symbol=>({symbol,label:'合成持仓比',ratio:0.8,total_open_interest:14000000,market_cap:17500000,market_source:'CoinMarketCap',market_cap_rank:1000,exchange_oi:{Binance:9000000,Bybit:5000000}})),
+    opportunities:symbols.slice(0,3).map(symbol=>({symbol,buy_price:1.23,sell_price:1.24,buy_exchange:'Binance',sell_exchange:'Bybit',spread:0.81,estimated_profit:0.69,funding:0.025,updated_at_epoch:now(),exchange_prices:{Binance:1.23,OKX:1.235,Bybit:1.24}}))};
+  fixtures['/api/chat/messages/2']=fixtures['/api/chat/messages'];
+  window.fetch = async (input, options={}) => {
+    const method = String(options.method || 'GET').toUpperCase();
+    if (method !== 'GET') return Response.json({error:'隔离预览禁止写入'}, {status:405});
+    const path = new URL(String(input), location.origin).pathname;
+    if (!(path in fixtures)) return Response.json({error:`未定义的合成接口 ${path}`}, {status:404});
+    const payload = structuredClone(fixtures[path]);
+    if (payload && !Array.isArray(payload)) {
+      if ('checked_at_epoch' in payload) payload.checked_at_epoch=now();
+      if ('captured_at_epoch' in payload) payload.captured_at_epoch=now();
+      if ('market_updated_at_epoch' in payload) payload.market_updated_at_epoch=now();
+    }
+    return Response.json(payload);
+  };
+})();

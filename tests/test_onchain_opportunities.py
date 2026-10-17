@@ -118,7 +118,7 @@ class OnchainOpportunityTests(unittest.TestCase):
         self.assertIn(".onchain-opportunity-card", STYLE_CSS)
         self.assertIn(".onchain-change-grid{display:grid;grid-template-columns:repeat(2", STYLE_CSS)
         self.assertIn("overflow-wrap:anywhere", STYLE_CSS)
-        self.assertIn("20261018-workspace-refresh-v2", INDEX_HTML)
+        self.assertIn("20261018-workspace-refresh-v3", INDEX_HTML)
         self.assertIn("@media(max-width:760px)", STYLE_CSS)
 
 

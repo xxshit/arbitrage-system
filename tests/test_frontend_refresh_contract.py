@@ -61,7 +61,12 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertNotIn("setInterval(callback", source)
         self.assertIn("delay-(Date.now()-state.startedAt)", source)
         self.assertIn("!pageRefreshState(viewId).inFlight", source)
-        self.assertGreaterEqual(INDEX_HTML.count("20261018-workspace-refresh-v2"), 2)
+        self.assertGreaterEqual(INDEX_HTML.count("20261018-workspace-refresh-v3"), 2)
+
+    def test_workspace_filter_overrides_legacy_forced_daily_navigation_display(self):
+        # Existing daily-nav selectors force display:flex!important; class-only
+        # filtering loses the specificity contest in the actual browser.
+        self.assertIn('#workspaceNavigation .section-filtered{display:none!important}', STYLE_CSS)
 
     def test_clearing_search_invalidates_inflight_suggestion_request(self):
         source = function_source("loadSymbolSuggestions", "closeSuggestionPanels")

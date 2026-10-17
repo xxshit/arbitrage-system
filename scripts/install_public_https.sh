@@ -6,6 +6,11 @@ PUBLIC_HTTPS_PORT="${2:-18443}"
 UPSTREAM="${ARBITRAGE_UPSTREAM:-127.0.0.1:15831}"
 SITE_NAME="arbitrage-public"
 WEBROOT="/var/www/arbitrage-letsencrypt"
+if [[ "$PUBLIC_HTTPS_PORT" == "443" ]]; then
+  PUBLIC_ORIGIN="https://${PUBLIC_HOSTNAME}"
+else
+  PUBLIC_ORIGIN="https://${PUBLIC_HOSTNAME}:${PUBLIC_HTTPS_PORT}"
+fi
 
 if [[ -z "$PUBLIC_HOSTNAME" ]]; then
   echo "Usage: $0 PUBLIC_HOSTNAME [HTTPS_PORT]" >&2
@@ -62,13 +67,13 @@ server {
     }
 
     location / {
-        return 308 https://\$host:${PUBLIC_HTTPS_PORT}\$request_uri;
+        return 308 ${PUBLIC_ORIGIN}\$request_uri;
     }
 }
 
 server {
-    listen ${PUBLIC_HTTPS_PORT} ssl http2;
-    listen [::]:${PUBLIC_HTTPS_PORT} ssl http2;
+    listen ${PUBLIC_HTTPS_PORT} ssl;
+    listen [::]:${PUBLIC_HTTPS_PORT} ssl;
     server_name ${PUBLIC_HOSTNAME};
 
     ssl_certificate /etc/letsencrypt/live/${PUBLIC_HOSTNAME}/fullchain.pem;
@@ -115,4 +120,4 @@ EOF
 
 nginx -t
 nginx -s reload
-echo "Public HTTPS enabled: https://${PUBLIC_HOSTNAME}:${PUBLIC_HTTPS_PORT}"
+echo "Public HTTPS enabled: ${PUBLIC_ORIGIN}"

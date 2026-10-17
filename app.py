@@ -5669,8 +5669,10 @@ def daily_trends_page():
 
 
 MAJOR_MARKET_CACHE = {"ts": 0, "items": []}
+MAJOR_MARKET_CACHE_SECONDS = 30
 MAJOR_MARKET_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT")
 DASHBOARD_OPPORTUNITY_CACHE = {"ts": 0, "items": []}
+DASHBOARD_QUOTE_REFRESH_SECONDS = MARKET_REFRESH_SECONDS
 MOMENTUM_SCORE_CACHE = {"ts": 0, "items": [], "by_symbol": {}}
 MOMENTUM_SCORE_CACHE_SECONDS = 5 * 60
 MOMENTUM_SCORE_LOCK = threading.Lock()
@@ -5773,14 +5775,15 @@ def fetch_major_market_symbol(raw_symbol):
             "4h": major_market_window_metrics(klines, oi_rows, ratio_rows, 8),
         },
         "updated_at": datetime.now(SHANGHAI_TZ).strftime("%H:%M:%S"),
+        "analysis_updated_at_epoch": time.time(),
     }
     metrics["forecast"] = major_market_forecast(metrics)
     return metrics
 
 
-def fetch_major_market_overview():
+def fetch_major_market_overview(force=False):
     now_ts = time.time()
-    if MAJOR_MARKET_CACHE["items"] and now_ts - MAJOR_MARKET_CACHE["ts"] < 15:
+    if not force and MAJOR_MARKET_CACHE["items"] and now_ts - MAJOR_MARKET_CACHE["ts"] < MAJOR_MARKET_CACHE_SECONDS:
         return MAJOR_MARKET_CACHE["items"]
     items = []
     with ThreadPoolExecutor(max_workers=3) as executor:
@@ -5810,9 +5813,9 @@ def fetch_dashboard_symbol_quotes(raw_symbol):
         "OKX": "https://www.okx.com/api/v5/market/ticker?" + urlencode({"instId": f"{base}-USDT-SWAP"}),
         "Bybit": "https://api.bybit.com/v5/market/tickers?" + urlencode({"category": "linear", "symbol": raw_symbol}),
     }
-    quotes = {}
+    quotes, quote_times, ticker_metrics = {}, {}, {}
     with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(get_json, url, 4): exchange for exchange, url in urls.items()}
+        futures = {executor.submit(get_json, url, 1.5): exchange for exchange, url in urls.items()}
         for future in as_completed(futures):
             exchange = futures[future]
             try:
@@ -5825,11 +5828,17 @@ def fetch_dashboard_symbol_quotes(raw_symbol):
                 else:
                     rows = ((payload.get("result") or {}).get("list") or [])
                     price = float((rows[0] if rows else {}).get("lastPrice", 0) or 0)
-                if price > 0:
+                if math.isfinite(price) and price > 0:
                     quotes[exchange] = price
+                    quote_times[exchange] = time.time()
+                    if exchange == "Binance":
+                        ticker_metrics = {
+                            "change_24h": float(payload.get("priceChangePercent", 0) or 0),
+                            "volume_24h": float(payload.get("quoteVolume", 0) or 0),
+                        }
             except Exception:
                 continue
-    return raw_symbol[:-4] + "/USDT", quotes
+    return raw_symbol[:-4] + "/USDT", quotes, quote_times, ticker_metrics
 
 
 def momentum_positive_score(value, full_score_value, points):
@@ -5997,9 +6006,9 @@ def momentum_score_reason(item):
     return " · ".join(reasons)
 
 
-def load_momentum_scores():
+def load_momentum_scores(force=False):
     now_ts = time.time()
-    if MOMENTUM_SCORE_CACHE["ts"] and now_ts - MOMENTUM_SCORE_CACHE["ts"] < MOMENTUM_SCORE_CACHE_SECONDS:
+    if not force and MOMENTUM_SCORE_CACHE["ts"] and now_ts - MOMENTUM_SCORE_CACHE["ts"] < MOMENTUM_SCORE_CACHE_SECONDS:
         return MOMENTUM_SCORE_CACHE
     if not MOMENTUM_SCORE_LOCK.acquire(blocking=False):
         return MOMENTUM_SCORE_CACHE
@@ -6217,9 +6226,9 @@ def rank_open_interest_market_cap(candidates, market_rows, comparison_rows=None,
     return ranked[:limit]
 
 
-def load_open_interest_market_cap_opportunities():
+def load_open_interest_market_cap_opportunities(force=False):
     now_ts = time.time()
-    if OI_MARKET_CAP_CACHE["ts"] and now_ts - OI_MARKET_CAP_CACHE["ts"] < OI_MARKET_CAP_CACHE_SECONDS:
+    if not force and OI_MARKET_CAP_CACHE["ts"] and now_ts - OI_MARKET_CAP_CACHE["ts"] < OI_MARKET_CAP_CACHE_SECONDS:
         return OI_MARKET_CAP_CACHE
     if not OI_MARKET_CAP_LOCK.acquire(blocking=False):
         return OI_MARKET_CAP_CACHE
@@ -6265,30 +6274,30 @@ def load_open_interest_market_cap_opportunities():
         OI_MARKET_CAP_LOCK.release()
 
 
-def live_dashboard_opportunities():
-    now_ts = time.time()
-    if DASHBOARD_OPPORTUNITY_CACHE["items"] and now_ts - DASHBOARD_OPPORTUNITY_CACHE["ts"] < 15:
-        return DASHBOARD_OPPORTUNITY_CACHE["items"]
+def refresh_dashboard_opportunities():
+    """Only the background worker calls exchanges; HTTP readers never wait for it."""
+    global DASHBOARD_OPPORTUNITY_CACHE
     rows = []
-    major_by_symbol = {item["symbol"]: item for item in fetch_major_market_overview()}
+    previous = {item["symbol"]: item for item in DASHBOARD_OPPORTUNITY_CACHE["items"]}
     with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = [executor.submit(fetch_dashboard_symbol_quotes, symbol) for symbol in MAJOR_MARKET_SYMBOLS]
+        futures = {executor.submit(fetch_dashboard_symbol_quotes, symbol): symbol[:-4] + "/USDT" for symbol in MAJOR_MARKET_SYMBOLS}
         for future in as_completed(futures):
             try:
-                symbol, quotes = future.result()
+                symbol, quotes, quote_times, ticker_metrics = future.result()
             except Exception:
+                if futures[future] in previous:
+                    rows.append(previous[futures[future]])
                 continue
             if not quotes:
-                major = major_by_symbol.get(symbol)
-                if major and major.get("price"):
-                    quotes = {"Binance": major["price"]}
-            if not quotes:
+                if symbol in previous:
+                    rows.append(previous[symbol])
                 continue
             buy_exchange = min(quotes, key=quotes.get)
             sell_exchange = max(quotes, key=quotes.get)
             buy, sell = quotes[buy_exchange], quotes[sell_exchange]
-            spread = (sell / buy - 1) * 100 if buy else 0
-            major = major_by_symbol.get(symbol) or {}
+            # One surviving exchange is useful for price display, not a cross-exchange opportunity.
+            spread = (sell / buy - 1) * 100 if len(quotes) >= 2 else None
+            captured_at = min(quote_times.values())
             rows.append({
                 "symbol": symbol,
                 "buy_exchange": buy_exchange,
@@ -6300,26 +6309,62 @@ def live_dashboard_opportunities():
                     "OKX": round(quotes["OKX"], 8) if "OKX" in quotes else None,
                     "Bybit": round(quotes["Bybit"], 8) if "Bybit" in quotes else None,
                 },
-                "spread": round(spread, 4),
-                "estimated_profit": round(spread - 0.12, 4),
-                "funding": major.get("funding_rate") if major.get("funding_rate") is not None else 0,
-                "updated_at": datetime.now().strftime("%H:%M:%S"),
+                "spread": round(spread, 4) if spread is not None else None,
+                "estimated_profit": round(spread - 0.12, 4) if spread is not None else None,
+                "quote_times": quote_times,
+                "ticker_metrics": ticker_metrics,
+                "updated_at_epoch": captured_at,
+                "updated_at": datetime.fromtimestamp(captured_at, SHANGHAI_TZ).strftime("%H:%M:%S"),
             })
-    rows.sort(key=lambda item: item["estimated_profit"], reverse=True)
+    rows.sort(key=lambda item: item["estimated_profit"] if item["estimated_profit"] is not None else -math.inf, reverse=True)
     if rows:
-        DASHBOARD_OPPORTUNITY_CACHE.update({"ts": now_ts, "items": rows})
+        # Publish an entire generation atomically; failed sources retain their original timestamp.
+        DASHBOARD_OPPORTUNITY_CACHE = {"ts": min(row["updated_at_epoch"] for row in rows), "items": rows}
     return DASHBOARD_OPPORTUNITY_CACHE["items"]
+
+
+def live_dashboard_opportunities():
+    now_ts = time.time()
+    majors = {item["symbol"]: item for item in MAJOR_MARKET_CACHE["items"]}
+    return [{
+        **item,
+        "funding": (majors.get(item["symbol"]) or {}).get("funding_rate"),
+        "stale": now_ts - item["updated_at_epoch"] > max(15, 3 * DASHBOARD_QUOTE_REFRESH_SECONDS),
+        "incomplete": any(item["exchange_prices"].get(exchange) is None for exchange in EXCHANGES),
+    } for item in DASHBOARD_OPPORTUNITY_CACHE["items"]]
+
+
+def live_dashboard_majors(items):
+    analysis = {item["symbol"]: item for item in MAJOR_MARKET_CACHE["items"]}
+    quotes = {item["symbol"]: item for item in items}
+    result = []
+    for raw_symbol in MAJOR_MARKET_SYMBOLS:
+        symbol = raw_symbol[:-4] + "/USDT"
+        item = dict(analysis.get(symbol) or {"symbol": symbol})
+        row = quotes.get(symbol) or {}
+        price = row.get("exchange_prices", {}).get("Binance")
+        if price:
+            item.update(row.get("ticker_metrics", {}))
+            item["price"] = price
+        item["quote_updated_at_epoch"] = row.get("quote_times", {}).get("Binance")
+        item["quote_stale"] = not item["quote_updated_at_epoch"] or time.time() - item["quote_updated_at_epoch"] > max(15, 3 * DASHBOARD_QUOTE_REFRESH_SECONDS)
+        result.append(item)
+    return result
 
 
 @app.get("/api/dashboard")
 def dashboard():
     items = live_dashboard_opportunities()
-    momentum = load_momentum_scores()
-    oi_market_cap = load_open_interest_market_cap_opportunities()
+    momentum = MOMENTUM_SCORE_CACHE.copy()
+    oi_market_cap = OI_MARKET_CAP_CACHE.copy()
     active = Strategy.query.filter_by(enabled=True).count()
-    return jsonify({
-        "majors": fetch_major_market_overview(),
+    response = jsonify({
+        "majors": live_dashboard_majors(items),
         "opportunities": items,
+        "market_updated_at_epoch": min((item["updated_at_epoch"] for item in items), default=None),
+        "market_stale": not items or any(item["stale"] for item in items),
+        "market_incomplete": len(items) < len(MAJOR_MARKET_SYMBOLS) or any(item["incomplete"] for item in items),
+        "market_stale_after_seconds": max(15, 3 * DASHBOARD_QUOTE_REFRESH_SECONDS),
         "momentum_opportunities": momentum["items"],
         "momentum_updated_at": momentum["items"][0]["evaluated_at"] if momentum["items"] else None,
         "oi_market_cap_opportunities": oi_market_cap["items"],
@@ -6328,11 +6373,13 @@ def dashboard():
         "oi_market_cap_error": oi_market_cap["error"],
         "summary": {
             "active_strategies": active,
-            "best_spread": items[0]["spread"] if items else 0,
+            "best_spread": max((item["spread"] for item in items if item["spread"] is not None and not item["stale"]), default=0),
             "markets_scanned": len(items) * len(EXCHANGES),
             "mode": "机会看板 · 三所合约公开 API",
         },
     })
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 def onchain_number(value, fallback=None):
@@ -14115,11 +14162,39 @@ def background_turnover_basis_watch():
         time.sleep(5)
 
 
+def background_dashboard_cache_refresh(refresh, seconds, rule_key=None, force=False):
+    """Independent quote/analysis lanes: neither an HTTP reader nor another lane waits."""
+    global DASHBOARD_QUOTE_REFRESH_SECONDS
+    while True:
+        started_at = time.monotonic()
+        interval = seconds
+        try:
+            with app.app_context():
+                if rule_key:
+                    interval = runtime_interval(rule_key, seconds)
+                    DASHBOARD_QUOTE_REFRESH_SECONDS = interval
+                # Scheduled analysis is due by definition; don't skip a cycle at a TTL rounding edge.
+                if force:
+                    refresh(force=True)
+                else:
+                    refresh()
+        except Exception:
+            app.logger.warning("Dashboard cache refresh failed: %s", refresh.__name__)
+        time.sleep(max(0.25, interval - (time.monotonic() - started_at)))
+
+
 def start_background_workers():
     global BACKGROUND_WORKERS_STARTED
     if BACKGROUND_WORKERS_STARTED:
         return
     BACKGROUND_WORKERS_STARTED = True
+    for name, refresh, seconds, rule_key in (
+        ("quotes", refresh_dashboard_opportunities, MARKET_REFRESH_SECONDS, "spot_market_refresh"),
+        ("major-analysis", fetch_major_market_overview, MAJOR_MARKET_CACHE_SECONDS, None),
+        ("momentum", load_momentum_scores, MOMENTUM_SCORE_CACHE_SECONDS, None),
+        ("oi-market-cap", load_open_interest_market_cap_opportunities, OI_MARKET_CAP_CACHE_SECONDS, None),
+    ):
+        threading.Thread(target=background_dashboard_cache_refresh, args=(refresh, seconds, rule_key, rule_key is None), daemon=True, name=f"dashboard-{name}").start()
     threading.Thread(target=background_spot_market_refresh, daemon=True, name="spot-market-refresh").start()
     threading.Thread(target=background_dual_market_refresh, daemon=True, name="dual-market-refresh").start()
     threading.Thread(target=background_funding_history_sync, daemon=True, name="funding-history-sync").start()

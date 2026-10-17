@@ -42,8 +42,11 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertNotIn("即将刷新", render)
         self.assertIn("if(status.textContent!==statusText)", render)
         self.assertIn("state.completedAt=Date.now()", finish)
-        self.assertIn("state.cycleStartedAt=state.completedAt", finish)
-        self.assertIn("try{return await original.apply(this,args)}finally{finishPageRefresh(viewId)}", install)
+        self.assertIn("if(succeeded)state.completedAt=Date.now()", finish)
+        self.assertIn("state.cycleStartedAt=Date.now()", finish)
+        self.assertIn("finally{finishPageRefresh(viewId,succeeded)}", install)
+        self.assertIn("state.sourceUpdatedAt", render)
+        self.assertIn("行情延迟", render)
         self.assertIn("conic-gradient(from -90deg", STYLE_CSS)
         self.assertIn("--refresh-angle", STYLE_CSS)
         self.assertIn("align-self:stretch", STYLE_CSS)
@@ -56,6 +59,9 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertIn("finally{if(!controller.stopped)controller.schedule()}", source)
         self.assertIn("setTimeout", source)
         self.assertNotIn("setInterval(callback", source)
+        self.assertIn("delay-(Date.now()-state.startedAt)", source)
+        self.assertIn("!pageRefreshState(viewId).inFlight", source)
+        self.assertIn("20261018-dashboard-live-refresh", INDEX_HTML)
         self.assertIn("20261013-hedge-positions", INDEX_HTML)
 
     def test_clearing_search_invalidates_inflight_suggestion_request(self):

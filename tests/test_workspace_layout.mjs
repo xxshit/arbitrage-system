@@ -54,6 +54,8 @@ test('market sticky cells target only the symbol class, not rowspan continuation
   assert.ok(css.includes('td.symbol {position:sticky;left:0;'));
   assert.ok(!/td:first-child\s*\{[^}]*position:sticky/.test(css));
   assert.ok(css.includes('thead th {position:sticky;top:0;'));
+  assert.ok(css.includes('td.price-change-cell {vertical-align:top;'));
+  assert.ok(script.includes("hint.className = 'layout-table-hint'"));
 });
 
 test('onchain cards assign every block and preserve complete prices on narrow screens',()=>{
@@ -72,7 +74,7 @@ test('movers have six desktop columns and labelled mobile values rather than dro
 test('layout assets load after the existing business assets, and risk has four independent cards',()=>{
   assert.ok(html.indexOf("filename='workspace-layout.css'")>html.indexOf("filename='style.css'"));
   assert.ok(html.indexOf("filename='workspace-layout.js'")>html.indexOf("filename='app.js'"));
-  assert.equal((html.match(/20261018-section-layout-v1/g)||[]).length,2);
+  assert.equal((html.match(/20261018-section-layout-v2/g)||[]).length,2);
   const risk=html.slice(html.indexOf('<section id="risk"'),html.indexOf('<section id="thinking"'));
   assert.equal((risk.match(/<article>/g)||[]).length,4);assert.ok(risk.includes('真实下单尚未开放'));
 });

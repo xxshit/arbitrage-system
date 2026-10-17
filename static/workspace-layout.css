@@ -81,7 +81,9 @@
 .layout-view:is(#spot-futures,#dual-futures) table {margin:0;border-collapse:separate;border-spacing:0}
 .layout-view:is(#spot-futures,#dual-futures) thead th {position:sticky;top:0;z-index:4;background:#eaf1ea;box-shadow:0 1px #ccd9cf;font-size:11px;line-height:1.5}
 .layout-view:is(#spot-futures,#dual-futures) thead th:first-child {left:0;z-index:6}
-.layout-view:is(#spot-futures,#dual-futures) td.symbol {position:sticky;left:0;z-index:2;background:#fafcf7;box-shadow:1px 0 #dce5da;min-width:134px}
+.layout-view:is(#spot-futures,#dual-futures) td.symbol {position:sticky;left:0;z-index:2;background:#fafcf7;box-shadow:1px 0 #dce5da;min-width:134px;vertical-align:top;padding-top:16px}
+.layout-view:is(#spot-futures,#dual-futures) td.price-change-cell {vertical-align:top;padding-top:16px}
+.layout-view .layout-table-hint {margin:0 0 10px;font-size:11px;color:var(--desk-muted);line-height:1.7;overflow-wrap:anywhere}
 .layout-view:is(#spot-futures,#dual-futures) td {font-size:11px;line-height:1.65}
 .layout-view:is(#spot-futures,#dual-futures) td.numeric {white-space:nowrap;font-weight:700}
 .layout-view:is(#spot-futures,#dual-futures) :is(.pagination,.data-status) {flex-wrap:wrap;gap:10px;line-height:1.7}

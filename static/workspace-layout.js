@@ -120,6 +120,15 @@
     view.classList.add('layout-view');
     view.dataset.layout = profile.kind;
     view.querySelectorAll('.table-wrap').forEach(node => accessibleScroll(node, profile.kind === 'market' ? '完整行情表格，可横向滚动；交易对固定在左侧' : '完整数据表格，可横向滚动'));
+    if (profile.kind === 'market' && !view.querySelector('.layout-table-hint')) {
+      const table = view.querySelector('.table-wrap');
+      if (table) {
+        const hint = document.createElement('p');
+        hint.className = 'layout-table-hint';
+        hint.textContent = '表内可上下、左右滚动查看完整字段；币名与表头固定，多腿路径按币种对齐。';
+        table.before(hint);
+      }
+    }
     if (view.id === 'funding-trend') view.querySelectorAll('.funding-trend-grid').forEach(groupFundingMetrics);
     if (view.id === 'gainers-losers') prepareRankingScroll(view);
     if (view.id === 'onchain-opportunities') foldReadingGuide(view.querySelector('.onchain-method'), '机会分计算方法与数据说明');

@@ -61,8 +61,7 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertNotIn("setInterval(callback", source)
         self.assertIn("delay-(Date.now()-state.startedAt)", source)
         self.assertIn("!pageRefreshState(viewId).inFlight", source)
-        self.assertIn("20261018-dashboard-live-refresh", INDEX_HTML)
-        self.assertIn("20261013-hedge-positions", INDEX_HTML)
+        self.assertGreaterEqual(INDEX_HTML.count("20261018-workspace-refresh-v2"), 2)
 
     def test_clearing_search_invalidates_inflight_suggestion_request(self):
         source = function_source("loadSymbolSuggestions", "closeSuggestionPanels")

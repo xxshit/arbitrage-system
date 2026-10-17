@@ -5,7 +5,8 @@ import test from 'node:test';
 
 const source=readFileSync(new URL('../static/app.js',import.meta.url),'utf8');
 const tracking=source.slice(source.indexOf('const pageRefreshProfiles='),source.indexOf('const delistingWarningObserver='));
-const loader=source.slice(source.indexOf('let dashboardLoadingPromise=null;'),source.indexOf('function onchainDecimal'));
+const networkHelper=source.slice(source.indexOf('async function fetchRefreshJson('),source.indexOf('let dashboardLoadingPromise=null;'));
+const loader=networkHelper+source.slice(source.indexOf('let dashboardLoadingPromise=null;'),source.indexOf('function onchainDecimal'));
 
 function harness(){
   let now=100000,nextId=0;
@@ -24,7 +25,7 @@ function harness(){
     for(const name of match[1].matchAll(/'([^']+)'/g))context[name[1]]=async()=>{};
   }
   context.loadDelistedMarketSymbols=async()=>{};
-  vm.createContext(context);vm.runInContext(tracking,context);
+  vm.createContext(context);vm.runInContext(tracking+networkHelper,context);
   vm.runInContext('renderPageRefreshIndicator=()=>{};',context);
   const flush=async()=>{for(let i=0;i<15;i++)await Promise.resolve()};
   return {context,timers,flush,now:()=>now,run:code=>vm.runInContext(code,context),async advance(ms){
@@ -77,7 +78,7 @@ test('dashboard loader coalesces simultaneous clicks and clears on error',async(
 test('stuck dashboard fetch aborts at 10 seconds and allows the next request',async()=>{
   const h=harness();h.run(loader);
   h.context.fetch=(_url,{signal,cache})=>{assert.equal(cache,'no-store');return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new Error('aborted'))))};
-  const rejected=assert.rejects(h.context.loadDashboard(),/aborted/);
+  const rejected=assert.rejects(h.context.loadDashboard(),/超时/);
   await h.advance(10000);await rejected;
   assert.equal(h.run('dashboardLoadingPromise'),null);
 });
@@ -100,4 +101,60 @@ test('indicator displays real source time and ages it even without another respo
   assert.ok(!status.textContent.includes('行情延迟'));
   await h.advance(6000);h.context.renderPageRefreshIndicator();
   assert.ok(status.textContent.includes('行情延迟'));
+});
+
+for(const [view,name] of [['spot-futures','loadSpotFutures'],['dual-futures','loadDualFutures'],['my-positions','loadHedgePositions'],['alerts','loadAlerts']]){
+  test(`${view}: 5-second start cadence, independent of response duration`,async()=>{
+    const h=harness(),starts=[];h.context.active=view;
+    h.context[name]=()=>{starts.push(h.now());return new Promise(resolve=>h.context.setTimeout(resolve,2000))};
+    h.run('installPageRefreshTracking()');await h.context.startConfiguredPageTimers();h.context[name]();await h.flush();await h.advance(16000);
+    assert.deepEqual(starts,[100000,105000,110000,115000]);
+  });
+  test(`${view}: manual clicks coalesce and false return does not advance success time`,async()=>{
+    const h=harness();h.context.active=view;let calls=0,resolve;
+    h.context[name]=()=>{calls++;return new Promise(done=>{resolve=done})};
+    h.run(`installPageRefreshTracking();pageRefreshState('${view}').completedAt=90000`);
+    const first=h.context[name](),second=h.context[name]();assert.equal(calls,1);resolve(false);await Promise.all([first,second]);
+    assert.equal(h.run(`pageRefreshState('${view}').completedAt`),90000);
+    assert.equal(h.run(`pageRefreshState('${view}').failed`),true);
+  });
+}
+
+test('all live view reads abort, clear timers and can recover after timeout',async()=>{
+  const h=harness();h.context.fetch=(_url,{signal})=>new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new Error('aborted'))));
+  const rejected=assert.rejects(h.context.fetchRefreshJson('/api/alerts'),/超时/);await h.advance(10000);await rejected;
+  assert.equal(h.timers.size,0);
+  h.context.fetch=async()=>({ok:true,json:async()=>({checked_at_epoch:123})});
+  assert.equal((await h.context.fetchRefreshJson('/api/alerts')).checked_at_epoch,123);
+});
+
+test('background alert refresh never overwrites another page indicator',()=>{
+  const h=harness(),status=h.context.byId('updated');status.textContent='spot status';h.context.active='spot-futures';
+  h.context.document.querySelector=()=>{throw new Error('background view must not touch the ring')};
+  h.run(source.slice(source.indexOf('function renderPageRefreshIndicator('),source.indexOf('function beginPageRefresh(')));
+  h.context.renderPageRefreshIndicator('alerts');assert.equal(status.textContent,'spot status');
+});
+
+for(const [name,start,end,lock,hasData,rowId] of [
+  ['loadSpotFutures','async function loadSpotFutures(','function hedgeMetric(','spotFuturesLoading','spotFuturesHasData','spotFuturesRows'],
+  ['loadDualFutures','async function loadDualFutures(','function addDualLiquidityHeader(','dualFuturesLoading','dualFuturesHasData','dualFuturesRows'],
+])test(`${name}: real loader releases its lock after timeout without clearing good rows`,async()=>{
+  const h=harness();Object.assign(h.context,{[lock]:false,[hasData]:true,spotFuturesPage:1,spotFuturesSearch:'',spotFundingInterval:'all',spotSort:{key:'open_spread',direction:'desc'},dualFuturesPage:1,dualFuturesSearch:'',dualSort:{key:'open_spread',direction:'desc'},dualIncludeBybitOkx:false});
+  h.context.byId(rowId).innerHTML='last good rows';h.run(source.slice(source.indexOf(start),source.indexOf(end)));
+  let requests=0;h.context.fetch=(_url,{signal})=>{requests++;return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new Error('aborted'))))};
+  const pending=h.context[name]();assert.equal(h.context[lock],true);await h.advance(10000);assert.equal(await pending,false);
+  assert.equal(h.context[lock],false);assert.equal(h.context.byId(rowId).innerHTML,'last good rows');
+  const retry=h.context[name]();assert.equal(requests,2);await h.advance(10000);await retry;assert.equal(h.context[lock],false);
+});
+
+test('tracking-only alert changes render without causing repeat sound',async()=>{
+  const h=harness();let renders=0,sounds=0,requests=0;
+  Object.assign(h.context,{pruneAlertMutes(){},latestActiveAlertEvents:[],isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){renders++},percent:v=>v.toFixed(1)+'%',strategyLabel:()=>'',replaceHtmlKeepingExchangeLogos:(element,html)=>{element.innerHTML=html},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});
+  h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
+  let tracking={symbol:'AUDIT/USDT',strategy:'spot_futures',max_basis:1,last_level:1,max_at:'00:00:00'};
+  h.context.fetch=async()=>{requests++;return {ok:true,json:async()=>({active_events:[],events:[],basis_tracking:[tracking],checked_at_epoch:100})}};
+  await h.context.loadAlerts(true);tracking={...tracking,max_basis:1.4,last_level:1.4};await h.context.loadAlerts();
+  assert.equal(requests,2);assert.equal(renders,2);assert.equal(sounds,0);assert.ok(h.context.byId('basisTracking').innerHTML.includes('1.4%'));
+  h.context.fetch=async()=>({ok:false,json:async()=>({error:'unavailable'})});
+  const valid=h.context.byId('basisTracking').innerHTML;assert.equal(await h.context.loadAlerts(),false);assert.equal(h.context.byId('basisTracking').innerHTML,valid);
 });

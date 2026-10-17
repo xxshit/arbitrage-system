@@ -50,6 +50,15 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes", "on"}
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
+
+
+@app.after_request
+def disable_live_view_response_cache(response):
+    if request.path in {"/api/dashboard", "/api/spot-futures", "/api/dual-futures", "/api/alerts", "/api/hedge-positions"}:
+        response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
 CHAT_PUSH_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="chat-web-push")
 IP_LOCATION_CACHE = {}
 IP_LOCATION_CACHE_LOCK = threading.Lock()
@@ -2645,8 +2654,21 @@ def enrich_dual_binance_reference(groups):
     if not groups:
         return
     symbols = [group["symbol"] for group in groups]
-    snapshot_rows = LatestMarketSnapshot.query.filter(LatestMarketSnapshot.symbol.in_(symbols)).all()
     references = {}
+    # The current leg is fresher than the 15-second database persistence lane.
+    for group in groups:
+        for row in group["rows"]:
+            for side in ("short", "long"):
+                if row.get(f"{side}_exchange") == "Binance":
+                    bid, ask = row.get(f"{side}_bid"), row.get(f"{side}_ask")
+                    if bid and ask:
+                        references[group["symbol"]] = {"basis": row.get(f"{side}_basis"), "price": (bid + ask) / 2}
+    for group in (SPOT_FUTURES_CACHE["snapshot"] or {}).get("symbols", []):
+        if group["symbol"] in symbols and group["symbol"] not in references and group["rows"]:
+            row = group["rows"][0]
+            references[group["symbol"]] = {"basis": row.get("basis"), "price": (row["short_ask"] + row["short_bid"]) / 2}
+    missing = set(symbols) - references.keys()
+    snapshot_rows = LatestMarketSnapshot.query.filter(LatestMarketSnapshot.symbol.in_(missing)).all() if missing else []
     for item in snapshot_rows:
         references.setdefault(item.symbol, {"basis": item.basis, "price": (item.short_ask + item.short_bid) / 2})
     now_bucket = int(time.time()) // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
@@ -2657,9 +2679,8 @@ def enrich_dual_binance_reference(groups):
     points = nearest_trend_points(history, lambda item: (item.symbol,), target_buckets)
     for group in groups:
         reference = references.get(group["symbol"], {})
-        binance_row = next((row for row in group["rows"] if row["short_exchange"] == "Binance"), None)
-        current_price = reference.get("price") or ((binance_row["short_ask"] + binance_row["short_bid"]) / 2 if binance_row else None)
-        group["binance_basis"] = reference.get("basis") if reference else (binance_row.get("short_basis") if binance_row else None)
+        current_price = reference.get("price")
+        group["binance_basis"] = reference.get("basis")
         for key, seconds in TREND_WINDOWS.items():
             previous = points.get((group["symbol"], now_bucket - seconds))
             group[f"binance_{key}"] = (current_price - previous) / previous * 100 if current_price and previous else None
@@ -2681,7 +2702,7 @@ def load_latest_dual_futures_snapshot():
         )}
         groups.setdefault(item.symbol, []).append(row)
     elapsed = max(0.0, (datetime.now() - captured_at).total_seconds())
-    return {"symbols": [{"symbol": symbol, "rows": entries} for symbol, entries in groups.items()], "errors": {}, "updated_at": captured_at.strftime("%H:%M:%S"), "next_refresh_in_seconds": max(0, int(MARKET_REFRESH_SECONDS - elapsed + 0.999)), "stored": True}
+    return {"symbols": [{"symbol": symbol, "rows": entries} for symbol, entries in groups.items()], "errors": {}, "updated_at": captured_at.strftime("%H:%M:%S"), "captured_at_epoch": captured_at.timestamp(), "next_refresh_in_seconds": max(0, int(MARKET_REFRESH_SECONDS - elapsed + 0.999)), "stored": True}
 
 
 def fetch_price_history_from_binance(symbol):
@@ -3118,7 +3139,7 @@ def load_latest_market_snapshot():
         groups.setdefault(item.symbol, []).append({"long_exchange": item.long_exchange, "long_ask": item.long_ask, "long_bid": item.long_bid, "short_exchange": item.short_exchange, "short_bid": item.short_bid, "short_ask": item.short_ask, "basis": item.basis, "funding_rate": item.funding_rate, "funding_interval_hours": item.funding_interval_hours, "next_funding_time": item.next_funding_time, "spot_volume": item.spot_volume, "futures_volume": item.futures_volume, "futures_open_interest": item.futures_open_interest, "open_spread": item.open_spread, "close_spread": item.close_spread})
     elapsed = max(0.0, (datetime.now() - captured_at).total_seconds())
     next_refresh_in_seconds = max(0, int(MARKET_REFRESH_SECONDS - elapsed + 0.999))
-    return {"symbols": [{"symbol": symbol, "rows": entries} for symbol, entries in groups.items()], "errors": {}, "updated_at": captured_at.strftime("%H:%M:%S"), "next_refresh_in_seconds": next_refresh_in_seconds, "stored": True}
+    return {"symbols": [{"symbol": symbol, "rows": entries} for symbol, entries in groups.items()], "errors": {}, "updated_at": captured_at.strftime("%H:%M:%S"), "captured_at_epoch": captured_at.timestamp(), "next_refresh_in_seconds": next_refresh_in_seconds, "stored": True}
 
 
 def spot_futures_snapshot():
@@ -3222,6 +3243,7 @@ def spot_futures_snapshot():
         "symbols": rows_by_symbol,
         "errors": errors,
         "updated_at": captured_at.strftime("%H:%M:%S"),
+        "captured_at_epoch": captured_at.timestamp(),
         "next_refresh_in_seconds": MARKET_REFRESH_SECONDS,
         "stored": True,
     }
@@ -3372,6 +3394,7 @@ def dual_futures_snapshot():
         "symbols": groups,
         "errors": errors,
         "updated_at": captured_at.strftime("%H:%M:%S"),
+        "captured_at_epoch": captured_at.timestamp(),
         "next_refresh_in_seconds": MARKET_REFRESH_SECONDS,
         "stored": True,
     }
@@ -6830,6 +6853,7 @@ def hedge_positions_api():
     current_rows = [row for row in rows if row.status in HEDGE_CURRENT_STATUSES]
     history_rows = [row for row in rows if row.status not in HEDGE_CURRENT_STATUSES]
     return jsonify({
+        "checked_at_epoch": time.time(),
         "execution": {
             "enabled": False,
             "mode": "preview_only",
@@ -12350,6 +12374,7 @@ def alerts():
         }
 
     return jsonify({
+        "checked_at_epoch": time.time(),
         "events": [alert_group_payload(symbol, items) for symbol, items in grouped_events.items()],
         "active_events": [event_payload(item) for item in active_events],
         "basis_tracking": [{"symbol": item.symbol, "strategy": item.strategy or "spot_futures", "direction": item.direction, "started_at": item.started_at.strftime("%m-%d %H:%M:%S"), "opening_basis": item.opening_basis, "last_level": item.last_recorded_level, "max_basis": item.max_basis, "max_at": item.max_at.strftime("%m-%d %H:%M:%S")} for item in tracking],
@@ -13767,29 +13792,35 @@ with app.app_context():
 
 def background_spot_market_refresh():
     while True:
-        cycle_started_at = time.time()
+        cycle_started_at = time.monotonic()
+        interval = MARKET_REFRESH_SECONDS
         try:
             with app.app_context():
+                interval = runtime_interval("spot_market_refresh", MARKET_REFRESH_SECONDS)
+                db.session.remove()
                 spot_futures_snapshot()
         except Exception as exc:
             MARKET_REFRESH_METRICS["last_error"] = f"{type(exc).__name__}: {exc}"
             with app.app_context():
                 db.session.rollback()
-        time.sleep(max(0.25, runtime_interval("spot_market_refresh", MARKET_REFRESH_SECONDS) - (time.time() - cycle_started_at)))
+        time.sleep(max(0.25, interval - (time.monotonic() - cycle_started_at)))
 
 
 def background_dual_market_refresh():
     # 与现多期空错峰，避免两轮交易所请求和 MySQL 写入每 5 秒同时抢占资源。
     time.sleep(MARKET_REFRESH_SECONDS / 2)
     while True:
-        cycle_started_at = time.time()
+        cycle_started_at = time.monotonic()
+        interval = MARKET_REFRESH_SECONDS
         try:
             with app.app_context():
+                interval = runtime_interval("dual_market_refresh", MARKET_REFRESH_SECONDS)
+                db.session.remove()
                 dual_futures_snapshot()
         except Exception:
             with app.app_context():
                 db.session.rollback()
-        time.sleep(max(0.25, runtime_interval("dual_market_refresh", MARKET_REFRESH_SECONDS) - (time.time() - cycle_started_at)))
+        time.sleep(max(0.25, interval - (time.monotonic() - cycle_started_at)))
 
 
 def background_funding_history_sync():

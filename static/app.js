@@ -47,6 +47,7 @@ let spotFuturesHasData = false;
 let spotOpportunityByKey = new Map();
 let selectedHedgeOpportunity = null;
 let hedgePositionTab = 'current';
+let hedgePositionsHasData = false;
 let spotSort = {key:'open_spread', direction:'desc'};
 const spotSortOptions=[
 ['open_spread','开差'],['close_spread','平差'],
@@ -123,22 +124,26 @@ function dashboardOpportunityRow(x){
   const spread=x.stale||x.spread===null?'—':`${x.spread.toFixed(3)}%`,profit=x.stale||x.estimated_profit===null?'—':`${x.estimated_profit>=0?'+':''}${x.estimated_profit.toFixed(3)}%`;
   return `<tr data-render-key="dashboard|${x.symbol}"><td class="symbol ${delistingSymbolClass(x.symbol)}" data-market-symbol="${x.symbol}">${x.symbol}</td><td>${dashboardExchangePrices(x)}</td><td>${money(x.buy_price)}<span class="exchange">${x.buy_exchange}</span></td><td>${money(x.sell_price)}<span class="exchange">${x.sell_exchange}</span></td><td class="profit">${spread}</td><td class="${changeClass(x.estimated_profit)}">${profit}</td><td class="funding ${changeClass(x.funding)}">${displayFunding(x.funding)}</td><td>${new Date(x.updated_at_epoch*1000).toLocaleTimeString('zh-CN',{hour12:false})}${x.stale?' · 延迟':x.incomplete?' · 部分行情缺失':''}</td></tr>`
 }
+async function fetchRefreshJson(url,timeoutMs=10000){
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+    const response=await fetch(url,{cache:'no-store',signal:controller.signal}),data=await response.json();
+    if(!response.ok)throw new Error(data.error||`读取失败（${response.status}）`);
+    return data;
+  }catch(error){if(controller.signal.aborted)throw new Error('读取超时，将自动重试');throw error}
+  finally{clearTimeout(timeout)}
+}
 let dashboardLoadingPromise=null;
 async function loadDashboard(){
   if(dashboardLoadingPromise)return dashboardLoadingPromise;
   dashboardLoadingPromise=(async()=>{
-    const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),10000);
-    try{
-      const response=await fetch('/api/dashboard',{cache:'no-store',signal:controller.signal});
-      if(!response.ok)throw new Error('看板行情读取失败');
-      const data=await response.json(),state=pageRefreshState('dashboard');
+      const data=await fetchRefreshJson('/api/dashboard'),state=pageRefreshState('dashboard');
       state.sourceUpdatedAt=Number(data.market_updated_at_epoch||0)*1000;state.sourceStale=!!data.market_stale;state.sourceIncomplete=!!data.market_incomplete;state.sourceMaxAge=Number(data.market_stale_after_seconds||15)*1000;
       renderMajorMarkets(data.majors||[]);
       renderMomentumOpportunities(data.momentum_opportunities||[],data.momentum_updated_at);
       renderOiMarketCapOpportunities(data.oi_market_cap_opportunities||[],data.oi_market_cap_updated_at,data.oi_market_cap_coverage,data.oi_market_cap_error);
       byId('bestSpread').textContent=data.summary.best_spread.toFixed(3)+'%';byId('markets').textContent=data.summary.markets_scanned;byId('activeStrategies').textContent=data.summary.active_strategies;byId('mode').textContent=data.summary.mode;
       replaceHtmlKeepingExchangeLogos(byId('opportunities'),data.opportunities.length?data.opportunities.map(dashboardOpportunityRow).join(''):'<tr><td colspan="8" class="loading">等待首轮实时行情…</td></tr>');
-    }finally{clearTimeout(timeout)}
   })();
   try{return await dashboardLoadingPromise}finally{dashboardLoadingPromise=null}
 }
@@ -182,7 +187,7 @@ function delistingAssetBases(symbol){const normalized=normalizedMarketSymbol(sym
 function isDelistedMarketSymbol(symbol){return delistingAssetBases(symbol).some(base=>delistedMarketBases.has(base))}
 function delistingSymbolClass(symbol,serverFlag=false){return serverFlag||isDelistedMarketSymbol(symbol)?'delisting-symbol':''}
 function applyDelistingWarnings(root=document){const selector='[data-market-symbol],.symbol-detail-trigger',nodes=[];if(root?.matches?.(selector))nodes.push(root);root?.querySelectorAll?.(selector).forEach(node=>nodes.push(node));nodes.forEach(node=>{const symbol=node.dataset.marketSymbol||node.textContent.trim();if(!node.dataset.marketSymbol&&symbol)node.dataset.marketSymbol=symbol;const warned=isDelistedMarketSymbol(symbol)||node.dataset.delistingAnnounced==='1';node.classList.toggle('delisting-symbol',warned);if(warned&&!node.title)node.title='该币种已有交易所发布下架公告'})}
-async function loadDelistedMarketSymbols(force=false){if(!force&&delistedSymbolsLoadedAt&&Date.now()-delistedSymbolsLoadedAt<300000)return;try{const response=await fetch('/api/market-metadata/delisted-symbols'),data=await response.json();if(!response.ok)return;delistedMarketSymbols=new Set((data.symbols||[]).map(normalizedMarketSymbol));delistedMarketBases=new Set([...delistedMarketSymbols].flatMap(delistingAssetBases));delistedSymbolsLoadedAt=Date.now();applyDelistingWarnings()}catch(error){}}
+async function loadDelistedMarketSymbols(force=false){if(!force&&delistedSymbolsLoadedAt&&Date.now()-delistedSymbolsLoadedAt<300000)return;try{const data=await fetchRefreshJson('/api/market-metadata/delisted-symbols',5000);delistedMarketSymbols=new Set((data.symbols||[]).map(normalizedMarketSymbol));delistedMarketBases=new Set([...delistedMarketSymbols].flatMap(delistingAssetBases));delistedSymbolsLoadedAt=Date.now();applyDelistingWarnings()}catch(error){}}
 function exchangeName(exchange){const icon=exchangeIcon[exchange];return `${icon?`<img class="exchange-logo" src="${icon}" alt="${exchange}" decoding="async">`:''}${exchange}`}
 function syncRenderedNode(current,next){if(current.nodeType!==next.nodeType||current.nodeName!==next.nodeName){current.replaceWith(next.cloneNode(true));return}if(current.nodeType===Node.TEXT_NODE){if(current.nodeValue!==next.nodeValue)current.nodeValue=next.nodeValue;return}if(current.nodeType!==Node.ELEMENT_NODE)return;[...current.attributes].forEach(attribute=>{if(!next.hasAttribute(attribute.name))current.removeAttribute(attribute.name)});[...next.attributes].forEach(attribute=>{if(current.getAttribute(attribute.name)!==attribute.value)current.setAttribute(attribute.name,attribute.value)});syncRenderedChildren(current,next)}
 function syncRenderedChildren(currentParent,nextParent){let current=currentParent.firstChild;for(let next=nextParent.firstChild;next;next=next.nextSibling){if(!current){currentParent.appendChild(next.cloneNode(true));continue}const following=current.nextSibling;syncRenderedNode(current,next);current=following}while(current){const following=current.nextSibling;current.remove();current=following}}
@@ -206,16 +211,14 @@ function spotRows(symbols){
     }).join('');
   }).join('');
 }
-function showMarketRefreshCountdown(seconds){clearInterval(marketRefreshCountdownTimer);let remaining=Math.max(0,Number(seconds)||0);const target=byId('spotFuturesCountdown');const render=()=>{target.textContent=remaining>0?` · 下次行情同步约 ${remaining} 秒`:' · 正在等待下一轮行情同步…'};render();marketRefreshCountdownTimer=setInterval(()=>{remaining=Math.max(0,remaining-1);render();if(remaining===0)clearInterval(marketRefreshCountdownTimer)},1000)}
+function showMarketRefreshCountdown(){clearInterval(marketRefreshCountdownTimer);const target=byId('spotFuturesCountdown');if(target)target.textContent=''}
 async function loadSpotFutures(manual=false){
-  if(spotFuturesLoading)return;
+  if(spotFuturesLoading)return false;
   spotFuturesLoading=true;
   const status=byId('spotFuturesUpdated'),bnOnly=byId('binanceSpotOnly').checked,alphaOnly=byId('binanceAlphaOnly').checked;
   if(manual)status.textContent='正在读取已缓存的行情数据…';
   try{
-    const response=await fetch('/api/spot-futures?page='+spotFuturesPage+'&binance_spot_only='+(bnOnly?'1':'0')+'&binance_alpha_only='+(alphaOnly?'1':'0')+'&funding_interval='+encodeURIComponent(spotFundingInterval)+'&symbol='+encodeURIComponent(spotFuturesSearch)+'&sort_by='+spotSort.key+'&sort_direction='+spotSort.direction);
-    const data=await response.json();
-    if(!response.ok)throw new Error(data.error||'行情服务暂不可用');
+    const data=await fetchRefreshJson('/api/spot-futures?page='+spotFuturesPage+'&binance_spot_only='+(bnOnly?'1':'0')+'&binance_alpha_only='+(alphaOnly?'1':'0')+'&funding_interval='+encodeURIComponent(spotFundingInterval)+'&symbol='+encodeURIComponent(spotFuturesSearch)+'&sort_by='+spotSort.key+'&sort_direction='+spotSort.direction);
     destroyFloatingPopup();spotBasisOpenings=Object.fromEntries(data.symbols.map(group=>[group.symbol,group.basis_opening]));spotOpportunityByKey=new Map(data.symbols.flatMap(group=>group.rows.map(row=>[`${group.symbol}|${row.long_exchange}`,{group,row}])));replaceHtmlKeepingExchangeLogos(byId('spotFuturesRows'),data.symbols.length?spotRows(data.symbols):`<tr><td colspan="12" class="loading">${alphaOnly?'当前条件下没有匹配的 Binance Alpha 币种。':'没有符合条件的交易对。'}</td></tr>`);
     spotFuturesHasData=true;
     updateSortHeaders();
@@ -229,9 +232,12 @@ async function loadSpotFutures(manual=false){
     const detail=(failed.length?failed.join('、')+' 行情暂不可用':`已对全部 ${data.total_symbols} 个币种排序后分页 · 当前按 ${spotSortLabels[spotSort.key]} ${spotSort.direction==='desc'?'↓':'↑'} 排序`)+alphaDetail;
     status.textContent=`最近更新 ${data.updated_at} · ${detail}`;
     showMarketRefreshCountdown(data.next_refresh_in_seconds);
+    setPageRefreshSource('spot-futures',data.captured_at_epoch,'行情',failed.length>0);
+    return true;
   }catch(error){
-    if(!spotFuturesHasData)byId('spotFuturesRows').innerHTML=`<tr><td colspan="12" class="loading">${error.message}</td></tr>`;
+    if(!spotFuturesHasData)byId('spotFuturesRows').innerHTML=`<tr><td colspan="12" class="loading">${escapeChatHtml(error.message)}</td></tr>`;
     status.textContent=spotFuturesHasData?`${error.message}，已保留上一组有效数据。`:error.message;
+    return false;
   }finally{spotFuturesLoading=false}
 }
 function hedgeMetric(value,suffix=''){const number=Number(value);return Number.isFinite(number)?`${money(number)}${suffix}`:'—'}
@@ -239,7 +245,18 @@ function hedgePositionSummaryMarkup(summary){return `<article><small>当前组�
 function hedgePositionLegMarkup(position,type){const spot=type==='spot',exchange=spot?position.spot_exchange:position.futures_exchange,quantity=spot?position.spot_quantity:position.futures_quantity,entry=spot?position.spot_entry_price:position.futures_entry_price,exit=spot?position.spot_exit_price:position.futures_exit_price,notional=spot?position.spot_notional:position.futures_notional,fee=spot?position.spot_fee:position.futures_fee,orderId=spot?position.spot_order_id:position.futures_order_id;return `<div class="position-leg ${spot?'long':'short'}"><div><b>${spot?'现货多头':'永续空头'}</b><span>${escapeChatHtml(exchange||'—')}</span></div><dl><span><dt>数量</dt><dd>${hedgeMetric(quantity)}</dd></span><span><dt>开仓均价</dt><dd>${hedgeMetric(entry)}</dd></span><span><dt>平仓均价</dt><dd>${hedgeMetric(exit)}</dd></span><span><dt>名义金额</dt><dd>${hedgeMetric(notional,' USDT')}</dd></span><span><dt>手续费</dt><dd>${hedgeMetric(fee,' USDT')}</dd></span><span><dt>订单号</dt><dd title="${escapeChatHtml(orderId||'')}">${escapeChatHtml(orderId||'—')}</dd></span></dl></div>`}
 function hedgePositionCard(position,history=false){const content=`<div class="hedge-position-head"><div><b>${escapeChatHtml(position.symbol)}</b><span>${escapeChatHtml(position.spot_exchange)} 现货多 / ${escapeChatHtml(position.futures_exchange)} 永续空</span></div><em class="position-status status-${escapeChatHtml(position.status)}">${escapeChatHtml(position.status_label)}</em><time>${escapeChatHtml((history?position.closed_at:position.opened_at)||position.created_at||'—')}</time></div><div class="hedge-position-legs">${hedgePositionLegMarkup(position,'spot')}${hedgePositionLegMarkup(position,'futures')}</div><div class="hedge-position-result"><span>开差 <b class="${signClass(position.opening_spread)}">${percent(position.opening_spread)}</b></span><span>对冲差额 <b class="${signClass(position.hedge_gap_usdt)}">${hedgeMetric(position.hedge_gap_usdt,' USDT')}</b></span><span>累计资费 <b class="${signClass(position.funding_income)}">${hedgeMetric(position.funding_income,' USDT')}</b></span><span>净结果 <b class="${signClass(position.net_result)}">${hedgeMetric(position.net_result,' USDT')}</b></span></div>`;return history?`<details class="hedge-position-card history"><summary><span><b>${escapeChatHtml(position.symbol)}</b>${escapeChatHtml(position.status_label)}</span><span>${escapeChatHtml(position.closed_at||position.created_at||'—')}</span><strong class="${signClass(position.net_result)}">${hedgeMetric(position.net_result,' USDT')}</strong></summary>${content}</details>`:`<article class="hedge-position-card">${content}</article>`}
 function renderHedgePositionList(target,items,history=false){if(!target)return;target.innerHTML=items.length?items.map(item=>hedgePositionCard(item,history)).join(''):`<p class="position-empty">${history?'暂无历史仓位。完整平仓、取消或执行失败的组合会保留在这里。':'暂无当前持仓。接入私有 API 并实际建立对冲组合后，所有仓位都会汇总到这里。'}</p>`}
-async function loadHedgePositions(){const summary=byId('hedgePositionSummary');if(!summary)return;try{const response=await fetch('/api/hedge-positions'),data=await response.json();if(!response.ok)throw new Error(data.error||'仓位读取失败');summary.innerHTML=hedgePositionSummaryMarkup(data.summary||{});byId('hedgeExecutionBoundary').classList.toggle('enabled',Boolean(data.execution?.enabled));byId('hedgeExecutionBoundary').querySelector('span').textContent=data.execution?.reason||'';byId('hedgeCurrentCount').textContent=String(data.current?.length||0);byId('hedgeHistoryCount').textContent=String(data.history?.length||0);renderHedgePositionList(byId('hedgeCurrentPositions'),data.current||[]);renderHedgePositionList(byId('hedgePositionHistory'),data.history||[],true)}catch(error){summary.innerHTML=`<p class="position-empty">${escapeChatHtml(error.message||'仓位读取失败')}</p>`}}
+async function loadHedgePositions(){
+  const summary=byId('hedgePositionSummary');if(!summary)return false;
+  try{
+    const data=await fetchRefreshJson('/api/hedge-positions');
+    summary.innerHTML=hedgePositionSummaryMarkup(data.summary||{});
+    byId('hedgeExecutionBoundary').classList.toggle('enabled',Boolean(data.execution?.enabled));
+    byId('hedgeExecutionBoundary').querySelector('span').textContent=data.execution?.reason||'';
+    byId('hedgeCurrentCount').textContent=String(data.current?.length||0);byId('hedgeHistoryCount').textContent=String(data.history?.length||0);
+    renderHedgePositionList(byId('hedgeCurrentPositions'),data.current||[]);renderHedgePositionList(byId('hedgePositionHistory'),data.history||[],true);
+    hedgePositionsHasData=true;setPageRefreshSource('my-positions',data.checked_at_epoch,'检查');return true;
+  }catch(error){if(!hedgePositionsHasData)summary.innerHTML=`<p class="position-empty">${escapeChatHtml(error.message||'仓位读取失败')}</p>`;return false}
+}
 function setHedgePositionTab(tab){hedgePositionTab=tab==='history'?'history':'current';document.querySelectorAll('[data-position-tab]').forEach(button=>button.classList.toggle('active',button.dataset.positionTab===hedgePositionTab));byId('hedgeCurrentPositions')?.classList.toggle('hidden',hedgePositionTab!=='current');byId('hedgePositionHistory')?.classList.toggle('hidden',hedgePositionTab!=='history')}
 function openHedgePositionBuilder(encodedKey){const key=decodeURIComponent(encodedKey||''),opportunity=spotOpportunityByKey.get(key);if(!opportunity){alert('这条机会已刷新，请重新选择。');return}selectedHedgeOpportunity=opportunity;byId('hedgePreviewTitle').textContent=`${opportunity.group.symbol} · 建立对冲仓位`;byId('hedgePreviewRoute').textContent=`${opportunity.row.long_exchange} 买入现货 + Binance 卖出永续`;byId('hedgeSubmitButton').textContent=opportunity.row.long_exchange==='Binance'?'等待币安私有 API':`需 ${opportunity.row.long_exchange} + Binance 私有 API`;byId('hedgePositionModal').classList.remove('hidden');renderHedgePositionPreview()}
 function closeHedgePositionBuilder(){byId('hedgePositionModal')?.classList.add('hidden');selectedHedgeOpportunity=null}
@@ -289,7 +306,7 @@ function dualRowsCompact(symbols){return symbols.map(group=>{const span=group.ro
 function positionFloatingPopup(popup,trigger){const rect=trigger.getBoundingClientRect(),width=Math.min(540,window.innerWidth-32),left=Math.max(16,Math.min(window.innerWidth-width-16,rect.right-width));popup.style.width=`${width}px`;popup.style.left=`${left}px`;if(rect.top<360){popup.style.top=`${rect.bottom+9}px`}else{popup.style.top=`${rect.top-9}px`;popup.style.transform='translateY(-100%)'}}
 function destroyFloatingPopup(){document.querySelector('[data-floating-detail]')?.remove()}
 function showCommonIndexTip(trigger){destroyFloatingPopup();const row=dualIndexRows.get(trigger.closest('.common-index')?.dataset.commonIndexId);if(!row)return;const overlap=Math.max(0,Math.min(100,localIndexOverlap(row))),popup=document.createElement('div'),path=`${row.long_exchange} → ${row.short_exchange}`;popup.dataset.floatingDetail='common-index';popup.className='floating-detail-popup common-index-popup';popup.innerHTML=`<header><span><i class="index-key long"></i>${exchangeName(row.long_exchange)}</span><b class="index-path">${path}</b><span><i class="index-key short"></i>${exchangeName(row.short_exchange)}</span></header><div class="component-compare-list">${componentCompareRows(row)}</div><div class="common-index-bar"><i style="width:${overlap.toFixed(2)}%"></i></div><small>共同成分权重 ${overlap.toFixed(2)}%</small>`;document.body.appendChild(popup);positionFloatingPopup(popup,trigger)}
-function showDualRefreshCountdown(seconds){clearInterval(dualMarketRefreshCountdownTimer);let remaining=Math.max(0,Number(seconds)||0),target=byId('dualFuturesCountdown');const render=()=>{target.textContent=remaining>0?` · 下次行情同步约 ${remaining} 秒`:' · 正在等待下一轮行情同步…'};render();dualMarketRefreshCountdownTimer=setInterval(()=>{remaining=Math.max(0,remaining-1);render();if(remaining===0)clearInterval(dualMarketRefreshCountdownTimer)},1000)}
+function showDualRefreshCountdown(){clearInterval(dualMarketRefreshCountdownTimer);const target=byId('dualFuturesCountdown');if(target)target.textContent=''}
 function dualSortPickerMarkup(){return `<div class="dual-sort-picker"><label><span>排序</span><select id="dualSortSelect" onchange="setDualSortFromPicker(this.value)">${dualSortOptions.map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select></label><button id="dualSortDirection" type="button" onclick="toggleDualSortDirection()">从高到低 ↓</button></div>`}
 function configureDualLayoutShell(){const view=byId('dual-futures'),title=view?.querySelector('.panel-title>div:first-child'),resultHeader=view?.querySelector('.dual-result-header');if(title&&!byId('dualSortSelect')){title.classList.add('dual-title-group');title.querySelector('h2')?.insertAdjacentHTML('afterend',dualSortPickerMarkup())}view?.querySelector('.change-sort-controls')?.remove();view?.querySelector('.dual-result-sort-controls')?.remove();if(resultHeader?.querySelector('span'))resultHeader.querySelector('span').textContent='套利结果';updateDualSortHeaders()}
 function updateDualSortHeaders(){document.querySelectorAll('.dual-sort-header').forEach(button=>{const active=button.dataset.dualSort===dualSort.key;button.classList.toggle('active',active);button.textContent=button.textContent.replace(/ [↕↓↑]$/,'')+(active?(dualSort.direction==='desc'?' ↓':' ↑'):'')});const select=byId('dualSortSelect'),direction=byId('dualSortDirection');if(select)select.value=dualSort.key;if(direction)direction.textContent=dualSort.direction==='desc'?'从高到低 ↓':'从低到高 ↑'}
@@ -300,7 +317,26 @@ function setDualIncludeBybitOkx(checked){dualIncludeBybitOkx=!!checked;dualFutur
 function changeDualFuturesPage(change){dualFuturesPage=Math.max(1,dualFuturesPage+change);loadDualFutures(true)}
 function selectDualFuturesPage(page){dualFuturesPage=Math.max(1,Number(page)||1);loadDualFutures(true)}
 function renderDualFuturesShell(){const target=byId('dual-futures');target.innerHTML=`<div class="strategy-hero"><p class="eyebrow">STRATEGY 01 · FUTURES / FUTURES</p><h2>期多期空套利</h2><p>默认监控 Bybit → Binance 与 OKX → Binance；BY → OK 单独勾选后显示。做多交易所始终在左，做空交易所始终在右；趋势与涨跌幅统一参考 Binance 合约。</p><span class="mode-pill">后台每 5 秒更新 · 页面不闪烁</span></div><div class="panel"><div class="panel-title"><div><p class="eyebrow">LIVE FUTURES / FUTURES SCANNER</p><h2>期多期空机会</h2></div><div class="spot-actions"><label class="filter-check"><input id="dualIncludeBybitOkx" type="checkbox" onchange="setDualIncludeBybitOkx(this.checked)">显示 BY 对 OK</label><div class="search-suggest-wrap"><label class="search-control"><span>⌕</span><input id="dualFuturesSearch" type="search" autocomplete="off" placeholder="搜索币种，例如 BTC" oninput="setDualFuturesSearch(this.value)"></label><div id="dualFuturesSuggestions" class="symbol-suggestions hidden"></div></div><button onclick="loadDualFutures(true)">↻ 刷新数据</button></div></div><div class="table-wrap"><table class="dual-redesign-table"><thead><tr><th>交易对 / 趋势</th><th><div class="change-header"><span>涨跌幅</span><div class="change-sort-controls"><button class="dual-sort-header" data-dual-sort="binance_change_5m" onclick="setDualSort('binance_change_5m')">5MIN</button><button class="dual-sort-header" data-dual-sort="binance_change_15m" onclick="setDualSort('binance_change_15m')">15MIN</button><button class="dual-sort-header" data-dual-sort="binance_change_30m" onclick="setDualSort('binance_change_30m')">30MIN</button><button class="dual-sort-header" data-dual-sort="binance_change_1h" onclick="setDualSort('binance_change_1h')">1H</button><button class="dual-sort-header" data-dual-sort="binance_change_12h" onclick="setDualSort('binance_change_12h')">12H</button><button class="dual-sort-header" data-dual-sort="binance_change_24h" onclick="setDualSort('binance_change_24h')">24H</button><button class="dual-sort-header" data-dual-sort="binance_change_3d" onclick="setDualSort('binance_change_3d')">3D</button><button class="dual-sort-header" data-dual-sort="binance_change_7d" onclick="setDualSort('binance_change_7d')">7D</button></div></div></th><th>做多交易所</th><th>做空交易所</th><th><div class="dual-result-header"><span>套利结果 / 排序</span><div class="dual-result-sort-controls"><button class="dual-sort-header" data-dual-sort="open_spread" onclick="setDualSort('open_spread')">开差 ↓</button><button class="dual-sort-header" data-dual-sort="close_spread" onclick="setDualSort('close_spread')">平差</button><button class="dual-sort-header" data-dual-sort="funding_difference" onclick="setDualSort('funding_difference')">资费差</button><button class="dual-sort-header" data-dual-sort="binance_basis" onclick="setDualSort('binance_basis')">合约基差</button></div></div></th></tr></thead><tbody id="dualFuturesRows"><tr><td colspan="5" class="loading">正在连接三家交易所的公开合约行情…</td></tr></tbody></table></div><div class="pagination"><button id="dualPreviousPage" onclick="changeDualFuturesPage(-1)">← 上一页</button><label class="page-picker">跳至 <select id="dualFuturesPageSelect" onchange="selectDualFuturesPage(this.value)"></select> 页</label><span id="dualPageInfo">第 1 页</span><button id="dualNextPage" onclick="changeDualFuturesPage(1)">下一页 →</button></div><p class="data-status"><span id="dualFuturesUpdated"></span><span id="dualFuturesCountdown" class="refresh-countdown"></span></p></div>`}
-async function loadDualFutures(manual=false){if(dualFuturesLoading||!byId('dualFuturesRows'))return;dualFuturesLoading=true;const status=byId('dualFuturesUpdated'),emptyColspan=5;if(manual)status.textContent='正在读取后台已缓存的合约行情…';try{const response=await fetch('/api/dual-futures?page='+dualFuturesPage+'&symbol='+encodeURIComponent(dualFuturesSearch)+'&sort_by='+dualSort.key+'&sort_direction='+dualSort.direction+'&include_bybit_okx='+(dualIncludeBybitOkx?1:0));const data=await response.json();if(!response.ok)throw new Error(data.error||'期多期空行情暂时无法读取');destroyFloatingPopup();dualBasisOpenings=Object.fromEntries(data.symbols.map(group=>[group.symbol,group.basis_opening]));dualIndexRows=new Map();data.symbols.forEach(group=>group.rows.forEach(row=>{row._commonIndexId=`${group.symbol}|${row.long_exchange}|${row.short_exchange}`;dualIndexRows.set(row._commonIndexId,row)}));replaceHtmlKeepingExchangeLogos(byId('dualFuturesRows'),data.symbols.length?dualRowsCompact(data.symbols):`<tr><td colspan="${emptyColspan}" class="loading">没有符合条件的合约路径。</td></tr>`);dualFuturesHasData=true;updateDualSortHeaders();byId('dualPageInfo').textContent=`第 ${data.page} / ${data.pages} 页 · 共 ${data.total_symbols} 个币种`;const pageSelect=byId('dualFuturesPageSelect');pageSelect.innerHTML=Array.from({length:data.pages},(_,index)=>`<option value="${index+1}" ${index+1===data.page?'selected':''}>${index+1}</option>`).join('');byId('dualPreviousPage').disabled=data.page<=1;byId('dualNextPage').disabled=data.page>=data.pages;const byOkNote=data.include_bybit_okx?'含 BY→OK':'已过滤 BY→OK';status.textContent=`最近更新 ${data.updated_at} · ${byOkNote} · 已对全部 ${data.total_symbols} 个币种排序 · 当前按 ${dualSortLabels[dualSort.key]||dualSort.key} ${dualSort.direction==='desc'?'↓':'↑'} 排序`;showDualRefreshCountdown(data.next_refresh_in_seconds)}catch(error){if(!dualFuturesHasData)byId('dualFuturesRows').innerHTML=`<tr><td colspan="${emptyColspan}" class="loading">${error.message}</td></tr>`;status.textContent=dualFuturesHasData?'本次更新失败，已保留上一组有效数据。':error.message}finally{dualFuturesLoading=false}}
+async function loadDualFutures(manual=false){
+  if(dualFuturesLoading||!byId('dualFuturesRows'))return false;
+  dualFuturesLoading=true;const status=byId('dualFuturesUpdated'),emptyColspan=5;
+  if(manual)status.textContent='正在读取后台已缓存的合约行情…';
+  try{
+    const data=await fetchRefreshJson('/api/dual-futures?page='+dualFuturesPage+'&symbol='+encodeURIComponent(dualFuturesSearch)+'&sort_by='+dualSort.key+'&sort_direction='+dualSort.direction+'&include_bybit_okx='+(dualIncludeBybitOkx?1:0));
+    destroyFloatingPopup();dualBasisOpenings=Object.fromEntries(data.symbols.map(group=>[group.symbol,group.basis_opening]));dualIndexRows=new Map();
+    data.symbols.forEach(group=>group.rows.forEach(row=>{row._commonIndexId=`${group.symbol}|${row.long_exchange}|${row.short_exchange}`;dualIndexRows.set(row._commonIndexId,row)}));
+    replaceHtmlKeepingExchangeLogos(byId('dualFuturesRows'),data.symbols.length?dualRowsCompact(data.symbols):`<tr><td colspan="${emptyColspan}" class="loading">没有符合条件的合约路径。</td></tr>`);
+    dualFuturesHasData=true;updateDualSortHeaders();byId('dualPageInfo').textContent=`第 ${data.page} / ${data.pages} 页 · 共 ${data.total_symbols} 个币种`;
+    byId('dualFuturesPageSelect').innerHTML=Array.from({length:data.pages},(_,index)=>`<option value="${index+1}" ${index+1===data.page?'selected':''}>${index+1}</option>`).join('');
+    byId('dualPreviousPage').disabled=data.page<=1;byId('dualNextPage').disabled=data.page>=data.pages;
+    const byOkNote=data.include_bybit_okx?'含 BY→OK':'已过滤 BY→OK',failed=Object.keys(data.errors||{});
+    status.textContent=`最近更新 ${data.updated_at} · ${byOkNote} · 全部 ${data.total_symbols} 币种排序 · ${dualSortLabels[dualSort.key]||dualSort.key} ${dualSort.direction==='desc'?'↓':'↑'}${failed.length?' · 部分上游沿用缓存':''}`;
+    showDualRefreshCountdown();setPageRefreshSource('dual-futures',data.captured_at_epoch,'行情',failed.length>0);return true;
+  }catch(error){
+    if(!dualFuturesHasData)byId('dualFuturesRows').innerHTML=`<tr><td colspan="${emptyColspan}" class="loading">${escapeChatHtml(error.message)}</td></tr>`;
+    status.textContent=dualFuturesHasData?`${error.message}，已保留上一组有效数据。`:error.message;return false;
+  }finally{dualFuturesLoading=false}
+}
 function addDualLiquidityHeader(){const table=byId('dual-futures')?.querySelector('table');if(!table||table.classList.contains('dual-redesign-table'))return;const header=table.querySelector('thead tr');const changeHeader=header?.querySelector('.change-header')?.closest('th');if(changeHeader&&!header.querySelector('.liquidity-column')){const column=document.createElement('th');column.className='liquidity-column';column.textContent='流动性';changeHeader.insertAdjacentElement('afterend',column)}table.querySelectorAll('td[colspan="8"]').forEach(cell=>cell.colSpan=9)}
 function addDualBasisSortControls(){const button=byId('dual-futures')?.querySelector('[data-dual-sort="binance_basis"]');if(!button||button.closest('.basis-sort-controls'))return;const wrapper=document.createElement('div');wrapper.className='basis-sort-controls';wrapper.innerHTML='<span>合约基差</span><div><button class="dual-sort-header" data-dual-sort="binance_basis" onclick="setDualSort(\'binance_basis\')">BN</button><button class="dual-sort-header" data-dual-sort="bybit_basis" onclick="setDualSort(\'bybit_basis\')">BY</button><button class="dual-sort-header" data-dual-sort="okx_basis" onclick="setDualSort(\'okx_basis\')">OK</button></div>';button.replaceWith(wrapper)}
 function alertLabel(type){return type==='futures_pump'?'合约拉升':type==='spot_pump'?'现货拉升':type==='rapid_spread'?'开差速变':type==='rapid_basis'?'基差速变':type==='dual_spread_threshold'?'开差异动':type==='dual_basis_threshold'?'BN 基差异动':'基差异动'}
@@ -348,7 +384,25 @@ function alertSymbolCard(group){const latest=group.latest;return `<article class
 function renderAlertMasterDetail(groups){latestAlertGroups=groups;if(!groups.some(group=>group.symbol===selectedAlertSymbol))selectedAlertSymbol=groups[0]?.symbol||'';const selected=groups.find(group=>group.symbol===selectedAlertSymbol);byId('alertEvents').innerHTML=groups.length?`<div class="alert-symbol-list">${groups.map(alertSymbolCard).join('')}</div><div class="alert-detail-pane">${alertDetailCard(selected)}</div>`:'<p class="empty-alert">暂时没有确认后的报警。</p>'}
 function selectAlertSymbol(symbol){selectedAlertSymbol=symbol;renderAlertMasterDetail(latestAlertGroups)}
 function renderTipsItems(activeEvents){const target=byId('tipsItems');if(!target)return;target.innerHTML=activeEvents.length?activeEvents.map(item=>`<article class="tips-item ${alertClass(item.type)} ${isAlertMuted(item.symbol)?'muted-alert':''}"><div class="tips-item-head"><b class="${delistingSymbolClass(item.symbol)}" data-market-symbol="${item.symbol}">${item.symbol} · ${strategyLabel(item.strategy)} · ${alertLabel(item.type)}${isAlertMuted(item.symbol)?' · 已静音':''}</b>${alertSpeakerButton(item.symbol)}</div>${alertExchangePair(item)}<span>开差 ${alertMetric(item.open_spread)} · 基差 ${alertMetric(item.basis)}</span>${alertDeathMarkup(item)}</article>`).join(''):'<p class="empty-alert">当前没有处于 120 秒有效期的报警。</p>'}
-async function loadAlerts(force=false){try{const data=await (await fetch('/api/alerts')).json(),activeEvents=data.active_events||[],groups=data.events||[];pruneAlertMutes(groups,activeEvents);latestActiveAlertEvents=activeEvents;const signature=activeEvents.map(item=>`${item.symbol}-${item.type}-${item.open_spread}-${item.basis}-${item.created_at}`).join('|'),audibleSignature=activeEvents.filter(item=>!isAlertMuted(item.symbol)).map(item=>`${item.symbol}-${item.type}-${item.open_spread}-${item.basis}-${item.created_at}`).join('|');const hasNewAlert=alertsInitialized&&audibleSignature!==alertAudibleSignature&&audibleSignature.length>0;if(!force&&signature===alertSignature)return;alertSignature=signature;alertAudibleSignature=audibleSignature;renderAlertMasterDetail(groups);byId('basisTracking').innerHTML=data.basis_tracking.length?data.basis_tracking.map(item=>`<article class="alert-item basis"><div class="alert-card-title"><h4>${item.symbol}</h4><span class="strategy-badge">${strategyLabel(item.strategy)} · 基差追踪</span></div><p class="tracking-max">最大 ${percent(item.max_basis)}</p><div class="meta"><span>已记录至 ${item.last_level.toFixed(1)}%</span><span>最大时间 ${item.max_at}</span></div></article>`).join(''):'<p class="empty-alert">暂无正在追踪的基差扩展。</p>';renderAlertMuteList();byId('tipsCount').textContent=activeEvents.length;renderTipsItems(activeEvents);startAlertCountdown();alertsInitialized=true;if(hasNewAlert)playAlarmSound()}catch(error){byId('alertEvents').innerHTML='<p class="empty-alert">报警记录暂时无法读取。</p>';byId('tipsItems').innerHTML='<p class="empty-alert">报警暂时无法读取。</p>'}}
+async function loadAlerts(force=false){
+  try{
+    const data=await fetchRefreshJson('/api/alerts'),activeEvents=data.active_events||[],groups=data.events||[],tracking=data.basis_tracking||[];
+    pruneAlertMutes(groups,activeEvents);latestActiveAlertEvents=activeEvents;
+    const signature=JSON.stringify({groups,tracking,activeEvents},(key,value)=>key==='remaining_seconds'?undefined:value);
+    const audibleSignature=activeEvents.filter(item=>!isAlertMuted(item.symbol)).map(item=>`${item.symbol}-${item.type}-${item.open_spread}-${item.basis}-${item.created_at}`).join('|');
+    const hasNewAlert=alertsInitialized&&audibleSignature!==alertAudibleSignature&&audibleSignature.length>0;
+    setPageRefreshSource('alerts',data.checked_at_epoch,'检查');
+    if(!force&&signature===alertSignature)return true;
+    renderAlertMasterDetail(groups);
+    replaceHtmlKeepingExchangeLogos(byId('basisTracking'),tracking.length?tracking.map(item=>`<article class="alert-item basis"><div class="alert-card-title"><h4>${item.symbol}</h4><span class="strategy-badge">${strategyLabel(item.strategy)} · 基差追踪</span></div><p class="tracking-max">最大 ${percent(item.max_basis)}</p><div class="meta"><span>已记录至 ${item.last_level.toFixed(1)}%</span><span>最大时间 ${item.max_at}</span></div></article>`).join(''):'<p class="empty-alert">暂无正在追踪的基差扩展。</p>');
+    renderAlertMuteList();byId('tipsCount').textContent=activeEvents.length;renderTipsItems(activeEvents);startAlertCountdown();
+    alertSignature=signature;alertAudibleSignature=audibleSignature;alertsInitialized=true;
+    if(hasNewAlert)playAlarmSound();return true;
+  }catch(error){
+    if(!alertsInitialized){byId('alertEvents').innerHTML='<p class="empty-alert">报警记录暂时无法读取，将自动重试。</p>';byId('tipsItems').innerHTML='<p class="empty-alert">报警暂时无法读取。</p>'}
+    return false;
+  }
+}
 function tokenHedgeList(items){return `<ul>${(items||[]).map(item=>`<li>${item}</li>`).join('')}</ul>`}
 function tokenHedgeSources(items){return `<div class="token-hedge-sources">${(items||[]).map(item=>`<a target="_blank" rel="noopener noreferrer" href="${item.url}">${item.label}</a>`).join('')}</div>`}
 async function loadTokenHedgeProfiles(){const target=byId('tokenHedgeProfiles');if(!target)return;target.innerHTML='<p class="loading">正在读取代币档案…</p>';try{const data=await (await fetch('/api/token-hedge/profiles')).json();target.innerHTML=data.profiles?.length?data.profiles.map(item=>`<article class="token-hedge-card ${item.risk_level==='极高'?'extreme':'high'}"><div class="token-hedge-head"><div><p class="eyebrow">${item.status}</p><h3 class="${delistingSymbolClass(item.symbol)}" data-market-symbol="${item.symbol}">${item.symbol}<span>${item.name}</span></h3></div><b>${item.risk_level}</b></div><section><h4>官方已确认</h4>${tokenHedgeList(item.official_facts)}</section><section class="token-hedge-thesis"><h4>盘口推演</h4><p>${item.market_thesis}</p></section><section><h4>盯盘规则</h4>${tokenHedgeList(item.watch_rules)}</section>${tokenHedgeSources(item.sources)}</article>`).join(''):'<p class="empty-alert">暂无代币档案。</p>'}catch(error){target.innerHTML='<p class="empty-alert">代币档案暂时无法读取。</p>'}}
@@ -358,7 +412,81 @@ function updateSidebarActive(link,viewId){document.querySelectorAll('nav a[data-
 let mobileViewportBaseline=Math.max(window.innerHeight,window.visualViewport?.height||0)
 function syncMobileViewportHeight(){const viewport=window.visualViewport,height=viewport?.height||window.innerHeight,offsetTop=viewport?.offsetTop||0,composerFocused=Boolean(document.activeElement?.closest?.('#chatComposer')),chatActive=byId('chat')?.classList.contains('active'),mobile=window.innerWidth<=760;if(!composerFocused)mobileViewportBaseline=Math.max(window.innerHeight,height);const keyboardOpen=mobile&&chatActive&&composerFocused&&mobileViewportBaseline-height>120;document.documentElement.style.setProperty('--mobile-viewport-height',`${Math.round(height)}px`);document.documentElement.style.setProperty('--mobile-viewport-offset-top',`${Math.round(offsetTop)}px`);document.body.classList.toggle('mobile-chat-keyboard',keyboardOpen)}
 function scheduleMobileViewportSync(){syncMobileViewportHeight();requestAnimationFrame(syncMobileViewportHeight);setTimeout(syncMobileViewportHeight,180)}
-function updateMobileViewTitle(link,viewId){const title=byId('mobileViewTitle'),source=link||document.querySelector(`aside nav a[data-view="${viewId}"]`);if(!title||!source)return;title.textContent=source.textContent.replace(/\s+/g,' ').trim()}
+const sectionWorkspaceMeta={
+  dashboard:{name:'机会看板',group:'实时机会',description:'先看大盘，再比较价差与结构机会。',source:'三所公开成交价；价格按运行规则、结构30秒、两榜5分钟。'},
+  'onchain-opportunities':{name:'链上机会',group:'实时机会',description:'按链、流动性和成交活跃度筛选链上现货。',source:'GeckoTerminal热门池；后台约5分钟，不含合约OI确认。'},
+  'dual-futures':{name:'期多期空套利',group:'实时机会',description:'比较同标的跨所合约的开平差、资金费和流动性。',source:'盘口与价差按运行规则；成交额20秒、OI分批、历史资费60秒。'},
+  'spot-futures':{name:'现多期空套利',group:'实时机会',description:'结合现货、永续盘口与真实结算周期筛选对冲路径。',source:'盘口与价差按运行规则；成交额20秒、OI分批、历史资费60秒。'},
+  'my-positions':{name:'我的仓位',group:'实时机会',description:'统一查看本站记录的当前组合与历史结果。',source:'每5秒读取本站记录；未接交易所私有API，不代表实时账户仓位。'},
+  'funding-trend':{name:'主升正资费套利榜',group:'实时机会',description:'从趋势、资费与流动性共同评估观察候选。',source:'页面约60秒读取；资费按各交易所实际周期结算。'},
+  'trade-validation':{name:'趋势验证',group:'研究复盘',description:'分开查看假设、目标、回撤与真实路径复盘。',source:'页面约30秒读取；未完成和无法判定样本不冒充胜率。'},
+  thinking:{name:'我的套利思维',group:'研究复盘',description:'先核对盘口，再看资费、流动性和执行边界。',source:'页面约30秒读取；研究筛选不是自动下单信号。'},
+  'daily-trends':{name:'趋势推送',group:'研究复盘',description:'按周期回看已记录的趋势与推送证据。',source:'进入或手动读取日报；不会因刷新补发旧信号。'},
+  'daily-thoughts':{name:'思路分析',group:'研究复盘',description:'核对盯盘观点、证据变化与分周期验证。',source:'页面按盯盘扫描周期读取；停用币种不会因刷新恢复。'},
+  'daily-listings':{name:'上下架信息',group:'研究复盘',description:'分清公告发布时间、实际执行时间与数据来源。',source:'进入或手动读取已入库公告；待解析不等于已确认。'},
+  'gainers-losers':{name:'涨跌幅榜',group:'研究复盘',description:'按周期比较涨跌幅，并辅看结构分和成交量。',source:'Binance中间价与本地5分钟历史；切周期或手动读取。'},
+  'token-hedge':{name:'官方动态研究',group:'研究复盘',description:'把官方已确认事实与交易推演分开展示。',source:'进入或手动读取研究档案；未知信息不作事实。'},
+  alerts:{name:'报警中心',group:'提醒协作',description:'查看新报警、历史事件与持续基差追踪。',source:'每5秒检查事件；声音去重与历史、追踪显示独立。'},
+  chat:{name:'协作记录',group:'提醒协作',description:'与同账号体系中的联系人安全协作。',source:'独立消息同步；入口隐藏、声音和通知权限保持原设置。'},
+  'security-notifications':{name:'安全通知',group:'提醒协作',description:'核对异常设备、来源IP与安全审计时间。',source:'管理员页面约30秒读取；不会自动修改账号或设备权限。'},
+  strategies:{name:'策略管理',group:'系统风控',description:'查看与管理监控策略，区分研究和实际执行。',source:'进入或手动读取；策略启停仍需明确操作。'},
+  'runtime-rules':{name:'运行规则',group:'系统风控',description:'查看真实运行周期、任务状态与配对规则。',source:'进入或手动读取；保存仍遵循现有权限与安全校验。'},
+  'account-management':{name:'账号管理',group:'系统风控',description:'核对等级、登录信息和已绑定设备。',source:'仅管理员可见；重置、解绑、停用仍需原有确认。'},
+  risk:{name:'风险提示',group:'系统风控',description:'明确行情、研究信号和真实执行之间的边界。',source:'静态说明；公开行情可能延迟，真实交易尚未开放。'},
+};
+function filterSectionNavigation(query=''){
+  const nav=byId('workspaceNavigation');if(!nav)return;
+  const term=String(query).trim().toLocaleLowerCase(),visible=new Set();
+  nav.querySelectorAll('a[data-view]').forEach(link=>{
+    const meta=sectionWorkspaceMeta[link.dataset.view],matches=!term||`${meta?.name||''} ${link.textContent} ${meta?.description||''} ${meta?.source||''} ${link.dataset.view}`.toLocaleLowerCase().includes(term);
+    link.dataset.sectionMatch=matches?'1':'0';link.classList.toggle('section-filtered',!matches);
+    if(matches&&!link.classList.contains('hidden'))visible.add(link.dataset.view);
+  });
+  const daily=nav.querySelector('.daily-nav'),dailyMatches=daily&&[...daily.querySelectorAll('a[data-view]')].some(link=>link.dataset.sectionMatch==='1');
+  daily?.classList.toggle('section-search-open',Boolean(term&&dailyMatches));
+  if(term&&dailyMatches)nav.querySelector('[data-subnav="daily-nav"]')?.classList.remove('section-filtered');
+  nav.querySelectorAll('.nav-sub:not(.daily-nav)').forEach(node=>node.classList.toggle('section-filtered',Boolean(term)));
+  nav.querySelectorAll('.nav-section-heading').forEach(heading=>{const hasItems=[...nav.querySelectorAll('a[data-view]')].some(link=>!link.classList.contains('hidden')&&!link.classList.contains('section-filtered')&&sectionWorkspaceMeta[link.dataset.view]?.group===heading.dataset.sectionGroup);heading.classList.toggle('section-filtered',!hasItems)});
+  const empty=byId('sectionSearchEmpty');if(empty)empty.classList.toggle('hidden',!term||visible.size>0);
+  const count=byId('sectionSearchCount');if(count)count.textContent=term?`${visible.size} 个匹配栏目`:'按名称或用途快速查找';
+}
+function sectionSearchKey(event){
+  if(event.key==='Escape'){event.preventDefault();event.target.value='';filterSectionNavigation();return}
+  if(event.key==='Enter'){event.preventDefault();const link=[...document.querySelectorAll('#workspaceNavigation a[data-view]')].find(node=>node.dataset.sectionMatch==='1'&&!node.classList.contains('hidden')&&!node.classList.contains('section-filtered'));link?.click()}
+}
+function updateSectionWorkspace(viewId){
+  const meta=sectionWorkspaceMeta[viewId];if(!meta)return;
+  const heading=document.querySelector('main>header h1'),subtitle=document.querySelector('main>header .sub');
+  if(heading)heading.textContent=meta.name;if(subtitle)subtitle.textContent=meta.description;
+  document.title=`${meta.name} · ArbiScope`;
+  const group=byId('sectionWorkspaceGroup'),source=byId('sectionWorkspaceSource');if(group)group.textContent=meta.group;if(source)source.textContent=meta.source;
+  document.querySelectorAll('nav a[data-view]').forEach(link=>{if(link.dataset.view===viewId)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current')});
+}
+function renderWorkspaceRefreshStatus(viewId,state){
+  const feedback=byId('sectionRefreshFeedback'),cadence=byId('sectionWorkspaceCadence'),button=byId('sectionRefreshButton'),profile=pageRefreshProfiles[viewId];
+  const cadenceText=state.seconds?`读取周期 ${refreshIntervalLabel(state.seconds)}`:'进入或手动读取';if(cadence&&cadence.textContent!==cadenceText)cadence.textContent=cadenceText;
+  if(button){const disabled=state.inFlight>0,hidden=!profile?.names.length,text=state.inFlight?'读取中…':state.failed?'重试本栏':'刷新本栏';if(button.disabled!==disabled)button.disabled=disabled;if(button.hidden!==hidden)button.hidden=hidden;if(button.textContent!==text)button.textContent=text}
+  if(feedback){const message=state.failed?`本次读取失败，已保留上次有效数据；${state.seconds?'将按周期重试':'请点击重试本栏'}。`:state.sourceIncomplete?'部分上游延迟，保留最近有效行情。':'';if(feedback.textContent!==message)feedback.textContent=message;feedback.classList.toggle('workspace-warning',Boolean(message))}
+}
+async function refreshCurrentSection(){const profile=pageRefreshProfiles[activeViewId()],loader=profile?.names[0];if(loader&&typeof window[loader]==='function'){try{await window[loader]()}catch(error){}}}
+function restoreSectionFromHash(){
+  const id=location.hash.slice(1);if(!sectionWorkspaceMeta[id]||id===activeViewId())return false;
+  const link=[...document.querySelectorAll('aside nav a[data-view]')].find(node=>node.dataset.view===id&&!node.classList.contains('hidden'));
+  if(!link||!byId(id))return false;link.click();return true;
+}
+function setupSectionWorkspace(){
+  const nav=byId('workspaceNavigation');if(!nav||nav.classList.contains('workspace-nav'))return;
+  nav.classList.add('workspace-nav');const children=[...nav.children];
+  for(const group of ['实时机会','研究复盘','提醒协作','系统风控']){
+    const nodes=children.filter(node=>{const id=node.dataset.view||(node.classList.contains('spot-period-nav')?'spot-futures':node.classList.contains('daily-nav')?'daily-trends':'');return sectionWorkspaceMeta[id]?.group===group});
+    if(!nodes.length)continue;const heading=document.createElement('h2');heading.className='nav-section-heading';heading.dataset.sectionGroup=group;heading.textContent=group;nav.appendChild(heading);nodes.forEach(node=>nav.appendChild(node));
+  }
+  nav.querySelectorAll('a[data-view]').forEach(link=>{const meta=sectionWorkspaceMeta[link.dataset.view];if(meta)link.title=`${meta.name}：${meta.description}`});
+  filterSectionNavigation();updateSectionWorkspace(activeViewId());
+  window.addEventListener('hashchange',restoreSectionFromHash);
+  document.addEventListener('keydown',event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='k'&&!event.target.closest?.('input,textarea,select,[contenteditable="true"]')){event.preventDefault();toggleMobileNav(true);byId('sectionSearch')?.focus()}});
+}
+function updateMobileViewTitle(link,viewId){updateSectionWorkspace(viewId);const title=byId('mobileViewTitle'),source=link||document.querySelector(`aside nav a[data-view="${viewId}"]`);if(!title||!source)return;title.textContent=sectionWorkspaceMeta[viewId]?.name||source.textContent.replace(/\s+/g,' ').trim()}
 function toggleMobileNav(force){const sidebar=byId('appSidebar'),button=byId('mobileNavToggle'),backdrop=byId('mobileNavBackdrop');if(!sidebar||!button)return;const open=typeof force==='boolean'?force:!document.body.classList.contains('mobile-nav-open');document.body.classList.toggle('mobile-nav-open',open);button.setAttribute('aria-expanded',String(open));button.setAttribute('aria-label',open?'关闭导航':'打开导航');backdrop?.setAttribute('aria-hidden',String(!open))}
 function syncMobileChatLayoutState(){const open=window.innerWidth<=760&&byId('chat')?.classList.contains('active')&&byId('chat')?.querySelector('.chat-shell')?.classList.contains('mobile-conversation-open');document.body.classList.toggle('mobile-chat-conversation',Boolean(open))}
 function syncMobileViewState(viewId){const chatActive=viewId==='chat';document.body.classList.toggle('mobile-chat-view',chatActive);if(!chatActive)document.body.classList.remove('mobile-chat-conversation');else syncMobileChatLayoutState();updateChatAudioGate()}
@@ -368,7 +496,7 @@ function acknowledgeChatNavAttention(){chatNavAttentionPending=false;updateChatN
 document.querySelectorAll('nav a[data-view]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault();const viewId=link.dataset.view;document.querySelectorAll('.view').forEach(view=>view.classList.toggle('active',view.id===viewId));updateSidebarActive(link,viewId);updateSidebarSubnav(viewId);updateMobileViewTitle(link,viewId);syncMobileViewState(viewId);toggleMobileNav(false);if(viewId==='dashboard')loadDashboard();if(viewId==='onchain-opportunities')loadOnchainOpportunities();if(viewId==='spot-futures')loadSpotFutures();if(viewId==='my-positions')loadHedgePositions();if(viewId==='dual-futures')loadDualFutures();if(viewId==='thinking')loadSimpleThinking();if(viewId==='strategies')loadStrategies();if(viewId==='alerts')loadAlerts(true);if(viewId==='chat'){acknowledgeChatNavAttention();showMobileChatPeers();loadChat(true)}if(viewId==='daily-trends')loadDailyTrends();if(viewId==='daily-thoughts')loadThoughtAnalysis();if(viewId==='daily-listings')loadDailyListings();if(viewId==='token-hedge')loadTokenHedgeProfiles();if(viewId==='funding-trend')loadFundingTrend();if(viewId==='trade-validation')loadTradeValidation();if(viewId==='runtime-rules')loadRuntimeRules();if(viewId==='account-management')loadAccountManagement();if(viewId==='security-notifications')loadSecurityAlerts(true);window.location.hash=viewId}));
 
 function applyAdminUi(){document.querySelectorAll('.admin-write-only').forEach(node=>node.classList.toggle('hidden',!authState.is_admin))}
-function applyChatNavVisibility(){const hidden=Boolean(authState.chat_nav_hidden);document.querySelector('aside .chat-nav-entry')?.classList.toggle('hidden',hidden);if(hidden&&authState.user_id){startChatPolling();primeSignalAudio()}}
+function applyChatNavVisibility(){const hidden=Boolean(authState.chat_nav_hidden);document.querySelector('aside .chat-nav-entry')?.classList.toggle('hidden',hidden);filterSectionNavigation(byId('sectionSearch')?.value||'');if(hidden&&authState.user_id){startChatPolling();primeSignalAudio()}}
 async function loadAuthState(){try{const response=await fetch('/api/auth/me');if(response.status===401){location.href='/login';return}authState=await response.json();applyAdminUi();applyChatNavVisibility()}catch(error){}}
 async function ensureCurrentDeviceBinding(){if(!authState.user_id||!authState.device_lock_required||authState.device_protected)return true;try{const payload=await signedAccountDevicePayload(String(authState.username||'').toLowerCase()),response=await fetch('/api/auth/device/enroll-current',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':authState.csrf_token},body:JSON.stringify(payload)}),data=await response.json();if(!response.ok)throw new Error(data.error||'当前设备绑定失败');authState.device_protected=true;authState.device=data.device;return true}catch(error){alert(error.message||'当前设备无法完成安全绑定，请重新登录。');location.href='/login';return false}}
 async function logoutAccount(){let subscription=null;try{const registration=chatPushRegistration||await navigator.serviceWorker?.getRegistration('/');subscription=await registration?.pushManager.getSubscription();await fetch('/api/auth/logout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({push_endpoint:subscription?.endpoint||''})});await subscription?.unsubscribe()}finally{location.href='/login'}}
@@ -589,7 +717,7 @@ function renderGainersShell(){if(byId('gainers-losers'))return;const dailyNav=do
 function gainersItem(item,index){const score=item.score===null||item.score===undefined?'—':Number(item.score).toFixed(1);return `<article class="gainer-row"><i>${index+1}</i><b class="${delistingSymbolClass(item.symbol,item.delisting_announced)}" data-market-symbol="${item.symbol}" data-delisting-announced="${item.delisting_announced?'1':'0'}">${item.symbol}</b><strong class="gainer-score" title="${item.score_label||'未进入本轮结构候选'}">${score}</strong><span>${money(item.price)}</span><span class="${changeClass(item.change)}">${displayChange(item.change)}</span><span>${liquidityAmount(item.volume_24h)}</span></article>`}
 async function loadGainers(){const data=await (await fetch('/api/gainers-losers?period='+gainersPeriod)).json();byId('gainersRising').innerHTML=data.rising.length?data.rising.map(gainersItem).join(''):'<p class="empty-alert">正在积累该周期数据。</p>';byId('gainersFalling').innerHTML=data.falling.length?data.falling.map(gainersItem).join(''):'<p class="empty-alert">正在积累该周期数据。</p>'}
 function setGainersPeriod(period){gainersPeriod=period;byId('gainersPeriodControls').innerHTML=gainersPeriods.map(([key,label])=>`<button class="${key===gainersPeriod?'active':''}" onclick="setGainersPeriod('${key}')">${label}</button>`).join('');loadGainers()}
-function showGainersView(event){event?.preventDefault();document.querySelectorAll('.view').forEach(view=>view.classList.toggle('active',view.id==='gainers-losers'));document.querySelectorAll('nav a[data-view]').forEach(item=>item.classList.toggle('active',item.dataset.view==='gainers-losers'));updateSidebarSubnav('gainers-losers');loadGainers();window.location.hash='gainers-losers'}
+function showGainersView(event){event?.preventDefault();document.querySelectorAll('.view').forEach(view=>view.classList.toggle('active',view.id==='gainers-losers'));document.querySelectorAll('nav a[data-view]').forEach(item=>item.classList.toggle('active',item.dataset.view==='gainers-losers'));updateSidebarSubnav('gainers-losers');updateMobileViewTitle(null,'gainers-losers');syncMobileViewState('gainers-losers');toggleMobileNav(false);loadGainers();window.location.hash='gainers-losers'}
 function thoughtPrice(value){const n=Number(value);return Number.isFinite(n)?n.toFixed(8):'暂无'}
 function thoughtPercent(value){return value===null||value===undefined?'暂无':percent(value)}
 function thoughtLarge(value){const n=Number(value);if(!Number.isFinite(n))return '暂无';if(Math.abs(n)>=1e9)return `$${(n/1e9).toFixed(2)}B`;if(Math.abs(n)>=1e6)return `$${(n/1e6).toFixed(2)}M`;return `$${n.toFixed(2)}`}
@@ -743,39 +871,56 @@ const pageRefreshProfiles={
   'gainers-losers':{label:'涨跌幅榜',seconds:0,names:['loadGainers']},
   risk:{label:'风险说明',seconds:0,names:[]},
 };
+const fixedCadenceViews=new Set(['dashboard','spot-futures','dual-futures','my-positions','alerts']);
 const pageRefreshStates=new Map();
 const pageRefreshControllers=new Map();
 let pageRefreshIndicatorTimer=null;
 function pageRefreshState(viewId){if(!pageRefreshStates.has(viewId))pageRefreshStates.set(viewId,{seconds:Number(pageRefreshProfiles[viewId]?.seconds)||0,inFlight:0,completedAt:0,cycleStartedAt:Date.now()});return pageRefreshStates.get(viewId)}
 function refreshIntervalLabel(seconds){const value=Math.max(0,Number(seconds)||0);if(value>=60&&value%60===0)return `${value/60}分钟`;return `${value}秒`}
 function setPageRefreshInterval(viewId,seconds){const state=pageRefreshState(viewId),next=Math.max(0,Number(seconds)||0);if(state.seconds!==next){state.seconds=next;state.cycleStartedAt=Date.now()}if(viewId===activeViewId())renderPageRefreshIndicator(viewId)}
+function setPageRefreshSource(viewId,epoch,label='行情',incomplete=false){const state=pageRefreshState(viewId);state.sourceUpdatedAt=Number(epoch||0)*1000;state.sourceLabel=label;state.sourceIncomplete=incomplete;state.sourceStale=false;state.sourceMaxAge=Math.max(15,state.seconds*3)*1000}
 function renderPageRefreshIndicator(viewId=activeViewId()){
+  if(viewId!==activeViewId())return;
   const profile=pageRefreshProfiles[viewId]||{label:'当前页面',seconds:0},state=pageRefreshState(viewId),status=byId('updated'),ring=document.querySelector('main>header .status .pulse');
   if(!status||!ring)return;
-  const now=Date.now(),baseDuration=Math.max(0,state.seconds)*1000,duration=viewId==='dashboard'&&state.startedAt?Math.max(250,state.startedAt+baseDuration-state.cycleStartedAt):baseDuration,elapsed=Math.max(0,now-state.cycleStartedAt),progress=state.inFlight?1:(duration?Math.min(1,elapsed/duration):0),lastAt=viewId==='dashboard'?state.sourceUpdatedAt:state.completedAt,last=lastAt?new Date(lastAt).toLocaleTimeString('zh-CN',{hour12:false}):'';
+  const now=Date.now(),baseDuration=Math.max(0,state.seconds)*1000,duration=fixedCadenceViews.has(viewId)&&state.startedAt?Math.max(250,state.startedAt+baseDuration-state.cycleStartedAt):baseDuration,elapsed=Math.max(0,now-state.cycleStartedAt),progress=state.inFlight?1:(duration?Math.min(1,elapsed/duration):0),lastAt=fixedCadenceViews.has(viewId)?state.sourceUpdatedAt:state.completedAt,last=lastAt?new Date(lastAt).toLocaleTimeString('zh-CN',{hour12:false}):'';
   ring.classList.add('refresh-progress-ring');ring.classList.toggle('refreshing',state.inFlight>0);ring.classList.toggle('manual',!duration);ring.style.setProperty('--refresh-angle',`${progress*360}deg`);
   ring.setAttribute('role','progressbar');ring.setAttribute('aria-valuemin','0');ring.setAttribute('aria-valuemax','100');ring.setAttribute('aria-valuenow',String(Math.round(progress*100)));
-  const stale=state.sourceStale||(state.sourceUpdatedAt&&now-state.sourceUpdatedAt>(state.sourceMaxAge||15000)),statusText=viewId==='dashboard'?`${profile.label} · ${last?`行情 ${last}`:'等待行情'}${state.failed?' · 请求失败':stale?' · 行情延迟':state.sourceIncomplete?' · 部分行情缺失':''}`:!last?`${profile.label} · 等待首次刷新${duration?'':' · 手动刷新'}`:`${profile.label} · 最近刷新 ${last}${duration?'':' · 手动刷新'}`;
+  const stale=state.sourceStale||(state.sourceUpdatedAt&&now-state.sourceUpdatedAt>(state.sourceMaxAge||15000)),label=state.sourceLabel||'行情',statusText=fixedCadenceViews.has(viewId)?`${profile.label} · ${last?`${label} ${last}`:`等待${label}`}${state.failed?' · 请求失败':stale?(label==='行情'?' · 行情延迟':' · 检查延迟'):state.sourceIncomplete?' · 部分上游延迟':''}`:!last?`${profile.label} · 等待首次刷新${duration?'':' · 手动刷新'}`:`${profile.label} · 最近刷新 ${last}${duration?'':' · 手动刷新'}`;
   if(status.textContent!==statusText)status.textContent=statusText;
+  if(typeof renderWorkspaceRefreshStatus==='function')renderWorkspaceRefreshStatus(viewId,state);
   ring.setAttribute('aria-valuetext',state.inFlight?'正在刷新':(duration?`刷新周期已进行 ${Math.round(progress*100)}%`:'手动刷新'));
   ring.title=state.inFlight?'正在刷新':(duration?`顺时针填满后刷新 · 间隔 ${refreshIntervalLabel(state.seconds)}`:'此页面只在进入或手动点击时刷新');
 }
 function beginPageRefresh(viewId){const state=pageRefreshState(viewId);if(!state.inFlight)state.startedAt=Date.now();state.inFlight+=1;renderPageRefreshIndicator(viewId)}
 function finishPageRefresh(viewId,succeeded=true){const state=pageRefreshState(viewId);state.inFlight=Math.max(0,state.inFlight-1);if(!state.inFlight){state.failed=!succeeded;if(succeeded)state.completedAt=Date.now();state.cycleStartedAt=Date.now();pageRefreshControllers.get(viewId)?.schedule()}renderPageRefreshIndicator(viewId)}
 function installPageRefreshTracking(){
-  Object.entries(pageRefreshProfiles).forEach(([viewId,profile])=>profile.names.forEach(name=>{const original=window[name];if(typeof original!=='function'||original.pageRefreshTracked)return;const tracked=async function(...args){beginPageRefresh(viewId);let succeeded=false;try{const result=await original.apply(this,args);succeeded=true;return result}finally{finishPageRefresh(viewId,succeeded)}};tracked.pageRefreshTracked=true;window[name]=tracked}));
+  Object.entries(pageRefreshProfiles).forEach(([viewId,profile])=>profile.names.forEach(name=>{
+    const original=window[name];if(typeof original!=='function'||original.pageRefreshTracked)return;
+    const tracked=function(...args){
+      if(fixedCadenceViews.has(viewId)&&tracked.pending)return tracked.pending;
+      const promise=(async()=>{beginPageRefresh(viewId);let succeeded=false;try{const result=await original.apply(this,args);succeeded=result!==false;return result}finally{finishPageRefresh(viewId,succeeded)}})();
+      if(fixedCadenceViews.has(viewId)){tracked.pending=promise;const clear=()=>{if(tracked.pending===promise)tracked.pending=null};promise.then(clear,clear)}else promise.catch(()=>{});
+      return promise;
+    };tracked.pageRefreshTracked=true;window[name]=tracked;
+  }));
   document.querySelectorAll('nav a[data-view]').forEach(link=>link.addEventListener('click',()=>renderPageRefreshIndicator(link.dataset.view)));
   clearInterval(pageRefreshIndicatorTimer);pageRefreshIndicatorTimer=setInterval(()=>renderPageRefreshIndicator(),100);renderPageRefreshIndicator();
 }
 let configuredPageTimers=[];
 async function startConfiguredPageTimers(){
   configuredPageTimers.forEach(controller=>{controller.stopped=true;clearTimeout(controller.timer)});configuredPageTimers=[];pageRefreshControllers.clear();
-  let values={spot_market_refresh:5,dual_market_refresh:5,browser_alert_refresh:5,thought_watch_scan:300,onchain_opportunity_refresh:300};try{const data=await (await fetch('/api/runtime-rules')).json();data.items?.forEach(item=>{if(item.enabled&&Number(item.value)>0)values[item.key]=Number(item.value)})}catch(error){}
-  const every=(viewId,seconds,callback,allowed=()=>true)=>{const delay=Math.max(2,Number(seconds)||0)*1000,controller={timer:null,stopped:false,schedule:null};setPageRefreshInterval(viewId,delay/1000);controller.schedule=()=>{if(controller.stopped)return;clearTimeout(controller.timer);const state=pageRefreshState(viewId),wait=viewId==='dashboard'&&state.startedAt&&allowed()?Math.max(250,delay-(Date.now()-state.startedAt)):delay;controller.timer=setTimeout(async()=>{if(controller.stopped)return;try{if(allowed()&&(viewId!=='dashboard'||!pageRefreshState(viewId).inFlight))await callback()}catch(error){}finally{if(!controller.stopped)controller.schedule()}},wait)};configuredPageTimers.push(controller);pageRefreshControllers.set(viewId,controller);controller.schedule()};
+  let values={spot_market_refresh:5,dual_market_refresh:5,browser_alert_refresh:5,thought_watch_scan:300,onchain_opportunity_refresh:300};try{const data=await fetchRefreshJson('/api/runtime-rules',5000);data.items?.forEach(item=>{if(item.enabled&&Number(item.value)>0)values[item.key]=Number(item.value)})}catch(error){}
+  const every=(viewId,seconds,callback,allowed=()=>true)=>{const delay=Math.max(2,Number(seconds)||0)*1000,controller={timer:null,stopped:false,schedule:null};setPageRefreshInterval(viewId,delay/1000);controller.schedule=()=>{if(controller.stopped)return;clearTimeout(controller.timer);const state=pageRefreshState(viewId),fixed=fixedCadenceViews.has(viewId),wait=fixed&&state.startedAt&&allowed()?Math.max(250,delay-(Date.now()-state.startedAt)):delay;controller.timer=setTimeout(async()=>{if(controller.stopped)return;try{if(allowed()&&(!fixed||!pageRefreshState(viewId).inFlight))await callback()}catch(error){}finally{if(!controller.stopped)controller.schedule()}},wait)};configuredPageTimers.push(controller);pageRefreshControllers.set(viewId,controller);controller.schedule()};
   every('dashboard',values.spot_market_refresh,()=>loadDashboard(),()=>activeViewId()==='dashboard');every('spot-futures',values.spot_market_refresh,()=>loadSpotFutures(),()=>activeViewId()==='spot-futures');every('my-positions',5,()=>loadHedgePositions(),()=>activeViewId()==='my-positions');every('dual-futures',values.dual_market_refresh,()=>loadDualFutures(),()=>activeViewId()==='dual-futures');every('onchain-opportunities',values.onchain_opportunity_refresh,()=>loadOnchainOpportunities(),()=>activeViewId()==='onchain-opportunities');every('alerts',values.browser_alert_refresh,()=>loadAlerts());every('thinking',30,()=>loadSimpleThinking(),()=>activeViewId()==='thinking');every('funding-trend',60,()=>loadFundingTrend(),()=>activeViewId()==='funding-trend');every('trade-validation',30,()=>loadTradeValidation(),()=>activeViewId()==='trade-validation');every('security-notifications',30,()=>loadSecurityAlerts(false),()=>authState.is_admin);every('daily-thoughts',values.thought_watch_scan,()=>loadThoughtAnalysis(),()=>activeViewId()==='daily-thoughts');
   const metadataController={timer:null,stopped:false};const scheduleMetadata=()=>{if(metadataController.stopped)return;metadataController.timer=setTimeout(async()=>{try{await loadDelistedMarketSymbols(true)}finally{scheduleMetadata()}},300000)};configuredPageTimers.push(metadataController);scheduleMetadata();
 }
 const delistingWarningObserver=new MutationObserver(records=>records.forEach(record=>record.addedNodes.forEach(node=>{if(node.nodeType===Node.ELEMENT_NODE)applyDelistingWarnings(node)})));
 delistingWarningObserver.observe(document.body,{childList:true,subtree:true});
-installPageRefreshTracking();syncMobileViewportHeight();updateMobileViewTitle(document.querySelector('aside nav a.active'),activeViewId());syncMobileViewState(activeViewId());loadAuthState().then(async()=>{if(!await ensureCurrentDeviceBinding())return;setupChatPush();loadChatUsers().then(startChatPolling).catch(()=>{});if(authState.is_admin)loadSecurityAlerts(false)});navigator.serviceWorker?.addEventListener('message',event=>{if(event.data?.type!=='chat-push-received')return;loadChatUsers().catch(()=>{});if(chatPeerId)loadChatMessages('newer').catch(()=>{})});updateSidebarSubnav(activeViewId());renderGainersShell();configureSpotLayoutShell();renderDualFuturesShell();configureDualLayoutShell();ensureDualFundingHistoryHeader();addDualLiquidityHeader();addDualBasisSortControls();addBasisOpeningHeaders();installGroupFrameObservers();updateSoundControls();updateSortHeaders();updateDualSortHeaders();loadDelistedMarketSymbols().finally(loadDashboard);loadAlerts(true);startConfiguredPageTimers();
+installPageRefreshTracking();syncMobileViewportHeight();updateMobileViewTitle(document.querySelector('aside nav a.active'),activeViewId());syncMobileViewState(activeViewId());
+loadAuthState().then(async()=>{if(!await ensureCurrentDeviceBinding())return;setupChatPush();loadChatUsers().then(startChatPolling).catch(()=>{});if(authState.is_admin)loadSecurityAlerts(false)});
+navigator.serviceWorker?.addEventListener('message',event=>{if(event.data?.type!=='chat-push-received')return;loadChatUsers().catch(()=>{});if(chatPeerId)loadChatMessages('newer').catch(()=>{})});
+updateSidebarSubnav(activeViewId());renderGainersShell();configureSpotLayoutShell();renderDualFuturesShell();configureDualLayoutShell();ensureDualFundingHistoryHeader();addDualLiquidityHeader();addDualBasisSortControls();addBasisOpeningHeaders();installGroupFrameObservers();setupSectionWorkspace();updateSoundControls();updateSortHeaders();updateDualSortHeaders();
+loadDelistedMarketSymbols().finally(()=>{if(!restoreSectionFromHash()&&activeViewId()==='dashboard')loadDashboard().catch(()=>{})}).catch(()=>{});
+loadAlerts(true);startConfiguredPageTimers();
 document.addEventListener('click',event=>{if(event.target.id==='symbolDetailModal')closeSymbolDetail();if(event.target.id==='hedgePositionModal')closeHedgePositionBuilder()});

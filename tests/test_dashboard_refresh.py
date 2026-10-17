@@ -132,8 +132,43 @@ class DashboardRefreshTests(unittest.TestCase):
         lanes = [call.kwargs for call in thread.call_args_list if call.kwargs.get("target") is module.background_dashboard_cache_refresh]
         self.assertEqual(len(lanes), 4)
         self.assertEqual({lane["name"] for lane in lanes}, {"dashboard-quotes", "dashboard-major-analysis", "dashboard-momentum", "dashboard-oi-market-cap"})
-        self.assertEqual(lanes[0]["args"][1:], (5, "spot_market_refresh", False))
-        self.assertTrue(all(lane["args"][-1] for lane in lanes[1:]))
+        self.assertEqual(lanes[0]["args"][1:], (5, "spot_market_refresh", False, False))
+        self.assertTrue(all(lane["args"][3] for lane in lanes[1:]))
+        self.assertEqual([lane["args"][4] for lane in lanes], [False, False, True, True])
+
+    def test_rankings_wait_for_classification_but_quotes_do_not(self):
+        refresh = unittest.mock.Mock(__name__="ranking-refresh")
+        ready = unittest.mock.Mock()
+        ready.wait.side_effect = [False, True, StopWorker()]
+        with patch.object(module, "RWA_STOCK_METADATA_READY", ready), \
+                patch("app.time.monotonic", side_effect=[100, 101]), \
+                patch("app.time.sleep"):
+            with self.assertRaises(StopWorker):
+                module.background_dashboard_cache_refresh(refresh, 300, force=True, requires_metadata=True)
+        refresh.assert_called_once_with(force=True)
+
+    def test_complete_coin_only_catalog_also_signals_metadata_ready(self):
+        ready = module.threading.Event()
+        with patch.object(module, "RWA_STOCK_METADATA_READY", ready), patch.object(module, "RWA_STOCK_SYMBOLS", set()):
+            module.refresh_rwa_stock_symbols([{"symbol": "BTCUSDT", "contractType": "PERPETUAL", "underlyingType": "COIN"}])
+            self.assertTrue(ready.is_set())
+            self.assertEqual(module.RWA_STOCK_SYMBOLS, set())
+
+    def test_empty_catalog_does_not_erase_last_classification_or_mark_ready(self):
+        ready = module.threading.Event()
+        with patch.object(module, "RWA_STOCK_METADATA_READY", ready), patch.object(module, "RWA_STOCK_SYMBOLS", {"EWYUSDT"}):
+            module.refresh_rwa_stock_symbols([])
+            self.assertFalse(ready.is_set())
+            self.assertEqual(module.RWA_STOCK_SYMBOLS, {"EWYUSDT"})
+
+    def test_reader_filters_reclassified_stock_from_both_cached_rankings(self):
+        with patch.object(module, "RWA_STOCK_SYMBOLS", {"EWYUSDT"}), \
+                patch.object(module, "MOMENTUM_SCORE_CACHE", {"items": [{"symbol": "EWY/USDT", "evaluated_at": "00:00:00"}]}), \
+                patch.dict(module.OI_MARKET_CAP_CACHE, {"items": [{"symbol": "EWY/USDT"}]}), module.app.app_context():
+            data = module.dashboard().get_json()
+        self.assertEqual(data["momentum_opportunities"], [])
+        self.assertEqual(data["oi_market_cap_opportunities"], [])
+        self.assertIsNone(data["momentum_updated_at"])
 
 
 if __name__ == "__main__":

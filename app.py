@@ -963,6 +963,7 @@ BINANCE_ALPHA_CATALOG_TTL_SECONDS = 10 * 60
 BINANCE_ALPHA_CATALOG_CACHE = {"symbols": frozenset(), "expires_at": 0.0, "updated_at": None}
 BINANCE_ALPHA_CATALOG_LOCK = threading.Lock()
 RWA_STOCK_SYMBOLS = set()
+RWA_STOCK_METADATA_READY = threading.Event()
 STATIC_RWA_STOCK_SYMBOLS = {
     # Binance/partner TradFi perpetuals are sometimes unavailable in exchangeInfo during partial refreshes.
     # Keep a local guard so stock, ETF and metal RWA contracts do not leak into crypto arbitrage scanners.
@@ -1411,10 +1412,13 @@ def valid_book(ask, bid):
 def refresh_rwa_stock_symbols(instruments):
     """以 Binance 合约元数据的 TradFi/EQUITY 分类识别美股 RWA。"""
     global RWA_STOCK_SYMBOLS
+    if not instruments:
+        return
     RWA_STOCK_SYMBOLS = {
         item.get("symbol") for item in instruments
         if item.get("contractType") == "TRADIFI_PERPETUAL" or item.get("underlyingType") == "EQUITY" or "TradFi" in item.get("underlyingSubType", [])
     }
+    RWA_STOCK_METADATA_READY.set()
 
 
 def sync_binance_listing_events(instruments):
@@ -6357,6 +6361,9 @@ def dashboard():
     items = live_dashboard_opportunities()
     momentum = MOMENTUM_SCORE_CACHE.copy()
     oi_market_cap = OI_MARKET_CAP_CACHE.copy()
+    # Classification may change after a ranking was published; don't leak stale RWA entries.
+    momentum_items = [item for item in momentum["items"] if not is_rwa_stock_pair(item["symbol"])]
+    oi_market_cap_items = [item for item in oi_market_cap["items"] if not is_rwa_stock_pair(item["symbol"])]
     active = Strategy.query.filter_by(enabled=True).count()
     response = jsonify({
         "majors": live_dashboard_majors(items),
@@ -6365,9 +6372,9 @@ def dashboard():
         "market_stale": not items or any(item["stale"] for item in items),
         "market_incomplete": len(items) < len(MAJOR_MARKET_SYMBOLS) or any(item["incomplete"] for item in items),
         "market_stale_after_seconds": max(15, 3 * DASHBOARD_QUOTE_REFRESH_SECONDS),
-        "momentum_opportunities": momentum["items"],
-        "momentum_updated_at": momentum["items"][0]["evaluated_at"] if momentum["items"] else None,
-        "oi_market_cap_opportunities": oi_market_cap["items"],
+        "momentum_opportunities": momentum_items,
+        "momentum_updated_at": momentum_items[0]["evaluated_at"] if momentum_items else None,
+        "oi_market_cap_opportunities": oi_market_cap_items,
         "oi_market_cap_updated_at": oi_market_cap["updated_at"],
         "oi_market_cap_coverage": oi_market_cap["coverage"],
         "oi_market_cap_error": oi_market_cap["error"],
@@ -14162,10 +14169,12 @@ def background_turnover_basis_watch():
         time.sleep(5)
 
 
-def background_dashboard_cache_refresh(refresh, seconds, rule_key=None, force=False):
+def background_dashboard_cache_refresh(refresh, seconds, rule_key=None, force=False, requires_metadata=False):
     """Independent quote/analysis lanes: neither an HTTP reader nor another lane waits."""
     global DASHBOARD_QUOTE_REFRESH_SECONDS
     while True:
+        if requires_metadata and not RWA_STOCK_METADATA_READY.wait(timeout=1):
+            continue
         started_at = time.monotonic()
         interval = seconds
         try:
@@ -14188,13 +14197,13 @@ def start_background_workers():
     if BACKGROUND_WORKERS_STARTED:
         return
     BACKGROUND_WORKERS_STARTED = True
-    for name, refresh, seconds, rule_key in (
-        ("quotes", refresh_dashboard_opportunities, MARKET_REFRESH_SECONDS, "spot_market_refresh"),
-        ("major-analysis", fetch_major_market_overview, MAJOR_MARKET_CACHE_SECONDS, None),
-        ("momentum", load_momentum_scores, MOMENTUM_SCORE_CACHE_SECONDS, None),
-        ("oi-market-cap", load_open_interest_market_cap_opportunities, OI_MARKET_CAP_CACHE_SECONDS, None),
+    for name, refresh, seconds, rule_key, requires_metadata in (
+        ("quotes", refresh_dashboard_opportunities, MARKET_REFRESH_SECONDS, "spot_market_refresh", False),
+        ("major-analysis", fetch_major_market_overview, MAJOR_MARKET_CACHE_SECONDS, None, False),
+        ("momentum", load_momentum_scores, MOMENTUM_SCORE_CACHE_SECONDS, None, True),
+        ("oi-market-cap", load_open_interest_market_cap_opportunities, OI_MARKET_CAP_CACHE_SECONDS, None, True),
     ):
-        threading.Thread(target=background_dashboard_cache_refresh, args=(refresh, seconds, rule_key, rule_key is None), daemon=True, name=f"dashboard-{name}").start()
+        threading.Thread(target=background_dashboard_cache_refresh, args=(refresh, seconds, rule_key, rule_key is None, requires_metadata), daemon=True, name=f"dashboard-{name}").start()
     threading.Thread(target=background_spot_market_refresh, daemon=True, name="spot-market-refresh").start()
     threading.Thread(target=background_dual_market_refresh, daemon=True, name="dual-market-refresh").start()
     threading.Thread(target=background_funding_history_sync, daemon=True, name="funding-history-sync").start()

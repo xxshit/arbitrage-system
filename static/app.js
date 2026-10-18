@@ -345,7 +345,20 @@ function transferStatusMarkup(status={}){
   const note=!fresh||!chains.length?`<span class="transfer-data-note" title="${reason}${provenance}">${status.state==='stale'?'快照过期':'充提未知'}${!chains.length&&reasonText.includes('未接入')?' · 未接入':''}</span>`:'';
   return `${note}${chainMarkup}`;
 }
-function spotTransferStatus(row,symbol=''){return transferStatusControl(row.transfer_status||{exchange:row.long_exchange,state:'unknown',reason:'充提状态尚未读取',chains:[]},symbol)}
+function divergenceLabel(risk){return risk?.state==='confirmed'?'价格脱钩':'疑似脱钩'}
+function divergenceEvidence(risk){
+  const p=value=>Number.isFinite(value)?String(value):'—',pct=value=>Number.isFinite(value)?`${value>=0?'+':''}${value.toFixed(2)}%`:'—';
+  const chains=Array.isArray(risk?.blocked_chains)?risk.blocked_chains.join('、'):'';
+  return `${risk.long_exchange}现货 → 币安合约｜现货卖一 ${p(risk.long_ask)} USDT｜合约买一 ${p(risk.short_bid)} USDT｜币安指数 ${p(risk.index_price)} USDT｜开差 ${pct(risk.open_spread)}｜币安基差 ${pct(risk.basis)}｜${chains||'充提状态未作为受限证据'}｜${risk.stale?'报价待更新，继续隔离':risk.recovering?'价格已收敛，等待稳定确认':'已暂停该路径报警'}｜${risk.observed_at||''}`;
+}
+function divergenceBadge(risk){return risk?`<span class="price-divergence-badge" tabindex="0" title="${escapeChatHtml(divergenceEvidence(risk))}" aria-label="${escapeChatHtml(divergenceLabel(risk)+'，'+divergenceEvidence(risk))}">⚠ ${divergenceLabel(risk)}</span>`:''}
+function renderDivergenceRegister(paths){
+  const panel=byId('alertDivergenceRegister'),list=byId('alertDivergenceList'),count=byId('alertDivergenceCount');if(!panel||!list||!count)return;
+  paths=Array.isArray(paths)?paths:[];panel.hidden=!paths.length;count.textContent=paths.length;
+  const markup=paths.map(risk=>`<article class="divergence-register-row"><div><b>${escapeChatHtml(risk.symbol)}</b>${divergenceBadge(risk)}</div><p>${escapeChatHtml(divergenceEvidence(risk))}</p></article>`).join('');
+  if(list.innerHTML!==markup){const top=list.scrollTop;list.innerHTML=markup;list.scrollTop=top}
+}
+function spotTransferStatus(row,symbol=''){return transferStatusControl(row.transfer_status||{exchange:row.long_exchange,state:'unknown',reason:'充提状态尚未读取',chains:[]},symbol)+divergenceBadge(row.price_divergence)}
 function transferPopoverMarkup(status){
   const summary=transferSummary(status),count=transferChains(status).length;
   return `<header><strong>${escapeChatHtml(status.exchange||'该交易所')} · 全部链通道</strong><button type="button" class="transfer-popover-close" aria-label="关闭充提详情">×</button></header><div class="transfer-popover-summary"><span class="transfer-summary-${summary.key}">${summary.label}</span><small>${count?`共${count}项链通道`:'暂无链数据'}</small></div>${summary.key==='unknown'&&status.reason?`<p class="transfer-popover-note">${escapeChatHtml(status.reason)}</p>`:''}<div class="transfer-popover-chains" tabindex="0" role="region" aria-label="${escapeChatHtml(status.exchange||'该交易所')} 全部链充提状态，可滚动"><div class="transfer-chain-list">${transferStatusMarkup(status)}</div></div>`;
@@ -677,9 +690,11 @@ async function loadAlerts(force=false){
   try{
     const data=await fetchRefreshJson('/api/alerts?view=summary'),activeEvents=data.active_events||[],groups=data.events||[],tracking=data.basis_tracking||[];
     pruneAlertMutes(groups,activeEvents);latestActiveAlertEvents=activeEvents;
+    renderDivergenceRegister(data.isolated_paths);
     const signature=JSON.stringify({groups,tracking,activeEvents},(key,value)=>key==='remaining_seconds'?undefined:value);
-    const audibleSignature=activeEvents.filter(item=>!isAlertMuted(item.symbol)).map(item=>`${item.symbol}-${item.type}-${item.open_spread}-${item.basis}-${item.created_at}`).join('|');
-    const hasNewAlert=alertsInitialized&&audibleSignature!==alertAudibleSignature&&audibleSignature.length>0;
+    const audibleKeys=activeEvents.filter(item=>!isAlertMuted(item.symbol)).map(item=>`${item.symbol}-${item.type}-${item.open_spread}-${item.basis}-${item.created_at}`),audibleSignature=audibleKeys.join('|');
+    const previousAudible=new Set(alertAudibleSignature.split('|'));
+    const hasNewAlert=alertsInitialized&&audibleKeys.some(key=>!previousAudible.has(key));
     setPageRefreshSource('alerts',data.checked_at_epoch,'检查');
     if(!force&&signature===alertSignature){if(activeViewId()==='alerts')loadSelectedAlertHistory();return true}
     renderAlertMasterDetail(groups);

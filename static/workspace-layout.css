@@ -540,3 +540,13 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 @media(prefers-reduced-motion:reduce) {
   .layout-view {scroll-behavior:auto}
 }
+.price-divergence-badge {display:inline-block;color:#c52626;background:#fff1ee;border:1px solid #f0c7be;border-radius:4px;font-size:10px;line-height:1.6;padding:1px 5px;white-space:nowrap;margin:3px;cursor:help}
+.price-divergence-badge:focus-visible {outline:2px solid #a92727;outline-offset:2px}
+.divergence-register {border:1px solid #ead1c6;border-radius:6px;background:#fffaf5;margin:0 0 8px;font-size:11px;color:#805039}
+.divergence-register[hidden] {display:none!important}
+.divergence-register>summary {cursor:pointer;padding:6px 9px}
+.divergence-register>summary small {margin-left:7px;color:#78645e}
+.divergence-register-list {max-height:180px;overflow:auto;overscroll-behavior:contain;padding:0 9px}
+.divergence-register-row {padding:5px 0;border-top:1px solid #eee0d9}
+.divergence-register-row>div {display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.divergence-register-row p {margin:3px 0;line-height:1.65;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}

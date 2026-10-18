@@ -25,7 +25,7 @@ function harness(){
     for(const name of match[1].matchAll(/'([^']+)'/g))context[name[1]]=async()=>{};
   }
   context.loadDelistedMarketSymbols=async()=>{};
-  vm.createContext(context);vm.runInContext(tracking+networkHelper,context);
+  vm.createContext(context);vm.runInContext(tracking+networkHelper+source.slice(source.indexOf('function divergenceLabel('),source.indexOf('function spotTransferStatus(')),context);
   vm.runInContext('renderPageRefreshIndicator=()=>{};',context);
   const flush=async()=>{for(let i=0;i<15;i++)await Promise.resolve()};
   return {context,timers,flush,now:()=>now,run:code=>vm.runInContext(code,context),async advance(ms){
@@ -166,4 +166,14 @@ test('wallet metadata changes refresh the panel without replaying unchanged acti
   const active={symbol:'AUDIT/USDT',type:'rapid_basis',open_spread:1,basis:1,created_at:'10-18 10:00:00'};
   h.context.fetch=async()=>({ok:true,json:async()=>({active_events:[active],events:[{symbol:active.symbol,transfer_statuses:[{exchange:'Gate',state}]}],basis_tracking:[],checked_at_epoch:100})});
   await h.context.loadAlerts(true);state='fresh';await h.context.loadAlerts();assert.equal(renders,2);assert.equal(sounds,0);
+});
+
+test('removing an isolated alert does not replay the surviving alert, while a new alert still sounds',async()=>{
+  const h=harness();let sounds=0;
+  Object.assign(h.context,{pruneAlertMutes(){},latestActiveAlertEvents:[],isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){},replaceHtmlKeepingExchangeLogos(){},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});
+  h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
+  const healthy={symbol:'HEALTHY/USDT',type:'rapid_basis',open_spread:1,basis:1,created_at:'10-18 10:00:00'},isolated={...healthy,symbol:'ISOLATED/USDT'};
+  let active=[healthy,isolated];h.context.fetch=async()=>({ok:true,json:async()=>({active_events:active,events:[],basis_tracking:[],checked_at_epoch:100})});
+  await h.context.loadAlerts(true);active=[healthy];await h.context.loadAlerts();assert.equal(sounds,0);
+  active=[{...healthy,basis:2}];await h.context.loadAlerts();assert.equal(sounds,1);
 });

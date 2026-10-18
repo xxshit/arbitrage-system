@@ -11,6 +11,8 @@
     funding_interval_hours:4,next_funding_time:'2026-10-18 12:00:00',spot_volume:18200000,futures_volume:37600000,futures_open_interest:14300000,
     open_spread:0.85,close_spread:-0.93,change_5m:0.42,change_15m:0.7,change_30m:1.2,change_1h:2.1,change_12h:4.6,change_24h:7.9,change_3d:12.6,change_7d:18.4};
   const spot = symbols.map((symbol,index) => ({symbol,rows:[{...base,long_ask:base.long_ask+index/10,transfer_status:wallet('Gate')},{...base,long_exchange:'Bitget',open_spread:0.75,transfer_status:wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC',chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}],reason:'快照已过期'})}]}));
+  const isolatedRisk={symbol:'ISOLATED/USDT',long_exchange:'Gate',short_exchange:'Binance',state:'confirmed',long_ask:.12225,short_bid:.02814,index_price:.02804,open_spread:-76.98,basis:.36,blocked_chains:['BSC 充关'],stale:false,observed_at:'10-19 00:00:00 UTC'};
+  spot.push({symbol:isolatedRisk.symbol,rows:[{...base,...isolatedRisk,transfer_status:wallet('Gate'),price_divergence:isolatedRisk}]});
   const dual = symbols.map(symbol => ({symbol,binance_change_5m:0.42,binance_change_15m:0.7,binance_change_30m:1.2,binance_change_1h:2.1,rows:[
     {...base,long_exchange:'Bybit',long_basis:-0.2,short_basis:0.83,long_open_interest:12000000,short_open_interest:14300000,long_volume:25000000,short_volume:37600000,
       long_funding_rate:0.01,short_funding_rate:0.025,long_funding_interval_hours:4,short_funding_interval_hours:4,long_next_funding_time:stamp,short_next_funding_time:stamp,
@@ -56,12 +58,12 @@
   const fixtures = {
     '/api/auth/me':{user_id:1,username:'preview_admin',is_admin:true,account_level:'lv3',csrf_token:'synthetic-only',device_lock_required:false,chat_nav_hidden:false},
     '/api/market-metadata/delisted-symbols':{symbols:[]},
-    '/api/spot-futures':{symbols:spot,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:4,page:1,pages:1,next_refresh_in_seconds:5},
+    '/api/spot-futures':{symbols:spot,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:5,page:1,pages:1,next_refresh_in_seconds:5},
     '/api/dual-futures':{symbols:dual,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:4,page:1,pages:1,include_bybit_okx:false,next_refresh_in_seconds:5},
     '/api/arbitrage-thinking/funding-trend':{items:funding,updated_at:stamp},
     '/api/arbitrage-thinking/simple':{spot_simple:simple,dual_simple:simple.map(item=>({...item,long_exchange:'Bybit',long_is_spot:false,long_interval:4,long_open_interest:12000000}))},
     '/api/onchain-opportunities':{items:onchain,updated_at:stamp,stale:false,chains:[{id:'all',label:'全部',count:4},{id:'bsc',label:'BSC',count:1},{id:'solana',label:'Solana',count:1},{id:'base',label:'Base',count:1},{id:'eth',label:'Ethereum',count:1}]},
-    '/api/alerts':{checked_at_epoch:now(),active_events:[event],events:alertGroups,basis_tracking:[{symbol:'DEMO/USDT',strategy:'spot_futures',max_basis:1.4,last_level:1.4,max_at:stamp}]},
+    '/api/alerts':{checked_at_epoch:now(),active_events:[event],events:alertGroups,isolated_paths:[isolatedRisk],basis_tracking:[{symbol:'DEMO/USDT',strategy:'spot_futures',max_basis:1.4,last_level:1.4,max_at:stamp}]},
     '/api/hedge-positions':{checked_at_epoch:now(),execution:{enabled:false,reason:'隔离布局样本；真实下单未启用。'},summary:{current_count:1,history_count:1,spot_notional:100,futures_notional:100,hedge_gap_usdt:0,funding_income:0.35,fees:0.12,history_net_result:1.8},
       current:[{id:1,symbol:'DEMO/USDT',spot_exchange:'Gate',futures_exchange:'Binance',status:'open',status_label:'合成持仓',spot_quantity:80,futures_quantity:80,spot_entry_price:1.23,futures_entry_price:1.24,spot_notional:98.4,futures_notional:99.2,hedge_gap_usdt:0.8,opening_spread:0.81,funding_income:0.35,spot_fee:0.05,futures_fee:0.04,spot_order_id:'PREVIEW-SPOT-ORDER-LONG-IDENTIFIER',futures_order_id:'PREVIEW-FUTURES-ORDER-LONG-IDENTIFIER',opened_at:stamp}],
       history:[{id:2,symbol:'SAMPLE/USDT',status:'closed',status_label:'合成已平仓',spot_exchange:'Gate',futures_exchange:'Binance',net_result:1.8,closed_at:stamp}]},

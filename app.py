@@ -274,6 +274,22 @@ class AlertEvent(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
 
 
+class SpotDivergence(db.Model):
+    """Path-scoped price isolation episodes; original alert history is retained."""
+    id = db.Column(db.Integer, primary_key=True)
+    symbol = db.Column(db.String(30), nullable=False, index=True)
+    long_exchange = db.Column(db.String(30), nullable=False)
+    short_exchange = db.Column(db.String(30), nullable=False, default="Binance")
+    started_at = db.Column(db.DateTime, nullable=False)
+    confirmed_at = db.Column(db.DateTime)
+    last_seen_at = db.Column(db.DateTime, nullable=False)
+    candidate_since = db.Column(db.DateTime)
+    recovering_since = db.Column(db.DateTime)
+    resolved_at = db.Column(db.DateTime, index=True)
+    samples = db.Column(db.Integer, nullable=False, default=0)
+    evidence_json = db.Column(db.Text, nullable=False, default="{}")
+
+
 class BasisTracking(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     symbol = db.Column(db.String(30), nullable=False, index=True)
@@ -2020,12 +2036,14 @@ def load_transfer_statuses(pairs, now=None):
 
 def enrich_transfer_networks(groups):
     statuses = load_transfer_statuses((group["symbol"], row["long_exchange"]) for group in groups for row in group["rows"])
+    risks = {(item.symbol, item.long_exchange): spot_divergence_payload(item) for item in SpotDivergence.query.filter(SpotDivergence.resolved_at.is_(None), SpotDivergence.symbol.in_([group["symbol"] for group in groups])).all()} if groups else {}
     for group in groups:
         for row in group["rows"]:
             status = statuses[(group["symbol"], row["long_exchange"])]
             row["transfer_status"] = status
             row["transfer_networks"] = status["chains"] if status["state"] == "fresh" else []
             row["transfer_status_source"] = "公开接口" if status["state"] == "fresh" else status["reason"]
+            row["price_divergence"] = risks.get((group["symbol"], row["long_exchange"]))
 
 
 def is_rwa_stock_pair(symbol):
@@ -3123,23 +3141,140 @@ def validate_spot_alert_quote(symbol, row, alert_type):
     return result
 
 
+def spot_divergence_evidence(row, transfer=None):
+    """A small mark/index basis alone cannot prove cross-venue convergence."""
+    fields = ("long_ask", "long_bid", "short_bid", "short_ask", "mark_price", "index_price")
+    values = {field: row.get(field) for field in fields}
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0 for value in values.values()):
+        return None
+    if row.get("short_exchange") not in ("Binance", "Binance 合约") or values["long_bid"] > values["long_ask"] or values["short_bid"] > values["short_ask"]:
+        return None
+    opening = (values["short_bid"] / values["long_ask"] - 1) * 100
+    closing = (values["short_ask"] / values["long_bid"] - 1) * 100
+    basis = (values["mark_price"] / values["index_price"] - 1) * 100
+    book_basis = ((values["short_bid"] + values["short_ask"]) / 2 / values["index_price"] - 1) * 100
+    blocked = []
+    if transfer and transfer.get("state") == "fresh":
+        for chain in transfer.get("chains", []):
+            closed = [label for field, label in (("deposit_open", "充关"), ("withdraw_open", "提关")) if chain.get(field) is False]
+            if closed:
+                blocked.append(f"{chain.get('name', '未知链')} {' / '.join(closed)}")
+    threshold, confirm_seconds = (5.0, 300) if blocked else (10.0, 900)
+    consistent = opening * closing > 0 and abs(opening - closing) < 0.6
+    signal = consistent and min(abs(opening), abs(closing)) >= threshold and abs(basis) <= 1 and abs(book_basis) <= 2
+    return {**values, "open_spread": opening, "close_spread": closing, "basis": basis,
+            "blocked_chains": blocked, "transfer_state": (transfer or {}).get("state", "unknown"),
+            "signal": signal, "confirm_seconds": confirm_seconds,
+            "converged": max(abs(opening), abs(closing)) < 2}
+
+
+def update_spot_divergences(groups, now=None):
+    """Run only on freshly fetched market rows, before any alert candidates."""
+    now = now or datetime.now()
+    active = {(item.symbol, item.long_exchange): item for item in SpotDivergence.query.filter_by(resolved_at=None).all()}
+    rows = {(group["symbol"], row["long_exchange"]): row for group in groups for row in group["rows"]}
+    candidates = {key for key, row in rows.items() if key in active or max(abs(row.get("open_spread") or 0), abs(row.get("close_spread") or 0)) >= 5}
+    transfers = load_transfer_statuses(candidates, now=now) if candidates else {}
+    for key in candidates:
+        row, item = rows[key], active.get(key)
+        evidence = spot_divergence_evidence(row, transfers.get(key))
+        if evidence is None:
+            if item:
+                item.candidate_since = item.recovering_since = None
+                item.samples = 0
+            continue
+        if item is None:
+            if not evidence["signal"]:
+                continue
+            item = SpotDivergence(symbol=key[0], long_exchange=key[1], short_exchange="Binance", started_at=now, last_seen_at=now, candidate_since=now, samples=0)
+            db.session.add(item)
+            active[key] = item
+        gap = (now - item.last_seen_at).total_seconds()
+        if gap < 0 or gap > 30:
+            item.candidate_since = item.recovering_since = None
+            item.samples = 0
+        item.last_seen_at = now
+        if evidence["converged"]:
+            item.candidate_since, item.samples = None, 0
+            item.recovering_since = item.recovering_since or now
+            if (now - item.recovering_since).total_seconds() >= 120:
+                item.resolved_at = now
+                active.pop(key)
+        else:
+            item.recovering_since = None
+            if evidence["signal"]:
+                previous = json.loads(item.evidence_json or "{}")
+                if previous.get("open_spread", evidence["open_spread"]) * evidence["open_spread"] < 0:
+                    item.candidate_since, item.samples = None, 0
+                item.candidate_since = item.candidate_since or now
+                item.samples += 1
+                if item.confirmed_at is None and item.samples >= 3 and (now - item.candidate_since).total_seconds() >= evidence["confirm_seconds"]:
+                    item.confirmed_at = now
+            else:
+                item.candidate_since, item.samples = None, 0
+        item.evidence_json = json.dumps(evidence, ensure_ascii=False)
+    for key, item in active.items():
+        if key not in rows:
+            item.candidate_since = item.recovering_since = None
+            item.samples = 0
+    db.session.flush()
+    return active
+
+
+def spot_divergence_payload(item, now=None):
+    now = now or datetime.now()
+    evidence = json.loads(item.evidence_json or "{}")
+    return {"symbol": item.symbol, "long_exchange": item.long_exchange, "short_exchange": item.short_exchange,
+            "state": "confirmed" if item.confirmed_at else "observing", "recovering": item.recovering_since is not None,
+            "stale": not 0 <= (now - item.last_seen_at).total_seconds() <= 30,
+            "started_at": item.started_at.strftime("%m-%d %H:%M:%S UTC"),
+            "observed_at": item.last_seen_at.strftime("%m-%d %H:%M:%S UTC"), **evidence}
+
+
+def spot_alert_exchange(item):
+    prefix = re.match(r"^(Binance|Gate|Bitget)(?=\s|现货|$)", item.message or "")
+    return item.long_exchange or (prefix.group(1) if prefix else None)
+
+
+def alert_is_divergent(item, episodes):
+    if item.strategy != "spot_futures" or item.short_exchange not in (None, "Binance"):
+        return False
+    for episode in episodes.get((item.symbol, spot_alert_exchange(item)), []):
+        if episode.resolved_at is None:
+            return True
+        if episode.confirmed_at and episode.started_at - timedelta(hours=24) <= item.created_at <= episode.resolved_at:
+            return True
+    return False
+
+
 def evaluate_alerts(groups):
+    isolated = update_spot_divergences(groups)
     active_trackings = BasisTracking.query.filter_by(resolved_at=None).all()
     active_by_symbol = {(item.strategy or "spot_futures", item.symbol): item for item in active_trackings}
     active_by_key = {(item.strategy or "spot_futures", item.symbol, item.direction): item for item in active_trackings}
     for group in groups:
         symbol = group["symbol"]
-        first_row = group["rows"][0]
-        track_basis(symbol, first_row, active_by_symbol, active_by_key)
-        for row in group["rows"]:
+        rows = [row for row in group["rows"] if (symbol, row["long_exchange"]) not in isolated]
+        for excluded in group["rows"]:
+            if (symbol, excluded["long_exchange"]) in isolated:
+                key = ("spot_futures", symbol, excluded["long_exchange"], "Binance")
+                for cache in (RAPID_MOVE_HISTORY, RAPID_MOVE_CANDIDATES, RAPID_MOVE_ALERT_WINDOWS):
+                    for cache_key in list(cache):
+                        if cache_key[0] == key:
+                            cache.pop(cache_key, None)
+        if rows:
+            track_basis(symbol, rows[0], active_by_symbol, active_by_key)
+        else:
+            BASIS_CANDIDATES.pop(("spot_futures", symbol), None)
+        for row in rows:
             path_key = ("spot_futures", symbol, row["long_exchange"], "Binance")
             for metric, value in (("开差", float(row.get("open_spread") or 0)), ("基差", float(row.get("basis") or 0))):
                 for seconds, threshold, expanded in rapid_move_alerts(path_key, metric, value):
                     alert_type = f"rapid_{'spread' if metric == '开差' else 'basis'}"
                     if validate_spot_alert_quote(symbol, row, alert_type):
                         create_alert(symbol, alert_type, f"{row['long_exchange']} 现货与 Binance 合约：{seconds} 秒内{metric}绝对值扩大 {expanded:.3f}%（阈值 {threshold:.1f}%）", row, "spot_futures", row["long_exchange"], "Binance")
-        futures_rows = [row for row in group["rows"] if row["open_spread"] > 1 and abs(row["open_spread"] - row["close_spread"]) < 0.6]
-        spot_rows = [row for row in group["rows"] if row["open_spread"] < -1 and abs(row["open_spread"] - row["close_spread"]) < 0.6]
+        futures_rows = [row for row in rows if row["open_spread"] > 1 and abs(row["open_spread"] - row["close_spread"]) < 0.6]
+        spot_rows = [row for row in rows if row["open_spread"] < -1 and abs(row["open_spread"] - row["close_spread"]) < 0.6]
         active_pump_key = None
         if futures_rows:
             row = max(futures_rows, key=lambda item: item["open_spread"])
@@ -3380,6 +3515,8 @@ def spot_futures_snapshot():
             oi_contracts = BINANCE_OPEN_INTEREST_CACHE.get(symbol, {}).get("contracts")
             rows.append({"long_exchange": exchange, "long_ask": book["ask"], "long_bid": book["bid"], "short_exchange": "Binance 合约", "short_bid": futures_book["bid"], "short_ask": futures_book["ask"], "basis": contract_basis, "funding_rate": float(funding_item["lastFundingRate"]) * 100, "funding_interval_hours": intervals.get(symbol, 8), "next_funding_time": datetime.fromtimestamp(int(funding_item["nextFundingTime"]) / 1000, tz=timezone.utc).astimezone().strftime("%m-%d %H:%M"), "spot_volume": spot_volumes[exchange].get(raw_spot_symbol), "futures_volume": futures_volumes.get(symbol), "futures_open_interest": oi_contracts * float(funding_item.get("markPrice", 0) or 0) if oi_contracts is not None else None, "open_spread": open_spread, "close_spread": close_spread})
         if rows:
+            for row in rows:
+                row.update(mark_price=float(funding_item["markPrice"]), index_price=float(funding_item["indexPrice"]))
             rows_by_symbol.append({"symbol": alias["canonical"], "rows": rows})
     rows_finished_at = time.perf_counter()
     evaluate_alerts(rows_by_symbol)
@@ -12534,13 +12671,23 @@ def alerts():
             except (ValueError, TypeError):
                 return jsonify({"error": "无效的报警路径"}), 400
         query = query.filter(AlertEvent.symbol == symbol)
-    all_events = [item for item in query.order_by(AlertEvent.created_at.desc(), AlertEvent.id.desc()).all() if not is_rwa_stock_pair(item.symbol)]
+    episodes = SpotDivergence.query.filter(or_(SpotDivergence.resolved_at.is_(None), SpotDivergence.resolved_at >= window_start)).all()
+    by_path = {}
+    for episode in episodes:
+        by_path.setdefault((episode.symbol, episode.long_exchange), []).append(episode)
+    isolated = [item for item in episodes if item.resolved_at is None]
+    all_events = [item for item in query.order_by(AlertEvent.created_at.desc(), AlertEvent.id.desc()).all() if not is_rwa_stock_pair(item.symbol) and not alert_is_divergent(item, by_path)]
     grouped_events = {}
     for item in all_events:
         grouped_events.setdefault(item.symbol, []).append(item)
     latest_events = [items[0] for items in grouped_events.values()]
     active_events = [item for item in latest_events if (now - item.created_at).total_seconds() <= 120]
     tracking = [item for item in BasisTracking.query.filter_by(resolved_at=None).order_by(BasisTracking.max_abs_basis.desc()).limit(50).all() if not is_rwa_stock_pair(item.symbol)] if view != "detail" else []
+    if isolated and tracking:
+        isolated_keys = {(item.symbol, item.long_exchange) for item in isolated}
+        isolated_symbols = {item.symbol for item in isolated}
+        healthy_symbols = {item.symbol for item in LatestMarketSnapshot.query.filter(LatestMarketSnapshot.symbol.in_(isolated_symbols), LatestMarketSnapshot.captured_at >= now - timedelta(seconds=30)).all() if (item.symbol, item.long_exchange) not in isolated_keys}
+        tracking = [item for item in tracking if item.strategy != "spot_futures" or item.symbol not in isolated_symbols or item.symbol in healthy_symbols]
     event_symbols = list(grouped_events)
     dual_context = {
         (item.symbol, item.long_exchange, item.short_exchange): item
@@ -12652,6 +12799,7 @@ def alerts():
         "window_hours": 24,
         "total_symbols": len(grouped_events),
         "total_alerts": len(all_events),
+        "isolated_paths": [spot_divergence_payload(item, now) for item in sorted(isolated, key=lambda item: (item.symbol, item.long_exchange))],
         "events": [alert_group_payload(symbol, items) for symbol, items in grouped_events.items()],
         "active_events": [event_payload(item) for item in active_events],
         "basis_tracking": [{"symbol": item.symbol, "strategy": item.strategy or "spot_futures", "direction": item.direction, "started_at": item.started_at.strftime("%m-%d %H:%M:%S"), "opening_basis": item.opening_basis, "last_level": item.last_recorded_level, "max_basis": item.max_basis, "max_at": item.max_at.strftime("%m-%d %H:%M:%S")} for item in tracking],

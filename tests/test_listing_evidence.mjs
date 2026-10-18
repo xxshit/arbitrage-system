@@ -12,6 +12,8 @@ const css=readFileSync(new URL('../static/workspace-layout.css',import.meta.url)
 class Element {
   constructor(tag='div'){this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.className='';this.attributes={};this.textContent='';this.html='';this.writes=0;this.value='';this.classList={contains:key=>this.className.split(' ').includes(key),toggle:(key,on)=>{const set=new Set(this.className.split(' ').filter(Boolean));on?set.add(key):set.delete(key);this.className=[...set].join(' ')}}}
   appendChild(child){if(child.parentElement)child.remove();this.children.push(child);child.parentElement=this;return child}
+  get firstChild(){return this.children[0]||null}
+  insertBefore(child,reference){if(!reference)return this.appendChild(child);child.remove();this.children.splice(this.children.indexOf(reference),0,child);child.parentElement=this;return child}
   remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(child=>child!==this);this.parentElement=null}
   before(child){const parent=this.parentElement;child.remove();parent.children.splice(parent.children.indexOf(this),0,child);child.parentElement=parent}
   replaceWith(child){const parent=this.parentElement,index=parent.children.indexOf(this);child.remove();parent.children.splice(index,1,child);child.parentElement=parent;this.parentElement=null}
@@ -68,9 +70,11 @@ test('only newest evidence per exchange/scope is compacted and official evidence
   assert.equal(h.context.delistingEvidenceFor('ESPORTS')[0].id,48);
 });
 
-test('collapsed warning contains only a single red-exclamation button, not visible rows',()=>{
+test('collapsed warning uses the original text-presentation warning triangle, not a circular exclamation',()=>{
   const h=harness(),markup=h.context.delistingEvidenceMarkup('ESPORTS/USDT');
-  assert.equal((markup.match(/<button/g)||[]).length,1);assert.ok(markup.includes('>!</button>'));assert.ok(markup.includes('aria-expanded="false"'));
+  assert.equal((markup.match(/<button/g)||[]).length,1);assert.ok(markup.includes('<span aria-hidden="true">⚠&#xfe0e;</span>'));assert.ok(markup.includes('aria-expanded="false"'));
+  const style=css.match(/\.delisting-evidence \.delisting-warning-trigger \{([^}]+)\}/)[1];
+  assert.ok(style.includes('color:#e12636!important'));assert.ok(style.includes('border:0'));assert.ok(!style.includes('border-radius:50%'));
   for(const text of ['Bitget','2026-09-08','<a','title='])assert.ok(!markup.includes(text),text);
 });
 
@@ -90,8 +94,8 @@ test('unsafe links and untrusted announcement text cannot become executable mark
 test('warning decoration is idempotent and retains the original symbol button',()=>{
   const h=harness();h.context.indexDelistingEvidence([event()]);h.run("delistedMarketBases.add('ESPORTS')");
   const node=new Element('button');node.dataset.marketSymbol='ESPORTS/USDT';node.className='symbol-detail-trigger';h.root.appendChild(node);
-  h.context.applyDelistingWarnings(h.root);const wrapper=h.root.children[0],detail=wrapper.children[1],writes=detail.writes;
-  assert.equal(wrapper.children[0],node);assert.equal(wrapper.children.length,2);
+  h.context.applyDelistingWarnings(h.root);const wrapper=h.root.children[0],detail=wrapper.children[0],writes=detail.writes;
+  assert.equal(wrapper.children[1],node);assert.ok(detail.classList.contains('delisting-evidence'));assert.equal(wrapper.children.length,2);
   h.context.applyDelistingWarnings(h.root);assert.equal(h.root.children[0],wrapper);assert.equal(wrapper.children.length,2);assert.equal(detail.writes,writes);
   h.run('delistedMarketBases.clear()');h.context.applyDelistingWarnings(h.root);assert.equal(h.root.children[0],node);
 });
@@ -100,6 +104,14 @@ test('table cells keep valid table structure and evidence inside the cell',()=>{
   const h=harness();h.context.indexDelistingEvidence([event()]);h.run("delistedMarketBases.add('ESPORTS')");
   const row=new Element('tr'),cell=new Element('td');cell.dataset.marketSymbol='ESPORTS/USDT';row.appendChild(cell);h.root.appendChild(row);
   h.context.applyDelistingWarnings(h.root);assert.equal(row.children[0],cell);assert.equal(cell.children.length,1);assert.ok(cell.children[0].classList.contains('delisting-evidence'));
+});
+
+test('warning triangle precedes a table cell coin name without moving or duplicating the name',()=>{
+  const h=harness();h.run("delistedMarketBases.add('ESPORTS')");
+  const cell=new Element('td'),name=new Element('span');cell.dataset.marketSymbol='ESPORTS/USDT';name.textContent='ESPORTS/USDT';cell.appendChild(name);h.root.appendChild(cell);
+  h.context.applyDelistingWarnings(h.root);const warning=cell.children[0];
+  assert.ok(warning.classList.contains('delisting-evidence'));assert.equal(cell.children[1],name);
+  h.context.applyDelistingWarnings(h.root);assert.equal(cell.children[0],warning);assert.equal(cell.children[1],name);assert.equal(cell.children.length,2);
 });
 
 test('metadata fetch failures retain last valid exchange evidence and deduplicate concurrent reads',async()=>{

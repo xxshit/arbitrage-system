@@ -174,13 +174,13 @@
 .layout-view#daily-listings .listing-exchange article > small {grid-column:1/-1;white-space:normal;line-height:1.85;overflow-wrap:anywhere}
 .layout-view#daily-listings .listing-exchange article a {white-space:normal;overflow-wrap:anywhere}
 
-/* A single red ! keeps the market row compact; evidence appears only on intent. */
+/* The original red warning triangle precedes the coin; evidence stays on demand. */
 .delisting-label-group {display:inline-flex;flex-direction:row;align-items:center;gap:5px;min-width:0;max-width:100%;vertical-align:middle}
 .delisting-symbol[data-delisting-linked="1"]::before {display:none}
 .delisting-evidence {display:inline-flex!important;flex:0 0 auto;align-items:center;min-width:0;margin:0!important;padding:0!important;vertical-align:middle}
-td.symbol > .delisting-evidence {margin-left:5px!important}
-.delisting-evidence .delisting-warning-trigger {display:inline-grid;place-items:center;width:19px;height:19px;min-width:19px;min-height:19px;border:1px solid #d43232;border-radius:50%;padding:0;margin:0;background:#fff2ef;color:#cf2525!important;font:900 13px/1 Arial,sans-serif;cursor:help;box-shadow:none}
-.delisting-evidence .delisting-warning-trigger:hover,.delisting-evidence .delisting-warning-trigger:focus-visible {background:#ffe0da;border-color:#b91c1c;outline:2px solid #e7a29a;outline-offset:2px}
+td.symbol > .delisting-evidence {margin-right:5px!important}
+.delisting-evidence .delisting-warning-trigger {display:inline-grid;place-items:center;width:19px;height:19px;min-width:19px;min-height:19px;border:0;border-radius:0;padding:0;margin:0;background:transparent;color:#e12636!important;font:400 16px/1 "Segoe UI Symbol","Apple Symbols",Arial,sans-serif;cursor:help;box-shadow:none}
+.delisting-evidence .delisting-warning-trigger:hover,.delisting-evidence .delisting-warning-trigger:focus-visible {background:#ffe0da;outline:2px solid #e7a29a;outline-offset:2px}
 .delisting-label-group .delisting-symbol {max-width:100%;overflow-wrap:anywhere}
 .delisting-popover {position:fixed;z-index:1200;width:min(330px,calc(100vw - 24px));max-height:min(360px,calc(100dvh - 24px));overflow:auto;overscroll-behavior:contain;padding:12px;border:1px solid #e7c5bd;border-radius:9px;background:#fffdf7;color:#3d4f59;box-shadow:0 8px 24px #4b251c24;font:12px/1.65 "Segoe UI","Microsoft Yahei",sans-serif}
 .delisting-popover-heading {display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:7px}

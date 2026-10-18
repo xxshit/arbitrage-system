@@ -218,7 +218,7 @@ function delistingEvidenceFor(symbol){
   return [...latest.values()].sort((a,b)=>delistingEventState(a).key==='scheduled'&&delistingEventState(b).key!=='scheduled'?-1:delistingEventState(b).key==='scheduled'&&delistingEventState(a).key!=='scheduled'?1:String(a.exchange).localeCompare(String(b.exchange)));
 }
 function delistingEvidenceMarkup(symbol){
-  return `<button type="button" class="delisting-warning-trigger" data-delisting-symbol="${escapeChatHtml(symbol)}" aria-label="${escapeChatHtml(symbol)} 下架信息" aria-haspopup="dialog" aria-expanded="false">!</button>`;
+  return `<button type="button" class="delisting-warning-trigger" data-delisting-symbol="${escapeChatHtml(symbol)}" aria-label="${escapeChatHtml(symbol)} 下架信息" aria-haspopup="dialog" aria-expanded="false"><span aria-hidden="true">⚠&#xfe0e;</span></button>`;
 }
 function delistingPopoverMarkup(symbol){
   const items=delistingEvidenceFor(symbol),rows=items.length?items.map(item=>{const source=safeListingSourceUrl(item.source_url),state=delistingEventState(item);return `<a class="delisting-evidence-link state-${state.key}${source?'':' delisting-history-link'}" href="${source?escapeChatHtml(source):'#daily-listings'}" ${source?'target="_blank" rel="noopener noreferrer"':`data-listing-symbol="${escapeChatHtml(symbol)}"`}>${escapeChatHtml(delistingEvidenceText(item))}${source?' ↗':''}</a>`}).join(''):`<a class="delisting-history-link" href="#daily-listings" data-listing-symbol="${escapeChatHtml(symbol)}">下架时间待核实 · 查看该币历史</a>`;
@@ -274,7 +274,8 @@ function applyDelistingWarnings(root=document){
     node.removeAttribute('title');node.dataset.delistingLinked='1';
     if(node.tagName!=='TD'&&!group){group=document.createElement(node.tagName==='B'?'b':/^H[1-6]$/.test(node.tagName)?'div':'span');group.className='delisting-label-group';node.before(group);group.appendChild(node)}
     const host=group||node;let evidence=host.querySelector(':scope > .delisting-evidence');
-    if(!evidence){evidence=document.createElement('span');evidence.className='delisting-evidence';host.appendChild(evidence)}
+    if(!evidence){evidence=document.createElement('span');evidence.className='delisting-evidence'}
+    if(host.firstChild!==evidence)host.insertBefore(evidence,host.firstChild);
     const markup=delistingEvidenceMarkup(symbol);if(evidence.dataset.signature!==markup){evidence.innerHTML=markup;evidence.dataset.signature=markup}
   }
   scheduleDelistingPopoverReconcile();

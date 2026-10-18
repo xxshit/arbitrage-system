@@ -52,6 +52,26 @@ class PulseDetectorTests(unittest.TestCase):
         self.assertEqual(first["id"], last["id"])
         self.assertEqual((last["peak"], last["state"]), (1, "retraced"))
 
+    def test_flat_history_is_compact_but_a_later_spike_still_triggers(self):
+        for second in range(250):
+            self.sample(second, 0)
+        track = self.engine.tracks[(PATH, "spread")]
+        self.assertEqual(len(track.history), 1)
+        retained = track.history[0][0]
+        self.assertEqual(set(retained.context), {"close_spread", "mid_spread"})
+        self.assertFalse(hasattr(retained, "__dict__"))
+        pulse = self.sample(250, .3)[0]
+        self.assertEqual((pulse["baseline"], pulse["baseline_at"]), (0, 1249))
+        self.assertIn("long_mid", pulse["peak_context"])
+
+    def test_history_compaction_keeps_both_extrema_in_one_second(self):
+        from anomaly_engine import Sample, Track
+        track = Track()
+        for at, value in ((1000, 0), (1000.1, .1), (1000.2, 0), (1001, 0)):
+            track.remember(Sample(at, value, context(value)), "spread")
+        self.assertEqual([(s.value, s.at) for s in track.history[0]], [(0, 1000), (.1, 1000.1)])
+        self.assertEqual(len(track.history), 2)
+
     def test_restart_below_old_peak_is_new_pulse_not_deduplicated(self):
         self.sample(0, 0)
         first = self.sample(1, 1)[0]
@@ -311,6 +331,27 @@ class StreamHubTests(unittest.TestCase):
 
 
 class PublicParserTests(unittest.TestCase):
+    def test_http_compression_is_lossless_and_only_for_accepted_public_alert_payloads(self):
+        import gzip
+        payload = {"events": [{"symbol": "TEST/USDT", "peak": .321987}] * 100}
+        for path, encoding, status, expected in (
+            ("/api/alerts?view=summary", "gzip", 200, True),
+            ("/api/alerts", "gzip;q=0", 200, False),
+            ("/api/alerts", "", 200, False),
+            ("/api/alerts", "gzip", 401, False),
+            ("/api/chat/messages", "gzip", 200, False),
+        ):
+            with module.app.test_request_context(path, headers={"Accept-Encoding": encoding}):
+                response = module.jsonify(payload)
+                response.status_code = status
+                response = module.compress_alert_market_response(response)
+                self.assertEqual(response.headers.get("Content-Encoding") == "gzip", expected)
+                data = gzip.decompress(response.get_data()) if expected else response.get_data()
+                self.assertEqual(json.loads(data), payload)
+                if expected:
+                    self.assertLess(len(response.get_data()), len(data)/4)
+                    self.assertIn("Accept-Encoding", response.vary)
+
     def test_compressed_transport_preserves_order_and_rejects_invalid_utf8(self):
         import threading
         from websockets.sync.client import connect
@@ -457,6 +498,20 @@ class PulseStorageTests(unittest.TestCase):
         self.assertEqual(module.AlertEvent.query.count(), 1)
         self.assertEqual(json.loads(module.AlertPulse.query.one().evidence_json)["peak"], .8)
         self.assertEqual(module.AlertEvent.query.one().open_spread, .3)
+
+    def test_compact_read_preserves_precision_and_nested_ranges_without_evidence_contexts(self):
+        engine = PulseDetector()
+        engine.observe(PATH, "spread", 0, 1000, context(0))
+        pulse = engine.observe(PATH, "spread", .321987, 1001, context(.321987))[0]
+        module.persist_alert_pulses([pulse])
+        projected = json.loads(module.db.session.query(module.alert_pulse_read_projection()).select_from(module.AlertPulse).scalar())
+        self.assertEqual(projected["peak"], .321987)
+        self.assertEqual(projected["ranges"]["open_spread"]["max"], .321987)
+        self.assertEqual(projected["id"], pulse["id"])
+        self.assertIsNone(projected["ended_at"])
+        self.assertNotIn("peak_context", projected)
+        self.assertNotIn("baseline_context", projected)
+        self.assertIn("peak_context", json.loads(module.AlertPulse.query.one().evidence_json))
 
     def test_restart_under_old_peak_persists_both_events(self):
         engine = PulseDetector()

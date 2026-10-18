@@ -20,7 +20,7 @@ def finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
-@dataclass
+@dataclass(slots=True)
 class Sample:
     at: float
     value: float
@@ -40,8 +40,17 @@ class Track:
     anchor: Sample | None = None
     anchor_direction: int = 0
 
-    def remember(self, sample):
-        if not self.history or int(self.history[-1][0].at) != int(sample.at):
+    def remember(self, sample, metric):
+        # Idle history needs only the fields used for displacement validation.
+        # Do not retain four large quote contexts per second for every path.
+        # Trigger, peak and current pulse evidence still retain full contexts.
+        fields = {"spread": ("close_spread", "mid_spread"), "price": ("long_mid", "short_mid")}.get(metric, ())
+        sample = Sample(sample.at, sample.value, {name: sample.context[name] for name in fields})
+        if self.history and all(item.value == sample.value and item.context == sample.context for item in self.history[-1]):
+            # A flat plateau needs only its latest real observation. Earlier
+            # different extrema remain; this never coalesces a peak with a dip.
+            self.history[-1] = [sample, sample]
+        elif not self.history or int(self.history[-1][0].at) != int(sample.at):
             self.history.append([sample, sample])
         else:
             bucket = self.history[-1]
@@ -155,7 +164,7 @@ class PulseDetector:
             elif metric == "price":
                 unchanged = unchanged and all(context.get(name) == track.last.context.get(name) for name in ("long_mid", "short_mid"))
             if unchanged:
-                track.remember(sample)
+                track.remember(sample, metric)
                 return updates
             # Compare signed displacement, including crossing zero. Choose a
             # chronological extremum WITHIN the stated window, never 65s ago.
@@ -206,5 +215,5 @@ class PulseDetector:
             track.anchor = None
             track.history.clear()
             updates.append(deepcopy(pulse))
-        track.remember(sample)
+        track.remember(sample, metric)
         return updates

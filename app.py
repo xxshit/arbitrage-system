@@ -1,6 +1,7 @@
 import os
 import random
 import json
+import gzip
 import time
 import threading
 import re
@@ -52,6 +53,22 @@ app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0").st
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
 ALERT_STREAM_HUB = AlertStreamHub()
+
+
+@app.after_request
+def compress_alert_market_response(response):
+    # Only public market observations, never account/chat/security payloads.
+    # Full-universe summaries are several MB before lossless HTTP compression.
+    if request.path == "/api/alerts" and response.status_code == 200 and response.mimetype == "application/json" and not response.is_streamed:
+        response.vary.add("Accept-Encoding")
+        if request.accept_encodings["gzip"] > 0 and not response.headers.get("Content-Encoding"):
+            payload = response.get_data()
+            if len(payload) >= 1024:
+                compressed = gzip.compress(payload, compresslevel=4, mtime=0)
+                if len(compressed) < len(payload):
+                    response.set_data(compressed)
+                    response.headers["Content-Encoding"] = "gzip"
+    return response
 
 
 @app.after_request
@@ -12560,6 +12577,21 @@ def alert_binance_basis(item):
     return item.basis if alert_has_binance_basis_source(item) and item.basis is not None and math.isfinite(item.basis) else None
 
 
+def alert_pulse_read_projection():
+    """Read compact UI/range fields, not four full quote-context copies per pulse.
+
+    Keep the complete evidence in MySQL. SQLite and MySQL both preserve nested
+    JSON values here; missing keys are removed by the reader for legacy fallback.
+    """
+    fields = ("id", "episode", "ordinal", "metric", "direction", "baseline", "baseline_at",
+              "triggered_at", "peak", "peak_at", "current", "current_at", "state",
+              "retrace_at", "ended_at", "quality", "notice_version", "noticed_at", "ranges")
+    args = []
+    for field in fields:
+        args.extend((field, func.json_extract(AlertPulse.evidence_json, "$." + field)))
+    return func.json_object(*args)
+
+
 @app.get("/api/alerts")
 def alerts():
     now = datetime.now()
@@ -12606,7 +12638,8 @@ def alerts():
     pulse_rows = AlertPulse.query.join(AlertEvent, AlertPulse.alert_event_id == AlertEvent.id).filter(AlertEvent.created_at >= window_start, AlertEvent.created_at <= now)
     if view == "detail":
         pulse_rows = pulse_rows.filter(AlertEvent.symbol == symbol)
-    pulses = {item.alert_event_id: json.loads(item.evidence_json) for item in pulse_rows.all()}
+    pulses = {event_id: {key: value for key, value in json.loads(evidence).items() if value is not None}
+              for event_id, evidence in pulse_rows.with_entities(AlertPulse.alert_event_id, alert_pulse_read_projection()).all()}
     grouped_events = {}
     for item in all_events:
         grouped_events.setdefault(item.symbol, []).append(item)

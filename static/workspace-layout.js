@@ -15,7 +15,7 @@
     'daily-listings': {kind:'listings'},
     'gainers-losers': {kind:'rankings'},
     'token-hedge': {kind:'evidence'},
-    alerts: {kind:'alerts', sections:[['#alertEvents','报警时间线'],['#basisTracking','基差追踪'],['#alertMuteList','静音管理']]},
+    alerts: {kind:'alerts'},
     chat: {kind:'conversation'},
     'security-notifications': {kind:'security'},
     strategies: {kind:'strategies'},

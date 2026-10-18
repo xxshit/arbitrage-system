@@ -94,6 +94,11 @@ let selectedAlertSymbol = '';
 let latestAlertGroups = [];
 let latestActiveAlertEvents = [];
 let mutedAlertSymbols = new Set();
+let alertListQuery = '';
+let alertListSort = 'latest';
+let alertDetailVersion = 0;
+let alertDetailRequest = null;
+let alertDetailState = {symbol:'',data:null,loading:false,error:'',expanded:new Set()};
 let alarmSoundEnabled = localStorage.getItem('arbi-alarm-sound') === 'on';
 const savedChatSoundSetting=localStorage.getItem('arbi-chat-sound');
 let chatSoundEnabled=savedChatSoundSetting===null?alarmSoundEnabled:savedChatSoundSetting==='on';
@@ -483,35 +488,93 @@ function alertDeathMarkup(item){const expiresAt=Date.now()+Math.max(0,Number(ite
 function updateAlertCountdowns(){let expired=false;document.querySelectorAll('.alert-death').forEach(node=>{const remaining=Math.max(0,Math.ceil((Number(node.dataset.alertExpires)-Date.now())/1000));node.textContent=node.textContent.replace(/剩余 \d+s$/,`剩余 ${remaining}s`);if(remaining===0)expired=true});if(expired)loadAlerts(true)}
 function startAlertCountdown(){clearInterval(alertCountdownTimer);updateAlertCountdowns();alertCountdownTimer=setInterval(updateAlertCountdowns,1000)}
 function isAlertMuted(symbol){return mutedAlertSymbols.has(symbol)}
-function alertMuteButton(symbol){const muted=isAlertMuted(symbol);return `<button class="alert-mute-toggle ${muted?'muted':''}" onclick="toggleAlertMute('${symbol}',event)">${muted?'取消静音':'静音'}</button>`}
-function alertSpeakerButton(symbol){const muted=isAlertMuted(symbol);return `<button class="alert-speaker-toggle ${muted?'muted':''}" title="${muted?'取消静音':'静音'}" onclick="toggleAlertMute('${symbol}',event)" aria-label="${muted?'取消静音':'静音'}"><span>${muted?'🔇':'🔊'}</span></button>`}
+function alertActionSymbol(symbol){return escapeChatHtml(JSON.stringify(String(symbol)))}
+function alertMuteButton(symbol){const muted=isAlertMuted(symbol);return `<button type="button" class="alert-mute-toggle ${muted?'muted':''}" onclick="toggleAlertMute(${alertActionSymbol(symbol)},event)" aria-label="${escapeChatHtml(symbol)} ${muted?'取消静音':'静音'}" aria-pressed="${muted}">${muted?'已静音':'静音'}</button>`}
+function alertSpeakerButton(symbol){const muted=isAlertMuted(symbol);return `<button class="alert-speaker-toggle ${muted?'muted':''}" title="${muted?'取消静音':'静音'}" onclick="toggleAlertMute(${alertActionSymbol(symbol)},event)" aria-label="${muted?'取消静音':'静音'}"><span>${muted?'🔇':'🔊'}</span></button>`}
 function pruneAlertMutes(groups,activeEvents){const visible=new Set([...(groups||[]).map(group=>group.symbol),...(activeEvents||[]).map(item=>item.symbol)]);[...mutedAlertSymbols].forEach(symbol=>{if(!visible.has(symbol))mutedAlertSymbols.delete(symbol)})}
 function toggleAlertMute(symbol,event){event?.stopPropagation();if(isAlertMuted(symbol))mutedAlertSymbols.delete(symbol);else mutedAlertSymbols.add(symbol);renderAlertMasterDetail(latestAlertGroups);renderAlertMuteList();renderTipsItems(latestActiveAlertEvents)}
 function renderAlertMuteList(){const target=byId('alertMuteList');if(!target)return;const muted=[...mutedAlertSymbols].sort();target.innerHTML=muted.length?muted.map(symbol=>`<button class="muted-symbol-pill" onclick="toggleAlertMute('${symbol}',event)">${symbol}<span>取消</span></button>`).join(''):'<p class="empty-alert">暂无静音币种。</p>'}
-function alertTimelineNode(item){return `<li class="alert-timeline-node ${alertClass(item.type)}"><i></i><div><time>${item.created_at}</time><b>${strategyLabel(item.strategy)} · ${alertLabel(item.type)}</b>${alertExchangePair(item)}<span>开差 <em class="${changeClass(item.open_spread)}">${alertMetric(item.open_spread)}</em> · 基差 <em class="${changeClass(item.basis)}">${alertMetric(item.basis)}</em></span></div></li>`}
-function alertDetailCard(group){const latest=group.latest;return `<article class="alert-detail-card ${alertClass(latest.type)} ${isAlertMuted(group.symbol)?'muted-alert':''}"><header><div><div class="alert-card-title"><h4 class="${delistingSymbolClass(group.symbol)}" data-market-symbol="${group.symbol}">${group.symbol}</h4><span class="strategy-badge">${group.alert_count} 次报警${isAlertMuted(group.symbol)?' · 已静音':''}</span></div><span class="alert-latest-label">最近：${strategyLabel(latest.strategy)} · ${alertLabel(latest.type)} · ${latest.created_at}</span></div><div class="alert-values"><span>开差 <b class="${changeClass(latest.open_spread)}">${alertMetric(latest.open_spread)}</b></span><span>基差 <b class="${changeClass(latest.basis)}">${alertMetric(latest.basis)}</b></span></div></header>${alertExchangePair(latest)}<ol class="alert-timeline">${group.timeline.map(alertTimelineNode).join('')}</ol></article>`}
-function alertMovePeaks(group){const peaks=group.move_peaks||{};return `<div class="alert-move-peaks"><span>开差峰值 <b class="${changeClass(peaks.open_spread)}">${alertMetric(peaks.open_spread)}</b></span><span>基差峰值 <b class="${changeClass(peaks.basis)}">${alertMetric(peaks.basis)}</b></span></div>`}
-function renderAlertMasterDetail(groups){latestAlertGroups=groups;if(!groups.some(group=>group.symbol===selectedAlertSymbol))selectedAlertSymbol=groups[0]?.symbol||'';const selected=groups.find(group=>group.symbol===selectedAlertSymbol);byId('alertEvents').innerHTML=groups.length?`<div class="alert-symbol-list">${groups.map(group=>{const latest=group.latest;return `<button class="alert-symbol-option ${group.symbol===selectedAlertSymbol?'active':''} ${alertClass(latest.type)}" onclick="selectAlertSymbol('${group.symbol}')"><b>${group.symbol}</b><span>${latest.created_at} · ${alertLabel(latest.type)}</span>${alertMovePeaks(group)}<small>${group.alert_count} 次 · 最近开差 ${alertMetric(latest.open_spread)} · 最近基差 ${alertMetric(latest.basis)}</small></button>`}).join('')}</div><div class="alert-detail-pane">${alertDetailCard(selected)}</div>`:'<p class="empty-alert">暂时没有确认后的报警。</p>'}
-function alertSymbolCard(group){const latest=group.latest;return `<article class="alert-symbol-option ${group.symbol===selectedAlertSymbol?'active':''} ${alertClass(latest.type)} ${isAlertMuted(group.symbol)?'muted-alert':''}" onclick="selectAlertSymbol('${group.symbol}')"><div class="alert-symbol-top"><b class="${delistingSymbolClass(group.symbol)}" data-market-symbol="${group.symbol}">${group.symbol}</b><em>${group.alert_count}次${isAlertMuted(group.symbol)?' · 静音':''}</em></div><div class="alert-symbol-meta"><span>${latest.created_at}</span><strong>${strategyLabel(latest.strategy)} · ${alertLabel(latest.type)}</strong></div>${alertMuteButton(group.symbol)}${alertMovePeaks(group)}<div class="alert-latest-metrics"><span>最近开差 <b class="${changeClass(latest.open_spread)}">${alertMetric(latest.open_spread)}</b></span><span>最近基差 <b class="${changeClass(latest.basis)}">${alertMetric(latest.basis)}</b></span></div></article>`}
-function renderAlertMasterDetail(groups){latestAlertGroups=groups;if(!groups.some(group=>group.symbol===selectedAlertSymbol))selectedAlertSymbol=groups[0]?.symbol||'';const selected=groups.find(group=>group.symbol===selectedAlertSymbol);byId('alertEvents').innerHTML=groups.length?`<div class="alert-symbol-list">${groups.map(alertSymbolCard).join('')}</div><div class="alert-detail-pane">${alertDetailCard(selected)}</div>`:'<p class="empty-alert">暂时没有确认后的报警。</p>'}
-function selectAlertSymbol(symbol){selectedAlertSymbol=symbol;renderAlertMasterDetail(latestAlertGroups)}
+function alertTimelineNode(item){
+  const id=Number(item.id)||0;
+  return `<li class="alert-timeline-node ${alertClass(item.type)}"><time>${escapeChatHtml(item.created_at)}</time><div class="alert-event-context"><b>${strategyLabel(item.strategy)} · ${alertLabel(item.type)}</b>${alertExchangePair(item)}<details class="alert-event-message" data-alert-event="${id}" ${alertDetailState.expanded.has(id)?'open':''} ontoggle="setAlertMessageExpanded(${id},this.open)"><summary>详细说明</summary><p>${escapeChatHtml(item.message||'未记录额外说明')}</p><span>平差 ${alertMetric(item.close_spread)} · 资费 ${alertMetric(item.funding_rate)}</span></details></div><span class="alert-event-metric ${changeClass(item.open_spread)}" data-label="开差">${alertMetric(item.open_spread)}</span><span class="alert-event-metric ${changeClass(item.basis)}" data-label="基差">${alertMetric(item.basis)}</span></li>`;
+}
+function setAlertMessageExpanded(id,open){open?alertDetailState.expanded.add(id):alertDetailState.expanded.delete(id)}
+function alertDetailCard(group){
+  const latest=group.latest,data=alertDetailState.symbol===group.symbol?alertDetailState.data:null,state=alertDetailState;
+  return `<article class="alert-detail-card ${alertClass(latest.type)}"><header><div><div class="alert-card-title"><h4 class="${delistingSymbolClass(group.symbol)}" data-market-symbol="${escapeChatHtml(group.symbol)}">${escapeChatHtml(group.symbol)}</h4><span class="strategy-badge">24H · ${group.alert_count} 次</span></div><span class="alert-latest-label">最近 ${escapeChatHtml(latest.created_at)} · ${strategyLabel(latest.strategy)} · ${alertLabel(latest.type)}</span></div>${alertMuteButton(group.symbol)}</header><div class="alert-detail-metrics"><span>最近开差 <b class="${changeClass(latest.open_spread)}">${alertMetric(latest.open_spread)}</b></span><span>最近基差 <b class="${changeClass(latest.basis)}">${alertMetric(latest.basis)}</b></span><span>24H开差峰值 <b class="${changeClass(group.move_peaks?.open_spread)}">${alertMetric(group.move_peaks?.open_spread)}</b></span><span>24H基差峰值 <b class="${changeClass(group.move_peaks?.basis)}">${alertMetric(group.move_peaks?.basis)}</b></span></div><div class="alert-detail-status" role="status">${state.error?escapeChatHtml(state.error):state.loading?'正在读取明细…':`最近24小时 · 新到旧${data?` · 共 ${data.total} 条`:''}`}</div><div class="alert-timeline-scroll" tabindex="0" role="region" aria-label="${escapeChatHtml(group.symbol)} 报警明细，可滚动"><div class="alert-timeline-head"><span>时间（UTC）</span><span>类型 / 交易路径</span><span>开差</span><span>基差</span></div><ol class="alert-timeline">${data?.items?.length?data.items.map(alertTimelineNode).join(''):`<li class="empty-alert">${state.error?'读取失败，可重试；已有记录不会被清除。':data?'最近24小时没有该币种的确认报警。':'正在读取该币种的报警时间线…'}</li>`}</ol></div><div class="alert-detail-pagination"><button type="button" onclick="loadSelectedAlertHistory(${Math.max(1,(data?.page||1)-1)},true)" ${!data||data.page<=1||state.loading?'disabled':''}>上一页</button><span>${data?`第 ${data.page} / ${data.pages} 页 · ${data.page_size}条/页`:'每页40条，全部可翻页'}</span><button type="button" onclick="loadSelectedAlertHistory(${(data?.page||1)+1},true)" ${!data||data.page>=data.pages||state.loading?'disabled':''}>下一页</button>${state.error?'<button type="button" onclick="loadSelectedAlertHistory()">重试</button>':''}</div></article>`;
+}
+function alertSymbolCard(group){
+  const symbol=escapeChatHtml(group.symbol),peaks=group.move_peaks||{};
+  return `<article class="alert-symbol-option ${group.symbol===selectedAlertSymbol?'active':''} ${alertClass(group.latest.type)} ${isAlertMuted(group.symbol)?'muted-alert':''}" data-alert-symbol="${symbol}"><div class="alert-symbol-cell"><button type="button" class="alert-coin-select ${delistingSymbolClass(group.symbol)}" data-market-symbol="${symbol}" onclick="selectAlertSymbol(${alertActionSymbol(group.symbol)})" aria-label="${symbol}，${group.alert_count}次报警，查看详情" aria-pressed="${group.symbol===selectedAlertSymbol}">${symbol}</button></div><span class="alert-symbol-count">${group.alert_count}</span><span class="alert-symbol-peak ${changeClass(peaks.open_spread)}">${alertMetric(peaks.open_spread)}</span><span class="alert-symbol-peak ${changeClass(peaks.basis)}">${alertMetric(peaks.basis)}</span>${alertMuteButton(group.symbol)}</article>`;
+}
+function visibleAlertGroups(groups=latestAlertGroups){
+  const query=alertListQuery.toUpperCase().replace(/[\s/_-]/g,'');
+  return groups.filter(group=>!query||group.symbol.toUpperCase().replace(/[/_-]/g,'').includes(query)).slice().sort((a,b)=>{
+    if(alertListSort==='count')return b.alert_count-a.alert_count;
+    if(['open_spread','basis'].includes(alertListSort))return Math.abs(b.move_peaks?.[alertListSort]??0)-Math.abs(a.move_peaks?.[alertListSort]??0);
+    return 0;
+  });
+}
+function renderAlertRoster(){
+  const groups=visibleAlertGroups(),list=byId('alertSymbolList');if(!list)return;
+  const top=list.scrollTop;
+  replaceHtmlKeepingExchangeLogos(list,groups.length?groups.map(alertSymbolCard).join(''):`<p class="empty-alert">${latestAlertGroups.length?'没有匹配的币种，清空搜索可查看全部。':'最近24小时暂无确认后的报警。'}</p>`);list.scrollTop=top;
+  byId('alertRosterCount').textContent=alertListQuery?`${groups.length} / ${latestAlertGroups.length} 币`:`全部 ${latestAlertGroups.length} 币`;
+  byId('alertTotalSymbols').textContent=latestAlertGroups.length;
+  byId('alertTotalEvents').textContent=latestAlertGroups.reduce((sum,group)=>sum+group.alert_count,0);
+  byId('alertActiveCount').textContent=latestActiveAlertEvents.length;
+}
+function filterAlertSymbols(value){alertListQuery=String(value||'');if(byId('alertSymbolList'))byId('alertSymbolList').scrollTop=0;renderAlertRoster()}
+function sortAlertSymbols(value){alertListSort=['latest','count','open_spread','basis'].includes(value)?value:'latest';if(byId('alertSymbolList'))byId('alertSymbolList').scrollTop=0;renderAlertRoster()}
+function renderAlertDetailPane(){
+  const group=latestAlertGroups.find(item=>item.symbol===selectedAlertSymbol),pane=byId('alertDetailPane');if(!pane)return;
+  const top=pane.querySelector('.alert-timeline-scroll')?.scrollTop||0;
+  replaceHtmlKeepingExchangeLogos(pane,group?alertDetailCard(group):'<p class="empty-alert">选择左侧币种查看最近24小时的报警明细。</p>');
+  const scroll=pane.querySelector('.alert-timeline-scroll');if(scroll)scroll.scrollTop=top;
+}
+function renderAlertMasterDetail(groups){
+  latestAlertGroups=groups;
+  if(!groups.some(group=>group.symbol===selectedAlertSymbol))selectedAlertSymbol=groups[0]?.symbol||'';
+  if(alertDetailState.symbol!==selectedAlertSymbol){alertDetailVersion++;alertDetailState={symbol:selectedAlertSymbol,data:null,loading:false,error:'',expanded:new Set()}}
+  renderAlertRoster();renderAlertDetailPane();
+}
+function selectAlertSymbol(symbol){
+  if(!latestAlertGroups.some(group=>group.symbol===symbol))return;
+  selectedAlertSymbol=symbol;renderAlertMasterDetail(latestAlertGroups);loadSelectedAlertHistory(1,true);
+  if(window.innerWidth<1100)byId('alertDetailPane')?.scrollIntoView({block:'start',behavior:'smooth'});
+}
+async function loadSelectedAlertHistory(page=alertDetailState.data?.page||1,resetScroll=false){
+  const symbol=selectedAlertSymbol;if(!symbol)return false;
+  const key=`${symbol}|${page}`;if(alertDetailRequest?.key===key)return alertDetailRequest.promise;
+  const version=++alertDetailVersion;alertDetailState.loading=true;alertDetailState.error='';renderAlertDetailPane();
+  const promise=(async()=>{try{
+    const data=await fetchRefreshJson(`/api/alerts?${new URLSearchParams({view:'detail',symbol,page:String(page),page_size:'40'})}`);
+    if(version!==alertDetailVersion||symbol!==selectedAlertSymbol)return false;
+    if(data.symbol!==symbol||!Array.isArray(data.items)||data.items.some(item=>item.symbol!==symbol))throw new Error('明细币种不一致');
+    alertDetailState.data=data;alertDetailState.loading=false;renderAlertDetailPane();
+    if(resetScroll){const scroll=byId('alertDetailPane')?.querySelector('.alert-timeline-scroll');if(scroll)scroll.scrollTop=0}return true;
+  }catch(error){if(version===alertDetailVersion&&symbol===selectedAlertSymbol){alertDetailState.loading=false;alertDetailState.error='明细读取失败，已保留上次记录，可重试。';renderAlertDetailPane()}return false}
+  finally{if(alertDetailRequest?.version===version)alertDetailRequest=null}})();
+  alertDetailRequest={key,version,promise};return promise;
+}
 function renderTipsItems(activeEvents){const target=byId('tipsItems');if(!target)return;target.innerHTML=activeEvents.length?activeEvents.map(item=>`<article class="tips-item ${alertClass(item.type)} ${isAlertMuted(item.symbol)?'muted-alert':''}"><div class="tips-item-head"><b class="${delistingSymbolClass(item.symbol)}" data-market-symbol="${item.symbol}">${item.symbol} · ${strategyLabel(item.strategy)} · ${alertLabel(item.type)}${isAlertMuted(item.symbol)?' · 已静音':''}</b>${alertSpeakerButton(item.symbol)}</div>${alertExchangePair(item)}<span>开差 ${alertMetric(item.open_spread)} · 基差 ${alertMetric(item.basis)}</span>${alertDeathMarkup(item)}</article>`).join(''):'<p class="empty-alert">当前没有处于 120 秒有效期的报警。</p>'}
 async function loadAlerts(force=false){
   try{
-    const data=await fetchRefreshJson('/api/alerts'),activeEvents=data.active_events||[],groups=data.events||[],tracking=data.basis_tracking||[];
+    const data=await fetchRefreshJson('/api/alerts?view=summary'),activeEvents=data.active_events||[],groups=data.events||[],tracking=data.basis_tracking||[];
     pruneAlertMutes(groups,activeEvents);latestActiveAlertEvents=activeEvents;
     const signature=JSON.stringify({groups,tracking,activeEvents},(key,value)=>key==='remaining_seconds'?undefined:value);
     const audibleSignature=activeEvents.filter(item=>!isAlertMuted(item.symbol)).map(item=>`${item.symbol}-${item.type}-${item.open_spread}-${item.basis}-${item.created_at}`).join('|');
     const hasNewAlert=alertsInitialized&&audibleSignature!==alertAudibleSignature&&audibleSignature.length>0;
     setPageRefreshSource('alerts',data.checked_at_epoch,'检查');
-    if(!force&&signature===alertSignature)return true;
+    if(!force&&signature===alertSignature){if(activeViewId()==='alerts')loadSelectedAlertHistory();return true}
     renderAlertMasterDetail(groups);
+    if(activeViewId()==='alerts')loadSelectedAlertHistory();
     replaceHtmlKeepingExchangeLogos(byId('basisTracking'),tracking.length?tracking.map(item=>`<article class="alert-item basis"><div class="alert-card-title"><h4>${item.symbol}</h4><span class="strategy-badge">${strategyLabel(item.strategy)} · 基差追踪</span></div><p class="tracking-max">最大 ${percent(item.max_basis)}</p><div class="meta"><span>已记录至 ${item.last_level.toFixed(1)}%</span><span>最大时间 ${item.max_at}</span></div></article>`).join(''):'<p class="empty-alert">暂无正在追踪的基差扩展。</p>');
     renderAlertMuteList();byId('tipsCount').textContent=activeEvents.length;renderTipsItems(activeEvents);startAlertCountdown();
     alertSignature=signature;alertAudibleSignature=audibleSignature;alertsInitialized=true;
     if(hasNewAlert)playAlarmSound();return true;
   }catch(error){
-    if(!alertsInitialized){byId('alertEvents').innerHTML='<p class="empty-alert">报警记录暂时无法读取，将自动重试。</p>';byId('tipsItems').innerHTML='<p class="empty-alert">报警暂时无法读取。</p>'}
+    if(!alertsInitialized){const list=byId('alertSymbolList');if(list)list.innerHTML='<p class="empty-alert">报警记录暂时无法读取，将自动重试。</p>';byId('tipsItems').innerHTML='<p class="empty-alert">报警暂时无法读取。</p>'}
     return false;
   }
 }

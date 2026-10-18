@@ -20,9 +20,12 @@
     oi_change_12h:9.4,volume_change_12h:26.5,futures_open_interest:14300000,futures_volume:37600000}));
   const simple = symbols.slice(0,3).map(symbol => ({...base,symbol,long_is_spot:true,long_volume:18200000,short_volume:37600000,short_open_interest:14300000,
     long_interval:null,short_interval:4,funding_current:0.025}));
-  const event = {symbol:'DEMO/USDT',strategy:'spot_futures',type:'rapid_basis',basis:1.4,open_spread:0.85,close_spread:-0.93,created_at:stamp,
+  const event = {id:1,symbol:'DEMO/USDT',strategy:'spot_futures',type:'rapid_basis',message:'合成报警：连续两次确认后的基差变化，仅用于布局和详细说明测试。',basis:1.4,open_spread:0.85,close_spread:-0.93,created_at:stamp,
     long_exchange:'Gate',short_exchange:'Binance',long_market:'现货',short_market:'合约',short_interval:4,funding_interval_hours:4,remaining_seconds:90,expires_at_epoch:now()+90};
-  const alertGroups = symbols.map(symbol => ({symbol,alert_count:3,latest:{...event,symbol},timeline:[{...event,symbol},{...event,symbol,created_at:'2026-10-18 10:25:00'}],move_peaks:{open_spread:1.3,basis:1.4}}));
+  const alertGroups = [...symbols,...Array.from({length:164},(_,i)=>`TESTCOIN${String(i+1).padStart(3,'0')}/USDT`)].map((symbol,index) => {
+    const timeline=Array.from({length:index?3:93},(_,i)=>({...event,id:index*100+i+1,symbol,strategy:i%2?'futures_futures':'spot_futures',long_exchange:i%2?'Bybit':'Gate',long_market:i%2?'合约':'现货',long_interval:i%2?4:null,created_at:`10-18 ${String(10-Math.floor(i/12)).padStart(2,'0')}:${String(59-i%12*5).padStart(2,'0')}:00`,open_spread:i%2?-0.8512:0.8534,basis:i%2?-1.4012:1.4034}));
+    return {symbol,alert_count:timeline.length,latest:timeline[0],timeline,move_peaks:{open_spread:index%2?-12.3485:1.3,basis:1.4}};
+  });
   const plans = symbols.slice(0,2).map((symbol,index) => ({id:index+1,symbol,direction:index?'short':'long',status:'open',horizon:'short',pnl:1.8,
     leverage:1,entry_price:1.23,current_price:1.25,stop_price:1.16,take_profit_1:1.35,take_profit_2:1.42,max_hold_minutes:60,thesis:'合成样本，用于检查长说明、多腿数值和详细记录的布局。'}));
   const user = {id:1,username:'preview_admin',role:'admin',active:true,account_level:'lv3',created_at:stamp,last_login_at:stamp,
@@ -92,6 +95,13 @@
     const url = new URL(String(input), location.origin),path=url.pathname;
     if (!(path in fixtures)) return Response.json({error:`未定义的合成接口 ${path}`}, {status:404});
     const payload = structuredClone(fixtures[path]);
+    if(path==='/api/alerts'){
+      if(url.searchParams.get('view')==='detail'){
+        const symbol=url.searchParams.get('symbol'),group=alertGroups.find(item=>item.symbol===symbol),items=group?.timeline||[],size=Math.min(100,Number(url.searchParams.get('page_size'))||40),pages=Math.max(1,Math.ceil(items.length/size)),page=Math.min(pages,Number(url.searchParams.get('page'))||1);
+        return Response.json({symbol,items:items.slice((page-1)*size,page*size),total:items.length,page,pages,page_size:size,window_hours:24,checked_at_epoch:now()});
+      }
+      payload.events.forEach(group=>group.timeline=[]);payload.window_hours=24;payload.total_symbols=alertGroups.length;payload.total_alerts=alertGroups.reduce((sum,group)=>sum+group.alert_count,0);
+    }
     if(path==='/api/daily-report/listings'){
       const search=(url.searchParams.get('symbol')||'').replace(/[/_-]|USDT$/g,'').toUpperCase(),range=url.searchParams.get('range')||'30d',page=Number(url.searchParams.get('page'))||1,size=Number(url.searchParams.get('page_size'))||50;
       let items=payload.events.filter(item=>!search||item.symbol.includes(search));if(range!=='all')items=items.filter(item=>item.id===4);

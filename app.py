@@ -12408,16 +12408,32 @@ def funding_trend_arbitrage():
 
 @app.get("/api/alerts")
 def alerts():
-    all_events = AlertEvent.query.order_by(AlertEvent.created_at.desc()).limit(800).all()
+    now = datetime.now()
+    window_start = now - timedelta(hours=24)
+    view = request.args.get("view", "legacy")
+    if view not in {"legacy", "summary", "detail"}:
+        return jsonify({"error": "无效的报警查询类型"}), 400
+    query = AlertEvent.query.filter(AlertEvent.created_at >= window_start, AlertEvent.created_at <= now)
     # 旧版拉升报警没有连续采样确认凭证，不能再作为可靠信号展示。
-    all_events = [item for item in all_events if (item.alert_type == "basis_threshold" or item.alert_type.startswith("rapid_") or "确认后的" in item.message) and not is_rwa_stock_pair(item.symbol)]
+    query = query.filter(or_(AlertEvent.alert_type == "basis_threshold", AlertEvent.alert_type.startswith("rapid_", autoescape=True), AlertEvent.message.contains("确认后的")))
+    page, page_size = 1, 40
+    if view == "detail":
+        symbol = str(request.args.get("symbol", "")).strip().upper()
+        try:
+            page = max(1, int(request.args.get("page", 1)))
+            page_size = min(100, max(1, int(request.args.get("page_size", 40))))
+        except (ValueError, TypeError):
+            return jsonify({"error": "无效的报警页码"}), 400
+        if len(symbol) > 30 or not re.fullmatch(r"[\w.-]+/(?:USDT|USDC)", symbol):
+            return jsonify({"error": "请提供有效的币种交易对"}), 400
+        query = query.filter(AlertEvent.symbol == symbol)
+    all_events = [item for item in query.order_by(AlertEvent.created_at.desc(), AlertEvent.id.desc()).all() if not is_rwa_stock_pair(item.symbol)]
     grouped_events = {}
     for item in all_events:
         grouped_events.setdefault(item.symbol, []).append(item)
-    grouped_events = dict(list(grouped_events.items())[:80])
     latest_events = [items[0] for items in grouped_events.values()]
-    active_events = [item for item in latest_events if (datetime.now() - item.created_at).total_seconds() <= 120]
-    tracking = [item for item in BasisTracking.query.filter_by(resolved_at=None).order_by(BasisTracking.max_abs_basis.desc()).limit(50).all() if not is_rwa_stock_pair(item.symbol)]
+    active_events = [item for item in latest_events if (now - item.created_at).total_seconds() <= 120]
+    tracking = [item for item in BasisTracking.query.filter_by(resolved_at=None).order_by(BasisTracking.max_abs_basis.desc()).limit(50).all() if not is_rwa_stock_pair(item.symbol)] if view != "detail" else []
     event_symbols = list(grouped_events)
     dual_context = {
         (item.symbol, item.long_exchange, item.short_exchange): item
@@ -12453,23 +12469,25 @@ def alerts():
         }
 
     def event_payload(item):
-        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "remaining_seconds": max(0, int(120 - (datetime.now() - item.created_at).total_seconds())), **alert_context(item)}
+        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int(120 - (now - item.created_at).total_seconds())), **alert_context(item)}
+
+    if view == "detail":
+        total = len(all_events)
+        pages = max(1, math.ceil(total / page_size))
+        page = min(page, pages)
+        return jsonify({"symbol": symbol, "items": [event_payload(item) for item in all_events[(page - 1) * page_size:page * page_size]], "total": total, "page": page, "pages": pages, "page_size": page_size, "window_hours": 24, "checked_at_epoch": time.time()})
 
     def alert_group_payload(symbol, items):
-        timeline = [event_payload(item) for item in items[:20]]
-        latest = timeline[0]
-        spread_items = [item for item in items if item.alert_type == "rapid_spread" and item.open_spread is not None]
-        basis_items = [item for item in items if ("basis" in item.alert_type) and item.basis is not None]
-        if not spread_items:
-            spread_items = [item for item in items if item.open_spread is not None]
-        if not basis_items:
-            basis_items = [item for item in items if item.basis is not None]
+        timeline = [event_payload(item) for item in items[:20]] if view == "legacy" else []
+        latest = event_payload(items[0])
+        spread_items = [item for item in items if item.open_spread is not None]
+        basis_items = [item for item in items if item.basis is not None]
         max_spread_item = max(spread_items, key=lambda item: abs(item.open_spread or 0), default=None)
         max_basis_item = max(basis_items, key=lambda item: abs(item.basis or 0), default=None)
         return {
             "symbol": symbol,
             "latest": latest,
-            "first_at": timeline[-1]["created_at"],
+            "first_at": items[-1].created_at.strftime("%m-%d %H:%M:%S"),
             "alert_count": len(items),
             "move_peaks": {
                 "open_spread": max_spread_item.open_spread if max_spread_item else None,
@@ -12482,6 +12500,9 @@ def alerts():
 
     return jsonify({
         "checked_at_epoch": time.time(),
+        "window_hours": 24,
+        "total_symbols": len(grouped_events),
+        "total_alerts": len(all_events),
         "events": [alert_group_payload(symbol, items) for symbol, items in grouped_events.items()],
         "active_events": [event_payload(item) for item in active_events],
         "basis_tracking": [{"symbol": item.symbol, "strategy": item.strategy or "spot_futures", "direction": item.direction, "started_at": item.started_at.strftime("%m-%d %H:%M:%S"), "opening_basis": item.opening_basis, "last_level": item.last_recorded_level, "max_basis": item.max_basis, "max_at": item.max_at.strftime("%m-%d %H:%M:%S")} for item in tracking],

@@ -149,16 +149,28 @@ class PulseDetector:
                 pulse["ended_at"] = at
                 updates[-1] = deepcopy(pulse)
         else:
+            unchanged = track.last and value == track.last.value
+            if metric == "spread":
+                unchanged = unchanged and context.get("close_spread") == track.last.context.get("close_spread")
+            elif metric == "price":
+                unchanged = unchanged and all(context.get(name) == track.last.context.get(name) for name in ("long_mid", "short_mid"))
+            if unchanged:
+                track.remember(sample)
+                return updates
             # Compare signed displacement, including crossing zero. Choose a
             # chronological extremum WITHIN the stated window, never 65s ago.
             candidates = []
-            for seconds, limit in RULES[metric]:
-                for bucket in track.history:
-                    for previous in bucket:
-                        age = at - previous.at
-                        change = abs(value - previous.value)
-                        if 0 < age <= seconds and change >= limit - 1e-9 and self.supported(metric, previous, sample, limit):
-                            candidates.append((change / limit, previous, limit))
+            for bucket in track.history:
+                for previous in bucket:
+                    age = at - previous.at
+                    if not 0 < age <= 120:
+                        continue
+                    # The shortest eligible window always has the smallest
+                    # threshold and strongest score/support. Scan once, not 3x.
+                    limit = RULES[metric][0 if age <= 15 else 1 if age <= 30 else 2][1]
+                    change = abs(value - previous.value)
+                    if change >= limit - 1e-9 and self.supported(metric, previous, sample, limit):
+                        candidates.append((change / limit, previous, limit))
             if candidates:
                 _, baseline, threshold = max(candidates, key=lambda item: item[0])
             # Freeze a pre-alert anchor after a small directional departure.

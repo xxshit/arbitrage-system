@@ -104,6 +104,7 @@ class AlertStreamHub:
         self.pending, self.workers, self.fresh = {}, {}, {}
         self.running = False
         self.rejected = 0
+        self.frame_counts = defaultdict(lambda: defaultdict(int))
         self.persistence_error = False
         self.last_persisted_at = None
         self.overloaded = False
@@ -143,6 +144,8 @@ class AlertStreamHub:
         now = time.time() if received is None else received
         key = (feed, item["symbol"])
         with self.lock:
+            counts = self.frame_counts[feed]
+            counts["received"] += 1
             # Fail visibly instead of exhausting RAM during a prolonged DB
             # outage. Already captured pulses stay queued; resume with a gap.
             if len(self.pending) >= 20000:
@@ -157,28 +160,34 @@ class AlertStreamHub:
                 return
             if not finite(item.get("at")) or not -2 <= now - item["at"] <= self.MAX_AGE:
                 self.rejected += 1
+                counts["stale_or_future"] += 1
                 return
             cache = self.marks if feed == "bn_mark" else self.books
             previous = cache.get(key)
             if previous and item["at"] < previous["at"]:
                 self.rejected += 1
+                counts["timestamp_order"] += 1
                 return
             if feed == "bn_mark":
                 if not all(finite(item.get(k)) and item[k] > 0 for k in ("mark", "index")):
                     self.rejected += 1
+                    counts["invalid_mark"] += 1
                     return
                 if not finite(item.get("funding")):
                     item = {**item, "funding": None}
             else:
                 if not all(finite(item.get(k)) and item[k] > 0 for k in ("bid", "ask", "bid_qty", "ask_qty")) or item["bid"] > item["ask"]:
                     self.rejected += 1
+                    counts["invalid_book"] += 1
                     return
                 if previous and item.get("sequence") is not None and previous.get("sequence") is not None and item["sequence"] < previous["sequence"]:
                     if not item.get("reset"):
                         self.rejected += 1
+                        counts["sequence_order"] += 1
                         return
                     self.invalidate([key], now)
             cache[key] = {**item, "received": now}
+            counts["accepted"] += 1
             for path in self.by_key[key]:
                 route = self.routes[path]
                 long, short = self.books.get(route.long_key), self.books.get(route.short_key)
@@ -234,9 +243,12 @@ class AlertStreamHub:
                 state["connected"] += int(worker.connected and now - worker.last_message < 60)
                 state["last_message_at"] = max(state["last_message_at"] or 0, worker.last_message)
                 state["errors"] += worker.errors
+                if worker.last_error_type:
+                    state["last_error_type"] = worker.last_error_type
             fresh = sum(now - value <= self.MAX_AGE for path, value in self.fresh.items() if path in self.routes)
             return dict(running=self.running, paths=len(self.routes), fresh_paths=fresh, feeds=dict(feeds),
                         rejected_frames=self.rejected, pending=len(self.pending), persistence_error=self.persistence_error,
+                        frame_counts={feed: dict(counts) for feed, counts in self.frame_counts.items()},
                         overloaded=self.overloaded, last_persisted_at=self.last_persisted_at, checked_at=now)
 
     def reconcile(self):
@@ -269,6 +281,7 @@ class PublicWorker:
         self.feed, self.symbols, self.hub = feed, symbols, hub
         self.stop = threading.Event()
         self.connected, self.last_message, self.errors = False, 0, 0
+        self.last_error_type = None
 
     def run(self):
         import websocket
@@ -307,9 +320,10 @@ class PublicWorker:
                     self.last_message = time.time()
                     for item in parse_frame(self.feed, message, self.last_message):
                         self.hub.ingest(self.feed, item, self.last_message)
-            except Exception:
+            except Exception as error:
                 # Never log server payloads, headers, or exception URLs.
                 self.errors += 1
+                self.last_error_type = type(error).__name__
             finally:
                 self.connected = False
                 if socket:

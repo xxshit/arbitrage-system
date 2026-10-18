@@ -12577,19 +12577,13 @@ def alert_binance_basis(item):
     return item.basis if alert_has_binance_basis_source(item) and item.basis is not None and math.isfinite(item.basis) else None
 
 
-def alert_pulse_read_projection():
-    """Read compact UI/range fields, not four full quote-context copies per pulse.
-
-    Keep the complete evidence in MySQL. SQLite and MySQL both preserve nested
-    JSON values here; missing keys are removed by the reader for legacy fallback.
-    """
+def alert_pulse_read_payload(evidence):
+    """Retain only UI/range fields after one parse; full evidence stays in DB."""
     fields = ("id", "episode", "ordinal", "metric", "direction", "baseline", "baseline_at",
               "triggered_at", "peak", "peak_at", "current", "current_at", "state",
               "retrace_at", "ended_at", "quality", "notice_version", "noticed_at", "ranges")
-    args = []
-    for field in fields:
-        args.extend((field, func.json_extract(AlertPulse.evidence_json, "$." + field)))
-    return func.json_object(*args)
+    parsed = json.loads(evidence)
+    return {key: parsed[key] for key in fields if parsed.get(key) is not None}
 
 
 @app.get("/api/alerts")
@@ -12638,8 +12632,8 @@ def alerts():
     pulse_rows = AlertPulse.query.join(AlertEvent, AlertPulse.alert_event_id == AlertEvent.id).filter(AlertEvent.created_at >= window_start, AlertEvent.created_at <= now)
     if view == "detail":
         pulse_rows = pulse_rows.filter(AlertEvent.symbol == symbol)
-    pulses = {event_id: {key: value for key, value in json.loads(evidence).items() if value is not None}
-              for event_id, evidence in pulse_rows.with_entities(AlertPulse.alert_event_id, alert_pulse_read_projection()).all()}
+    pulses = {event_id: alert_pulse_read_payload(evidence)
+              for event_id, evidence in pulse_rows.with_entities(AlertPulse.alert_event_id, AlertPulse.evidence_json).yield_per(500)}
     grouped_events = {}
     for item in all_events:
         grouped_events.setdefault(item.symbol, []).append(item)

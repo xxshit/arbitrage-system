@@ -504,11 +504,11 @@ class PulseStorageTests(unittest.TestCase):
         engine.observe(PATH, "spread", 0, 1000, context(0))
         pulse = engine.observe(PATH, "spread", .321987, 1001, context(.321987))[0]
         module.persist_alert_pulses([pulse])
-        projected = json.loads(module.db.session.query(module.alert_pulse_read_projection()).select_from(module.AlertPulse).scalar())
+        projected = module.alert_pulse_read_payload(module.AlertPulse.query.one().evidence_json)
         self.assertEqual(projected["peak"], .321987)
         self.assertEqual(projected["ranges"]["open_spread"]["max"], .321987)
         self.assertEqual(projected["id"], pulse["id"])
-        self.assertIsNone(projected["ended_at"])
+        self.assertNotIn("ended_at", projected)
         self.assertNotIn("peak_context", projected)
         self.assertNotIn("baseline_context", projected)
         self.assertIn("peak_context", json.loads(module.AlertPulse.query.one().evidence_json))

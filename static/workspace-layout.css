@@ -282,8 +282,19 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 .layout-view#alerts .alert-strategy-switch button.active {background:#135b91;color:#fff}
 .layout-view#alerts .alert-strategy-switch button:focus-visible {outline:2px solid #269caa;outline-offset:-3px}
 .layout-view#alerts .alert-path-field {display:flex;align-items:center;gap:7px;flex:0 1 auto;min-width:0;max-width:100%;margin:0;color:#607c7b;font-size:11px}
-.layout-view#alerts .alert-path-field select {width:auto;flex:0 1 auto;min-width:0;max-width:100%;min-height:32px;box-sizing:border-box;padding:5px 7px;border:1px solid #cededc;border-radius:5px;background:#fffef9;color:#294e68;font-size:12px}
-.layout-view#alerts .alert-path-field > span {flex:0 0 auto}
+.layout-view#alerts .alert-path-label {flex:0 0 auto}
+.layout-view#alerts .alert-path-select {position:relative;display:inline-flex;flex:0 1 auto;min-width:0;max-width:100%;box-sizing:border-box;border:1px solid #cededc;border-radius:5px;background:#fffef9;color:#294e68}
+.layout-view#alerts .alert-path-select:focus-within {outline:2px solid #269caa;outline-offset:2px}
+.layout-view#alerts .alert-path-select::after {content:"";position:absolute;right:8px;top:50%;width:5px;height:5px;border:solid currentColor;border-width:0 1.5px 1.5px 0;transform:translateY(-70%) rotate(45deg);pointer-events:none}
+.layout-view#alerts .alert-path-display {display:flex;align-items:center;flex-wrap:wrap;gap:4px 6px;min-width:0;min-height:30px;box-sizing:border-box;padding:5px 24px 5px 7px;font-size:12px;pointer-events:none}
+.layout-view#alerts .alert-path-leg {display:inline-flex;align-items:center;gap:4px;min-width:0;overflow-wrap:anywhere}
+.layout-view#alerts .alert-path-arrow {flex:0 0 auto;color:#607c7b}
+.layout-view#alerts .alert-path-leg .exchange-logo {flex:0 0 16px;width:16px;height:16px;margin:0;border-radius:3px}
+/* Keep the real select for native keyboard/mobile menus; the selected face carries logos. */
+.layout-view#alerts .alert-path-field select {position:absolute;inset:0;width:100%;height:100%;min-width:0;max-width:100%;min-height:32px;margin:0;padding:0;box-sizing:border-box;border:0;opacity:0;cursor:pointer;font-size:12px}
+@media (forced-colors:active) {
+  .layout-view#alerts .alert-path-field select {opacity:1}
+}
 .layout-view#alerts .alert-detail-metrics {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:0 0 7px;flex:0 0 auto}
 .layout-view#alerts .alert-detail-metrics > span {display:grid;gap:3px;padding:7px 8px;background:#f1f6ee;border-radius:4px;font-size:10px;color:#6b7e7c;overflow-wrap:anywhere}
 .layout-view#alerts .alert-detail-metrics b {font-size:15px;font-variant-numeric:tabular-nums}
@@ -318,8 +329,9 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 .transfer-popover .transfer-network-chip {font-size:11px}
 .layout-view#alerts .alert-transfer-panel {display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 9px;flex:0 0 auto;max-height:132px;overflow:auto;min-width:0;margin:0 0 7px;padding:5px 6px;border:1px solid #dfe7dc;border-radius:4px;background:#f7faf3;box-sizing:border-box}
 .layout-view#alerts .alert-transfer-exchanges {display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;min-width:0}
-.layout-view#alerts .alert-transfer-exchange {display:flex;flex-wrap:wrap;align-items:baseline;gap:3px 5px;min-width:0;font-size:10px;overflow-wrap:anywhere}
-.layout-view#alerts .alert-transfer-exchange > b {color:#49616a;font-size:10px}
+.layout-view#alerts .alert-transfer-exchange {display:flex;flex-wrap:wrap;align-items:center;gap:3px 5px;min-width:0;font-size:10px;overflow-wrap:anywhere}
+.layout-view#alerts .alert-transfer-exchange > b {display:inline-flex;align-items:center;gap:4px;min-width:0;color:#49616a;font-size:10px}
+.layout-view#alerts .alert-transfer-exchange .exchange-logo {flex:0 0 14px;width:14px;height:14px;margin:0;border-radius:3px}
 .layout-view#alerts .alert-transfer-market-note {margin-left:auto;color:#798681;font-size:9px}
 .layout-view#alerts .alert-detail-status {font-size:10px;color:#7c8c87;min-height:17px;flex:0 0 auto}
 .layout-view#alerts .alert-detail-status:empty {display:none}
@@ -510,6 +522,7 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 }
 @media(max-width:760px) {
   .layout-view#alerts .alert-path-field select {font-size:16px;min-height:40px}
+  .layout-view#alerts .alert-path-display {font-size:16px;min-height:40px}
   .layout-view#alerts .alert-strategy-switch button {min-height:36px}
 }
 @media(max-width:600px) {

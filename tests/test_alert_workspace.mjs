@@ -9,6 +9,7 @@ const css=readFileSync(new URL('../static/workspace-layout.css',import.meta.url)
 const functions=source.slice(source.indexOf('function isAlertMuted('),source.indexOf('function renderTipsItems('));
 const helpers=source.slice(source.indexOf('function alertLabel('),source.indexOf('function toggleTips('));
 const transferHelpers=source.slice(source.indexOf('function transferFlagText('),source.indexOf('function spotRows('));
+const exchangeHelpers=source.slice(source.indexOf('const exchangeIcon='),source.indexOf('\n',source.indexOf('const exchangeIcon=')))+'\n'+source.slice(source.indexOf('function exchangeName('),source.indexOf('function syncRenderedNode('));
 const escape=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const pathKey=(strategy='spot_futures',long='Gate',short='Binance')=>JSON.stringify([strategy,long,short]);
 const group=(symbol='DEMO/USDT',count=3,spread=1,basis=2)=>{
@@ -23,7 +24,7 @@ function harness(fetcher=async url=>{const params=new URL(url,'https://example.t
   const context={URLSearchParams,console,clearTimeout(){},window:{innerWidth:1280},byId:node,escapeChatHtml:escape,delistingSymbolClass:()=>'',changeClass:value=>value<0?'negative':'positive',percent:value=>(value>=0?'+':'')+Number(value).toFixed(4)+'%',intervalClass:()=>'',exchangeName:escape,fetchRefreshJson:fetcher,renderTipsItems(){},
     replaceHtmlKeepingExchangeLogos:(target,markup)=>{if(target.innerHTML!==markup)target.innerHTML=markup}};
   vm.createContext(context);
-  vm.runInContext("let mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+transferHelpers+'\n'+helpers+'\n'+functions,context);
+  vm.runInContext("let mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+exchangeHelpers+'\n'+transferHelpers+'\n'+helpers+'\n'+functions,context);
   return {context,node,scroll,transferScroll,run:code=>vm.runInContext(code,context)};
 }
 
@@ -268,7 +269,7 @@ test('withdrawal delay remains visible even if the explicit withdrawal switch is
 test('untrusted exchange, chain, reason and timestamp text cannot inject HTML or attributes',()=>{
   const h=harness(),coin=group();coin.transfer_statuses=[wallet('<img onerror=1>',{state:'unknown',chains:[{name:'"><svg onload=1>',deposit_open:null}],reason:'"><img onerror=1>',captured_at:'"><script>alert(1)</script>'})];
   coin.paths[0].long_exchange='<img onerror=1>';
-  for(const markup of [h.context.alertTransferPanel(coin),h.context.transferPopoverMarkup(coin.transfer_statuses[0])]){assert.ok(!markup.includes('<img'));assert.ok(!markup.includes('<svg'));assert.ok(!markup.includes('<script>'));assert.ok(markup.includes('&lt;img'))}
+  for(const markup of [h.context.alertTransferPanel(coin),h.context.transferPopoverMarkup(coin.transfer_statuses[0])]){assert.ok(!markup.includes('<img onerror'));assert.ok(!markup.includes('<svg'));assert.ok(!markup.includes('<script>'));assert.ok(markup.includes('&lt;img'))}
   assert.ok(h.context.transferPopoverMarkup(coin.transfer_statuses[0]).includes('&lt;svg'));
 });
 
@@ -355,7 +356,7 @@ test('missing path metadata cannot re-enable globally mixed ranges or fake paths
 
 test('path menu escapes untrusted labels and identities and missing venues remain explicitly unrecorded',()=>{
   const h=harness(),coin=group(),path=addPath(coin,'futures_futures','<img onerror=1>','OKX');coin.paths=[path];h.context.renderAlertMasterDetail([coin]);const markup=h.node('alertDetailPane').innerHTML;
-  assert.ok(!markup.includes('<img'));assert.ok(markup.includes('&lt;img'));assert.ok(markup.includes('&quot;'));
+  assert.ok(!markup.includes('<img onerror'));assert.ok(markup.includes('&lt;img'));assert.ok(markup.includes('&quot;'));
   assert.equal(h.context.alertPathLabel({long_market:'现货',short_exchange:'Binance',short_market:'合约'}),'现货所未记录 → 币安合约');
 });
 
@@ -365,14 +366,55 @@ test('mobile path selectors retain a readable non-zooming font and touch height'
 });
 
 test('path controls use intrinsic content width without stretching into unused space',()=>{
-  const field=css.match(/\.layout-view#alerts \.alert-path-field \{([^}]+)\}/)?.[1],select=css.match(/\.layout-view#alerts \.alert-path-field select \{([^}]+)\}/)?.[1];
+  const field=css.match(/\.layout-view#alerts \.alert-path-field \{([^}]+)\}/)?.[1],select=css.match(/\.layout-view#alerts \.alert-path-select \{([^}]+)\}/)?.[1];
   assert.ok(field.includes('flex:0 1 auto'));assert.ok(field.includes('min-width:0;max-width:100%'));
-  assert.ok(select.includes('width:auto;flex:0 1 auto'));assert.ok(select.includes('min-width:0;max-width:100%'));
+  assert.ok(select.includes('display:inline-flex;flex:0 1 auto'));assert.ok(select.includes('min-width:0;max-width:100%'));
   assert.ok(!field.includes('210px'));assert.ok(!select.startsWith('width:100%'));
   assert.ok(css.includes('.alert-detail-controls {display:flex;align-items:center;flex-wrap:wrap;'));
 });
 
 test('read errors surface the bounded escaped reason without claiming nonexistent history was retained',async()=>{
   const h=harness(async()=>{throw new Error('<img src=x onerror=1>')});h.context.renderAlertMasterDetail([group()]);assert.equal(await h.context.loadSelectedAlertHistory(),false);
-  const markup=h.node('alertDetailPane').innerHTML;assert.ok(markup.includes('明细读取失败：&lt;img'));assert.ok(!markup.includes('<img'));assert.ok(!markup.includes('已保留上次记录'));
+  const markup=h.node('alertDetailPane').innerHTML;assert.ok(markup.includes('明细读取失败：&lt;img'));assert.ok(!markup.includes('<img src=x'));assert.ok(!markup.includes('已保留上次记录'));
+});
+
+test('exchange names reuse local icons, retain readable labels and do not duplicate accessible names',()=>{
+  const h=harness();
+  for(const exchange of ['Binance','Gate','Bitget','Bybit','OKX']){
+    const markup=h.context.exchangeName(exchange);
+    assert.ok(markup.includes(`src="/static/exchanges/${exchange.toLowerCase()}.png"`));
+    assert.ok(markup.endsWith(exchange));assert.ok(markup.includes('alt="" aria-hidden="true"'));
+  }
+  assert.ok(h.context.exchangeName('Binance','币安合约').endsWith('币安合约'));
+});
+
+test('unknown exchange labels are escaped, with no invented icon or inherited object URL',()=>{
+  const h=harness();
+  for(const exchange of ['<img onerror=1>','constructor','__proto__','New Exchange']){
+    const markup=h.context.exchangeName(exchange);assert.equal(markup,escape(exchange));assert.ok(!markup.includes('<img'));
+  }
+  assert.equal(h.context.exchangeName(null),'');
+  assert.ok(h.context.exchangeName('Gate','<script>bad</script>').endsWith('&lt;script&gt;bad&lt;/script&gt;'));
+});
+
+test('selected route has two visual icons while its real select keeps escaped text-only native options',()=>{
+  const h=harness(),coin=group();h.context.renderAlertMasterDetail([coin]);
+  const markup=h.context.alertPathControls(coin,coin.paths[0]);
+  assert.equal((markup.match(/class="exchange-logo"/g)||[]).length,2);
+  assert.ok(markup.includes('class="alert-path-display" aria-hidden="true"'));
+  assert.ok(markup.includes('id="alertPathSelect" aria-label="交易路径"'));
+  assert.ok(markup.includes('onchange="setAlertPath(this.value)"'));
+  assert.ok(markup.includes('>Gate现货</span>'));assert.ok(markup.includes('>币安合约</span>'));
+  assert.ok(!markup.match(/<option[^>]*>[\s\S]*?<img/));
+  assert.ok(css.includes('.alert-path-select:focus-within {outline:2px solid'));
+});
+
+test('path and wallet icons follow the exact selected route through switching and refresh',async()=>{
+  const h=harness(),coin=group(),other=addPath(coin,'futures_futures','Bybit','OKX');h.context.renderAlertMasterDetail([coin]);
+  await h.context.setAlertPath(other.id);h.context.renderAlertMasterDetail([coin]);
+  const markup=h.node('alertDetailPane').innerHTML;
+  for(const exchange of ['bybit','okx'])assert.equal((markup.match(new RegExp(`/static/exchanges/${exchange}\\.png`,'g'))||[]).length,2);
+  for(const exchange of ['gate','binance'])assert.ok(!markup.includes(`/static/exchanges/${exchange}.png`));
+  assert.ok(markup.includes('充提未知'));assert.ok(markup.includes('data-transfer-status='));
+  assert.ok(markup.includes('现货充提 · 非合约权限'));
 });

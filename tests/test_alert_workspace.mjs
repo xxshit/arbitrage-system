@@ -108,5 +108,6 @@ test('the roster and details have separate keyboard-scrollable containers and co
   assert.ok(html.includes('24小时报警币种列表，可滚动'));assert.ok(source.includes('报警明细，可滚动'));
   assert.ok(css.includes('.alert-symbol-list {display:block;flex:1 1 auto;min-height:0'));assert.ok(css.includes('.alert-timeline-scroll {min-height:0;flex:1 1 auto;overflow:auto'));
   assert.ok(css.includes('min-height:39px'));assert.equal((source.match(/function renderAlertMasterDetail\(/g)||[]).length,1);
+  assert.ok(css.includes('grid-template-columns:minmax(345px,390px) minmax(0,1fr)!important'));
   assert.ok(source.includes("fetchRefreshJson('/api/alerts?view=summary')"));
 });

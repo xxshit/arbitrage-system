@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import test from 'node:test';
 
 const source=readFileSync(new URL('../static/app.js',import.meta.url),'utf8');
+const html=readFileSync(new URL('../templates/index.html',import.meta.url),'utf8');
 const workspace=source.slice(source.indexOf('const sectionWorkspaceMeta='),source.indexOf('function updateMobileViewTitle('));
 const profiles=source.slice(source.indexOf('const pageRefreshProfiles='),source.indexOf('const fixedCadenceViews='));
 
@@ -34,7 +35,7 @@ function harness(){
   const nav=new Element(),chat=new Element('chat',['hidden']),daily=new Element('',['daily-nav','nav-sub','hidden']),rootDaily=new Element('daily-trends');
   rootDaily.dataset.subnav='daily-nav';daily.children=['daily-trends','daily-thoughts','daily-listings'].map(id=>new Element(id));
   nav.children=[chat,new Element('alerts'),new Element('dashboard'),new Element('spot-futures'),rootDaily,daily,new Element('runtime-rules')];
-  const nodes=new Map([['workspaceNavigation',nav],...['sectionSearchCount','sectionSearchEmpty','sectionWorkspaceGroup','sectionWorkspaceSource','sectionWorkspaceCadence','sectionRefreshFeedback','sectionRefreshButton'].map(id=>[id,new Element()])]);
+  const nodes=new Map([['workspaceNavigation',nav],...['sectionSearchCount','sectionSearchEmpty','sectionRefreshFeedback','sectionRefreshButton'].map(id=>[id,new Element()])]);
   const heading=new Element(),subtitle=new Element(),created=[];
   const context={location:{hash:''},activeViewId:()=> 'dashboard',byId:id=>nodes.get(id),refreshIntervalLabel:seconds=>`${seconds}秒`,window:{addEventListener(){}},toggleMobileNav(){},document:{title:'',addEventListener(){},querySelectorAll:()=>nav.querySelectorAll('a[data-view]'),querySelector:selector=>selector==='main>header h1'?heading:selector==='main>header .sub'?subtitle:null,createElement(tag){created.push(tag);return new Element()}}};
   vm.createContext(context);vm.runInContext(profiles+workspace,context);
@@ -79,20 +80,33 @@ test('unknown, missing and private deep links cannot activate an unavailable pag
 test('read-only page has no fake refresh action and failed views retain a retry affordance',()=>{
   const h=harness();h.context.renderWorkspaceRefreshStatus('risk',{seconds:0,inFlight:0});assert.equal(h.nodes.get('sectionRefreshButton').hidden,true);
   h.context.renderWorkspaceRefreshStatus('spot-futures',{seconds:5,inFlight:0,failed:true});
-  assert.equal(h.nodes.get('sectionRefreshButton').hidden,false);assert.equal(h.nodes.get('sectionRefreshButton').textContent,'重试本栏');
+  assert.equal(h.nodes.get('sectionRefreshButton').hidden,false);assert.equal(h.nodes.get('sectionRefreshButton').textContent,'重试');
   assert.ok(h.nodes.get('sectionRefreshFeedback').textContent.includes('保留上次有效数据'));
   h.context.renderWorkspaceRefreshStatus('daily-trends',{seconds:0,inFlight:0,failed:true});
-  assert.ok(h.nodes.get('sectionRefreshFeedback').textContent.includes('请点击重试本栏'));
-  assert.ok(!h.nodes.get('sectionRefreshFeedback').textContent.includes('按周期重试'));
+  assert.ok(h.nodes.get('sectionRefreshFeedback').textContent.includes('请点击重试'));
+  assert.ok(!h.nodes.get('sectionRefreshFeedback').textContent.includes('将自动重试'));
 });
 
 test('unchanged refresh status does not keep rewriting text during ring animation',()=>{
   const h=harness();let writes=0;
-  for(const id of ['sectionWorkspaceCadence','sectionRefreshButton','sectionRefreshFeedback']){
+  for(const id of ['sectionRefreshButton','sectionRefreshFeedback']){
     const node=h.nodes.get(id);let value=node.textContent;
     Object.defineProperty(node,'textContent',{get:()=>value,set:next=>{writes++;value=next}});
   }
   const state={seconds:5,inFlight:0};h.context.renderWorkspaceRefreshStatus('spot-futures',state);const initial=writes;
   for(let i=0;i<20;i++)h.context.renderWorkspaceRefreshStatus('spot-futures',state);
   assert.equal(writes,initial);
+});
+
+test('technical classification, cadence and internal refresh explanation are removed from the actual shared template',()=>{
+  for(const id of ['sectionWorkspaceBar','sectionWorkspaceGroup','sectionWorkspaceCadence','sectionWorkspaceSource'])assert.ok(!html.includes(`id="${id}"`),id);
+  assert.ok(!html.includes('声音去重与历史'));assert.ok(!html.includes('结构30秒'));
+  const header=html.slice(html.indexOf('<header>'),html.indexOf('</header>'));
+  for(const id of ['updated','sectionRefreshButton','sectionRefreshFeedback'])assert.ok(header.includes(`id="${id}"`),id);
+});
+
+test('compact refresh control stays stable while loading and still clears genuine failure feedback',()=>{
+  const h=harness();h.context.renderWorkspaceRefreshStatus('alerts',{seconds:5,inFlight:1});assert.equal(h.nodes.get('sectionRefreshButton').textContent,'刷新');assert.equal(h.nodes.get('sectionRefreshButton').disabled,true);
+  h.context.renderWorkspaceRefreshStatus('alerts',{seconds:5,inFlight:0,failed:true});assert.ok(h.nodes.get('sectionRefreshFeedback').textContent.includes('将自动重试'));
+  h.context.renderWorkspaceRefreshStatus('alerts',{seconds:5,inFlight:0});assert.equal(h.nodes.get('sectionRefreshFeedback').textContent,'');assert.equal(h.nodes.get('sectionRefreshButton').disabled,false);
 });

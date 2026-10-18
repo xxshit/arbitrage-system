@@ -634,14 +634,12 @@ function updateSectionWorkspace(viewId){
   const heading=document.querySelector('main>header h1'),subtitle=document.querySelector('main>header .sub');
   if(heading)heading.textContent=meta.name;if(subtitle)subtitle.textContent=meta.description;
   document.title=`${meta.name} · ArbiScope`;
-  const group=byId('sectionWorkspaceGroup'),source=byId('sectionWorkspaceSource');if(group)group.textContent=meta.group;if(source)source.textContent=meta.source;
   document.querySelectorAll('nav a[data-view]').forEach(link=>{if(link.dataset.view===viewId)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current')});
 }
 function renderWorkspaceRefreshStatus(viewId,state){
-  const feedback=byId('sectionRefreshFeedback'),cadence=byId('sectionWorkspaceCadence'),button=byId('sectionRefreshButton'),profile=pageRefreshProfiles[viewId];
-  const cadenceText=state.seconds?`读取周期 ${refreshIntervalLabel(state.seconds)}`:'进入或手动读取';if(cadence&&cadence.textContent!==cadenceText)cadence.textContent=cadenceText;
-  if(button){const disabled=state.inFlight>0,hidden=!profile?.names.length,text=state.inFlight?'读取中…':state.failed?'重试本栏':'刷新本栏';if(button.disabled!==disabled)button.disabled=disabled;if(button.hidden!==hidden)button.hidden=hidden;if(button.textContent!==text)button.textContent=text}
-  if(feedback){const message=state.failed?`本次读取失败，已保留上次有效数据；${state.seconds?'将按周期重试':'请点击重试本栏'}。`:state.sourceIncomplete?'部分上游延迟，保留最近有效行情。':'';if(feedback.textContent!==message)feedback.textContent=message;feedback.classList.toggle('workspace-warning',Boolean(message))}
+  const feedback=byId('sectionRefreshFeedback'),button=byId('sectionRefreshButton'),profile=pageRefreshProfiles[viewId];
+  if(button){const disabled=state.inFlight>0,hidden=!profile?.names.length,text=state.failed?'重试':'刷新';if(button.disabled!==disabled)button.disabled=disabled;if(button.hidden!==hidden)button.hidden=hidden;if(button.textContent!==text)button.textContent=text}
+  if(feedback){const message=state.failed?`本次刷新失败，已保留上次有效数据；${state.seconds?'将自动重试':'请点击重试'}。`:state.sourceIncomplete?'部分行情延迟，已保留最近有效数据。':'';if(feedback.textContent!==message)feedback.textContent=message;feedback.classList.toggle('workspace-warning',Boolean(message))}
 }
 async function refreshCurrentSection(){const profile=pageRefreshProfiles[activeViewId()],loader=profile?.names[0];if(loader&&typeof window[loader]==='function'){try{await window[loader]()}catch(error){}}}
 function restoreSectionFromHash(){

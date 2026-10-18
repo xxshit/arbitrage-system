@@ -2,7 +2,8 @@
 
 No keys, account endpoints, Lark messages or order methods exist here. REST is
 used by the existing application for instrument discovery, never as a fake tick.
-All channels below are full best-book snapshots, not incremental L2 books.
+All outputs are full BBOs, not incremental L2 books. Bybit ticker deltas
+are applied only after a connection-local full snapshot.
 """
 from collections import defaultdict
 from copy import deepcopy
@@ -37,13 +38,13 @@ def subscription(feed, symbols):
     if feed == "gate":
         return {"time": int(time.time()), "channel": "spot.book_ticker", "event": "subscribe", "payload": list(symbols)}
     if feed == "bybit":
-        return {"op": "subscribe", "args": ["orderbook.1." + s for s in symbols]}
+        return {"op": "subscribe", "args": ["tickers." + s for s in symbols]}
     if feed == "bitget":
-        return {"op": "subscribe", "args": [{"instType": "spot", "topic": "books1", "symbol": s} for s in symbols]}
-    return {"op": "subscribe", "args": [{"channel": "bbo-tbt", "instId": s} for s in symbols]}
+        return {"op": "subscribe", "args": [{"instType": "spot", "topic": "ticker", "symbol": s} for s in symbols]}
+    return {"op": "subscribe", "args": [{"channel": "tickers", "instId": s} for s in symbols]}
 
 
-def parse_frame(feed, message, received):
+def parse_frame(feed, message, received, ticker_state=None):
     """Return whitelisted public fields only. Malformed/empty frames are rejected."""
     if message in ("pong", "ping"):
         return []
@@ -78,12 +79,39 @@ def parse_frame(feed, message, received):
         elif feed == "bybit" and data.get("topic", "").startswith("orderbook.1.") and data.get("type") == "snapshot":
             item = data["data"]
             book(item["s"], item["b"][0][0], item["a"][0][0], item["b"][0][1], item["a"][0][1], data["ts"], item.get("u"), item.get("u") == 1)
+        elif feed == "bybit" and data.get("topic", "").startswith("tickers."):
+            item = data["data"]
+            symbol, stamp, seq = item["symbol"], int(data["ts"]), int(data["cs"])
+            if data["topic"] != "tickers." + symbol:
+                return []
+            previous = ticker_state.get(symbol) if ticker_state is not None else None
+            if previous and (stamp < previous["at"] or seq <= previous["sequence"]):
+                return []
+            if data.get("type") == "snapshot":
+                merged = {}
+            elif data.get("type") == "delta" and previous:
+                merged = dict(previous["fields"])
+            else:
+                return []  # never reconstruct from a prior socket or an incomplete seed
+            fields = ("bid1Price", "ask1Price", "bid1Size", "ask1Size")
+            merged.update((name, item[name]) for name in fields if name in item)
+            book(symbol, *(merged[name] for name in fields), stamp, seq)
+            if ticker_state is not None:
+                ticker_state[symbol] = dict(fields=merged, at=stamp, sequence=seq)
+        elif feed == "bitget" and data.get("arg", {}).get("topic") == "ticker" and data.get("action") == "snapshot":
+            for item in data.get("data", []):
+                book(data["arg"]["symbol"], item["bid1Price"], item["ask1Price"], item["bid1Size"], item["ask1Size"], data["ts"])
         elif feed == "bitget" and data.get("arg", {}).get("topic") == "books1" and data.get("action") == "snapshot":
             for item in data.get("data", []):
                 book(data["arg"]["symbol"], item["b"][0][0], item["a"][0][0], item["b"][0][1], item["a"][0][1], item["ts"], item.get("seq"))
         elif feed == "okx" and data.get("arg", {}).get("channel") == "bbo-tbt" and data.get("action") in (None, "snapshot"):
             for item in data.get("data", []):
                 book(data["arg"]["instId"], item["bids"][0][0], item["asks"][0][0], item["bids"][0][1], item["asks"][0][1], item["ts"], item.get("seqId"))
+        elif feed == "okx" and data.get("arg", {}).get("channel") == "tickers":
+            for item in data.get("data", []):
+                if item["instId"] != data["arg"]["instId"]:
+                    return []
+                book(item["instId"], item["bidPx"], item["askPx"], item["bidSz"], item["askSz"], item["ts"])
     except (KeyError, IndexError, TypeError, ValueError, OverflowError):
         return []
     return output
@@ -321,8 +349,9 @@ class PublicWorker:
                 # and strict UTF-8 decoding remain enabled.
                 socket = connect(ENDPOINTS[self.feed], open_timeout=5, close_timeout=1,
                                  ping_interval=None, proxy=None, compression="deflate",
-                                 max_size=1048576, max_queue=16)
+                                 max_size=1048576, max_queue=16, legacy=True)
                 socket.send(json.dumps(subscription(self.feed, self.symbols)))
+                ticker_state = {}  # Bybit deltas never cross a reconnect boundary
                 self.connected = True
                 self.last_message = time.time()
                 last_ping = time.monotonic()
@@ -347,7 +376,7 @@ class PublicWorker:
                     if not message:
                         break
                     self.last_message = time.time()
-                    for item in parse_frame(self.feed, message, self.last_message):
+                    for item in parse_frame(self.feed, message, self.last_message, ticker_state):
                         self.hub.ingest(self.feed, item, self.last_message)
             except Exception as error:
                 # Never log server payloads, headers, or exception URLs.

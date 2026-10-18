@@ -15,12 +15,13 @@ def probe(feed):
     started = time.monotonic()
     sock = None
     try:
-        sock = connect(ENDPOINTS[feed], open_timeout=10, close_timeout=1, ping_interval=None, proxy=None)
+        sock = connect(ENDPOINTS[feed], open_timeout=10, close_timeout=1, ping_interval=None, proxy=None, legacy=True)
         sock.send(json.dumps(subscription(feed, [symbol])))
+        ticker_state = {}
         while time.monotonic() - started < 20:
             frame = sock.recv(timeout=5)
             now = time.time()
-            items = parse_frame(feed, frame, now)
+            items = parse_frame(feed, frame, now, ticker_state)
             if items:
                 item = items[0]
                 return dict(feed=feed, ok=True, compressed=bool(sock.response.headers.get("Sec-WebSocket-Extensions")), lag_ms=round((now-item["at"])*1000), timestamp_source=item.get("timestamp_source", "exchange"), fields=sorted(item))

@@ -378,6 +378,45 @@ class PublicParserTests(unittest.TestCase):
         self.assertTrue(parse_frame("bybit", data, 1000)[0]["reset"])
         self.assertEqual(parse_frame("bybit", {**data, "type": "delta"}, 1000), [])
 
+    def test_bounded_ticker_subscriptions(self):
+        self.assertEqual(subscription("bybit", ["BTCUSDT"])["args"], ["tickers.BTCUSDT"])
+        self.assertEqual(subscription("bitget", ["BTCUSDT"])["args"][0]["topic"], "ticker")
+        self.assertEqual(subscription("okx", ["BTC-USDT-SWAP"])["args"][0]["channel"], "tickers")
+
+    def test_bybit_delta_needs_snapshot_and_preserves_unchanged_side(self):
+        state = {}
+        frame = dict(topic="tickers.BTCUSDT", type="snapshot", ts=1000000, cs=8,
+                     data=dict(symbol="BTCUSDT", bid1Price="100", ask1Price="101", bid1Size="2", ask1Size="3", lastPrice="999"))
+        self.assertEqual(parse_frame("bybit", {**frame, "type": "delta"}, 1000, state), [])
+        self.assertEqual(parse_frame("bybit", frame, 1000, state)[0]["bid"], 100)
+        delta = dict(topic=frame["topic"], type="delta", ts=1000100, cs=9, data=dict(symbol="BTCUSDT", bid1Price="100.5"))
+        updated = parse_frame("bybit", delta, 1000.1, state)[0]
+        self.assertEqual((updated["bid"], updated["ask"], updated["ask_qty"], updated["at"]), (100.5, 101, 3, 1000.1))
+        self.assertEqual(set(state["BTCUSDT"]["fields"]), {"bid1Price", "ask1Price", "bid1Size", "ask1Size"})
+        self.assertEqual(parse_frame("bybit", delta, 1000.2, state), [])  # duplicate sequence
+        self.assertEqual(parse_frame("bybit", {**delta, "cs": 10, "ts": 999999}, 1000.2, state), [])
+        self.assertEqual(parse_frame("bybit", delta, 1000.2, {}), [])  # reconnect clears seed
+        self.assertEqual(parse_frame("bybit", {**frame, "data": {"symbol": "BTCUSDT", "bid1Price": "1"}}, 1000, {}), [])
+
+    def test_bybit_ticker_reconstruction_keeps_spike_retrace_restart_order(self):
+        state, bids = {}, []
+        for index, price in enumerate((100, 101, 100.1, 100.4)):
+            item = dict(symbol="BTCUSDT", bid1Price=price, ask1Price=price+.01)
+            if index == 0:
+                item.update(bid1Size=2, ask1Size=2)
+            frame = dict(topic="tickers.BTCUSDT", type="snapshot" if not index else "delta", ts=1000000+100*index, cs=index+1, data=item)
+            bids.append(parse_frame("bybit", frame, 1000+index/10, state)[0]["bid"])
+        self.assertEqual(bids, [100, 101, 100.1, 100.4])
+
+    def test_bitget_and_okx_tickers_use_bbo_not_last_trade(self):
+        bitget = dict(arg=dict(topic="ticker", symbol="BTCUSDT"), action="snapshot", ts=1000000,
+                      data=[dict(bid1Price="100", ask1Price="101", bid1Size="2", ask1Size="3", lastPrice="999")])
+        okx = dict(arg=dict(channel="tickers", instId="BTC-USDT-SWAP"), data=[dict(instId="BTC-USDT-SWAP", ts="1000000", bidPx="100", askPx="101", bidSz="2", askSz="3", last="999")])
+        for feed, frame in (("bitget", bitget), ("okx", okx)):
+            item = parse_frame(feed, frame, 1000)[0]
+            self.assertEqual((item["bid"], item["ask"], item["bid_qty"], item["ask_qty"], item["at"]), (100, 101, 2, 3, 1000))
+        self.assertEqual(parse_frame("bitget", {**bitget, "action": "update"}, 1000), [])
+
     def test_bitget_v3_snapshot(self):
         data = dict(arg={"topic": "books1", "symbol": "BTCUSDT"}, action="snapshot", data=[{"ts": "1000000", "seq": 8, "b": [["100", "1"]], "a": [["101", "1"]]}])
         self.assertEqual(parse_frame("bitget", data, 1000)[0]["sequence"], 8)

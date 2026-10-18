@@ -309,7 +309,7 @@ function exchangeName(exchange){const icon=exchangeIcon[exchange];return `${icon
 function syncRenderedNode(current,next){if(current.nodeType!==next.nodeType||current.nodeName!==next.nodeName){current.replaceWith(next.cloneNode(true));return}if(current.nodeType===Node.TEXT_NODE){if(current.nodeValue!==next.nodeValue)current.nodeValue=next.nodeValue;return}if(current.nodeType!==Node.ELEMENT_NODE)return;[...current.attributes].forEach(attribute=>{if(!next.hasAttribute(attribute.name))current.removeAttribute(attribute.name)});[...next.attributes].forEach(attribute=>{if(current.getAttribute(attribute.name)!==attribute.value)current.setAttribute(attribute.name,attribute.value)});syncRenderedChildren(current,next)}
 function syncRenderedChildren(currentParent,nextParent){let current=currentParent.firstChild;for(let next=nextParent.firstChild;next;next=next.nextSibling){if(!current){currentParent.appendChild(next.cloneNode(true));continue}const following=current.nextSibling;syncRenderedNode(current,next);current=following}while(current){const following=current.nextSibling;current.remove();current=following}}
 function syncKeyedRenderedChildren(currentParent,nextParent){const nextRows=[...nextParent.children];if(!nextRows.length||nextRows.some(row=>!row.dataset.renderKey))return false;const currentRows=[...currentParent.children],byKey=new Map(currentRows.filter(row=>row.dataset.renderKey).map(row=>[row.dataset.renderKey,row])),desired=[];nextRows.forEach(next=>{const current=byKey.get(next.dataset.renderKey);if(current){syncRenderedNode(current,next);byKey.delete(next.dataset.renderKey);desired.push(current)}else desired.push(next.cloneNode(true))});byKey.forEach(row=>row.remove());currentRows.filter(row=>!row.dataset.renderKey).forEach(row=>row.remove());let cursor=currentParent.firstElementChild;desired.forEach(row=>{if(row===cursor){cursor=cursor.nextElementSibling;return}currentParent.insertBefore(row,cursor)});return true}
-function replaceHtmlKeepingExchangeLogos(target,markup){if(!target)return;const template=document.createElement('template');template.innerHTML=markup;if(!target.firstChild)target.appendChild(template.content);else if(!syncKeyedRenderedChildren(target,template.content))syncRenderedChildren(target,template.content);applyDelistingWarnings(target)}
+function replaceHtmlKeepingExchangeLogos(target,markup){if(!target)return;const template=document.createElement('template');template.innerHTML=markup;if(!target.firstChild)target.appendChild(template.content);else if(!syncKeyedRenderedChildren(target,template.content))syncRenderedChildren(target,template.content);applyDelistingWarnings(target);reconcileTransferPopover()}
 function coinglassKlineUrl(symbol){return `https://www.coinglass.com/tv/zh/Binance_${encodeURIComponent(symbol.replace('/',''))}`}
 function liquidityLevel(value){const amount=Number(value||0);return amount>=10000000?'safe':amount>=5000000?'warn-light':amount>=1000000?'warn-medium':'warn-deep'}
 function liquidityAmount(value){const amount=Number(value);if(!Number.isFinite(amount)||amount<=0)return '—';return amount>=1e9?`$${(amount/1e9).toFixed(2)}B`:`$${(amount/1e6).toFixed(2)}M`}
@@ -320,6 +320,20 @@ function transferFlagText(value){return value===true?'开':value===false?'关':'
 function transferFlagClass(value){return value===true?'transfer-open':value===false?'transfer-closed':'transfer-unknown'}
 function transferChains(status){return Array.isArray(status?.chains)?status.chains.filter(chain=>chain&&typeof chain==='object'):[]}
 function transferHasRestriction(status){return status?.state==='fresh'&&transferChains(status).some(chain=>chain.deposit_open===false||chain.withdraw_open===false||chain.withdraw_delayed===true)}
+const transferPopoverState={popup:null,trigger:null,key:'',view:'',pinned:false,closeTimer:null,restoringFocus:false};
+function transferSummary(status){
+  const chains=transferChains(status);
+  if(status?.state==='fresh'&&chains.length){
+    if(transferHasRestriction(status))return {key:'abnormal',label:'充提异常'};
+    if(chains.every(chain=>chain.deposit_open===true&&chain.withdraw_open===true))return {key:'normal',label:'充提正常'};
+  }
+  return {key:'unknown',label:'充提未知'};
+}
+function transferStatusControl(status={},symbol=''){
+  status=status&&typeof status==='object'?status:{};
+  const summary=transferSummary(status),exchange=String(status.exchange||'该交易所'),payload=escapeChatHtml(encodeURIComponent(JSON.stringify(status))),key=escapeChatHtml(JSON.stringify([symbol||status.symbol||status.asset_symbol||'',exchange]));
+  return `<button type="button" class="transfer-status-control transfer-summary-${summary.key}" data-transfer-key="${key}" data-transfer-status="${payload}" title="" aria-haspopup="dialog" aria-expanded="false" aria-label="${escapeChatHtml(exchange)} ${summary.label}，查看所有链充提状态">${summary.label}</button>`;
+}
 function transferStatusMarkup(status={}){
   status=status&&typeof status==='object'?status:{};
   const fresh=status.state==='fresh',chains=transferChains(status),reasonText=String(status.reason||'当前状态未知'),reason=escapeChatHtml(reasonText),captureText=String(status.captured_at||''),updated=escapeChatHtml(captureText),source=escapeChatHtml(status.source_url||'');
@@ -331,21 +345,59 @@ function transferStatusMarkup(status={}){
   const note=!fresh||!chains.length?`<span class="transfer-data-note" title="${reason}${provenance}">${status.state==='stale'?'快照过期':'充提未知'}${!chains.length&&reasonText.includes('未接入')?' · 未接入':''}</span>`:'';
   return `${note}${chainMarkup}`;
 }
-function spotTransferStatus(row){
-  const status=row.transfer_status||{state:'unknown',reason:'充提状态尚未读取',chains:[]},chains=transferChains(status),fresh=status.state==='fresh';
-  const unknown=chains.some(chain=>typeof chain.deposit_open!=='boolean'||typeof chain.withdraw_open!=='boolean');
-  const text=fresh&&chains.length?`充${chains.filter(chain=>chain.deposit_open===true).length}/${chains.length} · 提${chains.filter(chain=>chain.withdraw_open===true).length}/${chains.length}${transferHasRestriction(status)?' · 有受限':''}${unknown?' · 有未知':''}`:status.state==='stale'?'充提过期 · 未知':'充提未知';
-  const payload=escapeChatHtml(encodeURIComponent(JSON.stringify(status)));
-  return `<span class="transfer-status ${transferHasRestriction(status)?'transfer-alert':!fresh||unknown||!chains.length?'pending':''}" tabindex="0" role="button" aria-label="查看该交易所逐链充提状态" data-transfer-status="${payload}" onmouseenter="showTransferTip(this)" onmouseleave="destroyFloatingPopup()" onfocus="showTransferTip(this)" onblur="destroyFloatingPopup()" onclick="showTransferTip(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showTransferTip(this)}else if(event.key==='Escape'){destroyFloatingPopup()}">${text}</span>`;
+function spotTransferStatus(row,symbol=''){return transferStatusControl(row.transfer_status||{exchange:row.long_exchange,state:'unknown',reason:'充提状态尚未读取',chains:[]},symbol)}
+function transferPopoverMarkup(status){
+  const summary=transferSummary(status),count=transferChains(status).length;
+  return `<header><strong>${escapeChatHtml(status.exchange||'该交易所')} · 全部链通道</strong><button type="button" class="transfer-popover-close" aria-label="关闭充提详情">×</button></header><div class="transfer-popover-summary"><span class="transfer-summary-${summary.key}">${summary.label}</span><small>${count?`共${count}项链通道`:'暂无链数据'}</small></div>${summary.key==='unknown'&&status.reason?`<p class="transfer-popover-note">${escapeChatHtml(status.reason)}</p>`:''}<div class="transfer-popover-chains" tabindex="0" role="region" aria-label="${escapeChatHtml(status.exchange||'该交易所')} 全部链充提状态，可滚动"><div class="transfer-chain-list">${transferStatusMarkup(status)}</div></div>`;
 }
-function showTransferTip(trigger){destroyFloatingPopup();let status;try{status=JSON.parse(decodeURIComponent(trigger.dataset.transferStatus||''))}catch(error){return}const popup=document.createElement('div');popup.dataset.floatingDetail='transfer';popup.className='floating-detail-popup transfer-popup';popup.innerHTML=`<div class="transfer-chain-list">${transferStatusMarkup(status)}</div>`;document.body.appendChild(popup);positionFloatingPopup(popup,trigger)}
+function cancelTransferPopoverClose(){clearTimeout(transferPopoverState.closeTimer);transferPopoverState.closeTimer=null}
+function closeTransferPopover(restoreFocus=false){
+  cancelTransferPopoverClose();const state=transferPopoverState,trigger=state.trigger;
+  trigger?.setAttribute('aria-expanded','false');trigger?.removeAttribute('aria-controls');state.popup?.remove();state.popup=null;state.trigger=null;state.key='';state.view='';state.pinned=false;
+  if(restoreFocus&&trigger?.isConnected){state.restoringFocus=true;trigger.focus({preventScroll:true});state.restoringFocus=false}
+}
+function positionTransferPopover(){
+  const {trigger,popup}=transferPopoverState;if(!trigger?.isConnected||!popup)return;
+  const anchor=trigger.getBoundingClientRect(),box=popup.getBoundingClientRect(),below=anchor.bottom+6;
+  popup.style.left=`${Math.max(12,Math.min(anchor.left,window.innerWidth-box.width-12))}px`;
+  popup.style.top=`${below+box.height<=window.innerHeight-12?below:Math.max(12,anchor.top-box.height-6)}px`;
+}
+function showTransferPopover(trigger,pinned=false){
+  if(!trigger)return;let status;try{status=JSON.parse(decodeURIComponent(trigger.dataset.transferStatus||''));if(!status||typeof status!=='object'||Array.isArray(status))return}catch(error){return}
+  cancelTransferPopoverClose();const state=transferPopoverState,key=trigger.dataset.transferKey||'',view=trigger.closest('.view')?.id||'';
+  if(state.trigger!==trigger){closeTransferPopover();state.trigger=trigger;state.key=key;state.view=view}
+  state.pinned=state.pinned||pinned;
+  if(!state.popup){state.popup=document.createElement('div');state.popup.id='transferPopover';state.popup.className='transfer-popover';state.popup.setAttribute('role','dialog');state.popup.setAttribute('aria-label',`${status.exchange||'该交易所'} 全部链充提状态`);document.body.appendChild(state.popup)}
+  const markup=transferPopoverMarkup(status),scroll=state.popup.querySelector('.transfer-popover-chains'),top=scroll?.scrollTop||0;
+  if(state.popup.dataset.signature!==markup){state.popup.innerHTML=markup;state.popup.dataset.signature=markup;const next=state.popup.querySelector('.transfer-popover-chains');if(next)next.scrollTop=top}
+  trigger.setAttribute('aria-expanded','true');trigger.setAttribute('aria-controls','transferPopover');positionTransferPopover();
+}
+function scheduleTransferPopoverClose(force=false){cancelTransferPopoverClose();if(transferPopoverState.pinned&&!force)return;transferPopoverState.closeTimer=setTimeout(()=>closeTransferPopover(),180)}
+function reconcileTransferPopover(){
+  const state=transferPopoverState;if(!state.popup)return;
+  if(!state.trigger?.isConnected||state.trigger.dataset.transferKey!==state.key){
+    const replacement=[...document.querySelectorAll('.transfer-status-control')].find(node=>node.dataset.transferKey===state.key&&(node.closest('.view')?.id||'')===state.view);
+    if(!replacement){closeTransferPopover();return}state.trigger=replacement;
+  }
+  showTransferPopover(state.trigger,state.pinned);
+}
+function installTransferPopoverHandlers(){
+  document.addEventListener('pointerover',event=>{if(event.pointerType==='touch')return;const trigger=event.target.closest?.('.transfer-status-control');if(trigger)showTransferPopover(trigger);else if(event.target.closest?.('.transfer-popover'))cancelTransferPopoverClose()});
+  document.addEventListener('pointerout',event=>{if(event.target.closest?.('.transfer-status-control,.transfer-popover')&&!event.relatedTarget?.closest?.('.transfer-status-control,.transfer-popover'))scheduleTransferPopoverClose()});
+  document.addEventListener('focusin',event=>{if(transferPopoverState.restoringFocus)return;const trigger=event.target.closest?.('.transfer-status-control');if(trigger)showTransferPopover(trigger);else if(event.target.closest?.('.transfer-popover'))cancelTransferPopoverClose()});
+  document.addEventListener('focusout',event=>{if(event.target.closest?.('.transfer-status-control,.transfer-popover')&&!event.relatedTarget?.closest?.('.transfer-status-control,.transfer-popover'))scheduleTransferPopoverClose(true)});
+  document.addEventListener('click',event=>{const trigger=event.target.closest?.('.transfer-status-control');if(trigger){event.preventDefault();if(transferPopoverState.trigger===trigger&&transferPopoverState.pinned)closeTransferPopover();else showTransferPopover(trigger,true);return}if(event.target.closest?.('.transfer-popover-close')){closeTransferPopover(true);return}if(!event.target.closest?.('.transfer-popover'))closeTransferPopover()});
+  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&transferPopoverState.popup){event.preventDefault();closeTransferPopover(true)}else if(event.key==='ArrowDown'&&event.target.closest?.('.transfer-status-control')){event.preventDefault();showTransferPopover(event.target.closest('.transfer-status-control'),true);transferPopoverState.popup?.querySelector('.transfer-popover-chains')?.focus()}});
+  document.addEventListener('scroll',event=>{if(transferPopoverState.popup&&!event.target.closest?.('.transfer-popover'))closeTransferPopover()},true);
+  window.addEventListener('hashchange',()=>closeTransferPopover());window.addEventListener('resize',()=>closeTransferPopover());
+}
 function spotRows(symbols){
   return symbols.map(group=>{
     const contract=group.rows[0],span=group.rows.length;
     const shared=`<td class="contract-cell" rowspan="${span}">${exchangeName('Binance')} 合约</td><td rowspan="${span}">${futuresLiquidity(contract)}</td><td class="${signClass(contract.basis)} numeric" rowspan="${span}">${percent(contract.basis)}</td><td rowspan="${span}">${fundingStack(contract)}</td><td rowspan="${span}"><span class="interval-badge ${intervalClass(contract.funding_interval_hours)}">${contract.funding_interval_hours}H</span><span class="exchange">下次 ${fundingClock(contract.next_funding_time)}</span></td>`;
     return group.rows.map((row,index)=>{
       const hedgeKey=encodeURIComponent(`${group.symbol}|${row.long_exchange}`);
-      return `<tr data-render-key="spot|${group.symbol}|${row.long_exchange}">${index===0?`<td class="symbol" rowspan="${span}">${trendLights(contract)}<div><button class="symbol-detail-trigger ${delistingSymbolClass(group.symbol,group.delisting_announced)}" data-market-symbol="${group.symbol}" data-delisting-announced="${group.delisting_announced?'1':'0'}" onclick="openSymbolDetail('${group.symbol}')">${group.symbol}</button><a class="kline-link" href="${coinglassKlineUrl(group.symbol)}" target="_blank" rel="noopener noreferrer">K线</a></div><div class="symbol-basis-opening">${basisOpeningMarkup(group.basis_opening,`spot:${group.symbol}`)}</div></td><td class="price-change-cell" rowspan="${span}">${priceChangeStack(contract)}</td>`:''}<td>${spotLiquidity(row)}</td><td class="spot-cell">${exchangeName(row.long_exchange)}${spotTransferStatus(row)}</td>${index===0?shared:''}<td class="${signClass(row.open_spread)} numeric">${percent(row.open_spread)}</td><td class="${signClass(row.close_spread)} numeric">${percent(row.close_spread)}</td><td class="hedge-action-cell"><button class="hedge-build-button" type="button" onclick="openHedgePositionBuilder('${hedgeKey}')">建立对冲仓位</button></td></tr>`;
+      return `<tr data-render-key="spot|${group.symbol}|${row.long_exchange}">${index===0?`<td class="symbol" rowspan="${span}">${trendLights(contract)}<div><button class="symbol-detail-trigger ${delistingSymbolClass(group.symbol,group.delisting_announced)}" data-market-symbol="${group.symbol}" data-delisting-announced="${group.delisting_announced?'1':'0'}" onclick="openSymbolDetail('${group.symbol}')">${group.symbol}</button><a class="kline-link" href="${coinglassKlineUrl(group.symbol)}" target="_blank" rel="noopener noreferrer">K线</a></div><div class="symbol-basis-opening">${basisOpeningMarkup(group.basis_opening,`spot:${group.symbol}`)}</div></td><td class="price-change-cell" rowspan="${span}">${priceChangeStack(contract)}</td>`:''}<td>${spotLiquidity(row)}</td><td class="spot-cell">${exchangeName(row.long_exchange)}${spotTransferStatus(row,group.symbol)}</td>${index===0?shared:''}<td class="${signClass(row.open_spread)} numeric">${percent(row.open_spread)}</td><td class="${signClass(row.close_spread)} numeric">${percent(row.close_spread)}</td><td class="hedge-action-cell"><button class="hedge-build-button" type="button" onclick="openHedgePositionBuilder('${hedgeKey}')">建立对冲仓位</button></td></tr>`;
     }).join('');
   }).join('');
 }
@@ -524,8 +576,8 @@ function alertMetricRange(range){
 }
 function alertTransferPanel(group){
   const priority=status=>transferHasRestriction(status)?0:status.state==='fresh'?1:status.state==='stale'?2:3;
-  const statuses=(Array.isArray(group.transfer_statuses)?group.transfer_statuses:[]).filter(status=>status&&typeof status==='object').slice().sort((a,b)=>priority(a)-priority(b)),restricted=statuses.some(transferHasRestriction);
-  return `<section class="alert-transfer-panel ${restricted?'has-restriction':''}" tabindex="0" role="region" aria-label="${escapeChatHtml(group.symbol)} 当前现货充提快照，非历史报警时状态" title="${restricted?'通道受限，价差需复核；':''}按交易所逐链显示该币种现货通道；独立同步，不随5秒行情实时更新；充提关闭不等同于公链停机或已确认价格脱钩"><div class="alert-transfer-exchanges">${statuses.length?statuses.map(status=>`<div class="alert-transfer-exchange"><b>${escapeChatHtml(status.exchange)}</b>${transferStatusMarkup(status)}</div>`).join(''):'<span class="transfer-data-note">充提未知 · 尚未读取</span>'}</div></section>`;
+  const statuses=(Array.isArray(group.transfer_statuses)?group.transfer_statuses:[]).filter(status=>status&&typeof status==='object').slice().sort((a,b)=>priority(a)-priority(b));
+  return `<section class="alert-transfer-panel" tabindex="0" role="region" aria-label="${escapeChatHtml(group.symbol)} 当前现货充提快照，非历史报警时状态"><div class="alert-transfer-exchanges">${statuses.length?statuses.map(status=>`<div class="alert-transfer-exchange"><b>${escapeChatHtml(status.exchange)}</b>${transferStatusControl(status,group.symbol)}</div>`).join(''):'<span class="transfer-data-note">充提未知 · 尚未读取</span>'}</div></section>`;
 }
 function alertDetailCard(group){
   const latest=group.latest,data=alertDetailState.symbol===group.symbol?alertDetailState.data:null,state=alertDetailState;
@@ -1146,7 +1198,7 @@ async function startConfiguredPageTimers(){
 }
 const delistingWarningObserver=new MutationObserver(records=>records.forEach(record=>record.addedNodes.forEach(node=>{if(node.nodeType===Node.ELEMENT_NODE)applyDelistingWarnings(node)})));
 delistingWarningObserver.observe(document.body,{childList:true,subtree:true});
-installPageRefreshTracking();syncMobileViewportHeight();updateMobileViewTitle(document.querySelector('aside nav a.active'),activeViewId());syncMobileViewState(activeViewId());
+installTransferPopoverHandlers();installPageRefreshTracking();syncMobileViewportHeight();updateMobileViewTitle(document.querySelector('aside nav a.active'),activeViewId());syncMobileViewState(activeViewId());
 loadAuthState().then(async()=>{if(!await ensureCurrentDeviceBinding())return;setupChatPush();loadChatUsers().then(startChatPolling).catch(()=>{});if(authState.is_admin)loadSecurityAlerts(false)});
 navigator.serviceWorker?.addEventListener('message',event=>{if(event.data?.type!=='chat-push-received')return;loadChatUsers().catch(()=>{});if(chatPeerId)loadChatMessages('newer').catch(()=>{})});
 updateSidebarSubnav(activeViewId());renderGainersShell();configureSpotLayoutShell();renderDualFuturesShell();configureDualLayoutShell();ensureDualFundingHistoryHeader();addDualLiquidityHeader();addDualBasisSortControls();addBasisOpeningHeaders();installGroupFrameObservers();setupSectionWorkspace();updateSoundControls();updateSortHeaders();updateDualSortHeaders();

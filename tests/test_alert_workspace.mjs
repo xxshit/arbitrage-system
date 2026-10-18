@@ -173,7 +173,8 @@ const wallet=(exchange='Gate',overrides={})=>({exchange,state:'fresh',chains:[{n
 test('wallet panel groups exchanges once per coin rather than repeating statuses on every historical event',async()=>{
   const h=harness(),coin=group();coin.transfer_statuses=[wallet(),wallet('Binance',{state:'unknown',chains:[],reason:'尚未接入该交易所的账户只读充提接口'})];h.context.renderAlertMasterDetail([coin]);await h.context.loadSelectedAlertHistory();
   const markup=h.node('alertDetailPane').innerHTML;assert.equal((markup.match(/class="alert-transfer-panel/g)||[]).length,1);
-  for(const text of ['受限，价差需复核','Gate','BSC','充关','提开','Binance','充提未知 · 未接入','非历史报警时状态','快照采集：10-18 11:30:00 UTC'])assert.ok(markup.includes(text),text);
+  for(const text of ['Gate','Binance','充提异常','充提未知','非历史报警时状态','data-transfer-status='])assert.ok(markup.includes(text),text);
+  assert.ok(!markup.includes('transfer-network-chip'));assert.equal((markup.match(/class="transfer-status-control/g)||[]).length,2);
   assert.ok(!markup.includes('详细说明'));assert.ok(!h.context.alertTimelineNode(detail().items[0]).includes('transfer-network-chip'));
 });
 
@@ -184,19 +185,22 @@ test('wallet strips omit the heading and visible capture times without discardin
     const markup=h.context.alertTransferPanel(coin),visible=markup.replace(/<[^>]*>/g,'');
     for(const unwanted of ['当前充提','UTC','11:30','快照采集'])assert.ok(!visible.includes(unwanted),`${state}: ${unwanted}`);
     assert.ok(!markup.includes('<time'));assert.ok(!markup.includes('alert-transfer-heading'));assert.ok(!markup.includes('transfer-updated'));
-    assert.ok(markup.includes('快照采集：10-18 11:30:00 UTC'));assert.ok(markup.includes('来源：https://api.gateio.ws/api/v4/spot/currencies'));
-    assert.ok(visible.includes(state==='fresh'?'充关':'充未知'));
+    const popover=h.context.transferPopoverMarkup(coin.transfer_statuses[0]);
+    assert.ok(popover.includes('快照采集：10-18 11:30:00 UTC'));assert.ok(popover.includes('来源：https://api.gateio.ws/api/v4/spot/currencies'));
+    assert.ok(visible.includes(state==='fresh'?'充提异常':'充提未知'));
   }
   assert.ok(!css.includes('.transfer-updated'));assert.ok(!css.includes('.alert-transfer-heading'));
 });
 
-test('every source chain remains visible per exchange with no first-chain, open-only or short-list cap',()=>{
+test('all chains move into their exchange popup, without a first-chain, open-only or short-list cap',()=>{
   const h=harness(),coin=group(),chains=(prefix,count)=>Array.from({length:count},(_,i)=>({name:`${prefix}-NETWORK-${i}`,deposit_open:i%3===0?false:i%3===1?true:null,withdraw_open:i%2===0}));
   coin.transfer_statuses=[wallet('Gate',{chains:chains('GATE',30)}),wallet('Bitget',{chains:chains('BITGET',21)}),wallet('Binance',{state:'unknown',chains:[],reason:'尚未接入账户只读充提接口'})];
   const markup=h.context.alertTransferPanel(coin);
-  assert.equal((markup.match(/class="transfer-network-chip"/g)||[]).length,51);
-  for(const [prefix,count] of [['GATE',30],['BITGET',21]])for(let i=0;i<count;i++)assert.ok(markup.includes(`<b>${prefix}-NETWORK-${i}</b>`));
-  assert.ok(markup.includes('充关'));assert.ok(markup.includes('充开'));assert.ok(markup.includes('充未知'));assert.ok(markup.includes('提关'));
+  assert.equal((markup.match(/class="transfer-network-chip"/g)||[]).length,0);
+  const popovers=coin.transfer_statuses.map(status=>h.context.transferPopoverMarkup(status));
+  assert.equal((popovers.join('').match(/class="transfer-network-chip"/g)||[]).length,51);
+  for(const [index,prefix,count] of [[0,'GATE',30],[1,'BITGET',21]])for(let i=0;i<count;i++)assert.ok(popovers[index].includes(`<b>${prefix}-NETWORK-${i}</b>`));
+  assert.ok(popovers[0].includes('充关'));assert.ok(popovers[0].includes('充开'));assert.ok(popovers[0].includes('充未知'));assert.ok(popovers[0].includes('提关'));
   const missing=h.context.transferStatusMarkup(wallet('Binance',{state:'unknown',chains:[]}));assert.ok(!missing.includes('transfer-network-chip'));
 });
 
@@ -232,13 +236,14 @@ test('withdrawal delay remains visible even if the explicit withdrawal switch is
 
 test('untrusted exchange, chain, reason and timestamp text cannot inject HTML or attributes',()=>{
   const h=harness(),coin=group();coin.transfer_statuses=[wallet('<img onerror=1>',{state:'unknown',chains:[{name:'"><svg onload=1>',deposit_open:null}],reason:'"><img onerror=1>',captured_at:'"><script>alert(1)</script>'})];
-  const markup=h.context.alertTransferPanel(coin);assert.ok(!markup.includes('<img'));assert.ok(!markup.includes('<svg'));assert.ok(!markup.includes('<script>'));assert.ok(markup.includes('&lt;img'));assert.ok(markup.includes('&lt;svg'));
+  for(const markup of [h.context.alertTransferPanel(coin),h.context.transferPopoverMarkup(coin.transfer_statuses[0])]){assert.ok(!markup.includes('<img'));assert.ok(!markup.includes('<svg'));assert.ok(!markup.includes('<script>'));assert.ok(markup.includes('&lt;img'))}
+  assert.ok(h.context.transferPopoverMarkup(coin.transfer_statuses[0]).includes('&lt;svg'));
 });
 
 test('spot transfer summary has accessible per-chain details and marks stale data as unknown',()=>{
   const h=harness(),markup=h.context.spotTransferStatus({transfer_status:wallet()});
-  for(const value of ['transfer-alert','充0/1 · 提1/1 · 有受限','tabindex="0"','onfocus=','onkeydown=','data-transfer-status='])assert.ok(markup.includes(value),value);
-  const stale=h.context.spotTransferStatus({transfer_status:wallet('Bitget',{state:'stale'})});assert.ok(stale.includes('pending'));assert.ok(stale.includes('充提过期 · 未知'));assert.ok(!stale.includes('充0/1'));
+  for(const value of ['transfer-summary-abnormal','充提异常','type="button"','aria-haspopup="dialog"','aria-expanded="false"','data-transfer-status='])assert.ok(markup.includes(value),value);
+  const stale=h.context.spotTransferStatus({transfer_status:wallet('Bitget',{state:'stale'})});assert.ok(stale.includes('transfer-summary-unknown'));assert.ok(stale.includes('充提未知'));assert.ok(!stale.includes('充提正常'));
 });
 
 test('wallet-only updates replace the current status without clearing history selection or scroll',async()=>{

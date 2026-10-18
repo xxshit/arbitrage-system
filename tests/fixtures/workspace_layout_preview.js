@@ -29,6 +29,7 @@
     const value_ranges=Object.fromEntries(['open_spread','basis'].map(field=>{const values=timeline.map(item=>item[field]);return [field,{max:Math.max(...values),min:Math.min(...values)}]}));
     const move_peaks=Object.fromEntries(Object.entries(value_ranges).map(([field,{max,min}])=>[field,Math.abs(max)>=Math.abs(min)?max:min]));
     const transfer_statuses=[wallet('Gate',{chains:[{name:'BSC',deposit_open:index===1,withdraw_open:true},{name:'ETH',deposit_open:true,withdraw_open:false}]}),wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC',chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}],reason:'快照已过期'}),wallet('Binance',{state:'unknown',chains:[],captured_at:null,reason:'尚未接入账户只读充提接口'})];
+    if(index===1){transfer_statuses[0].chains.forEach(chain=>{chain.deposit_open=true;chain.withdraw_open=true});Object.assign(transfer_statuses[1],{state:'fresh',reason:''})}
     if(index===2)for(const [offset,count] of [[0,30],[1,21]])Object.assign(transfer_statuses[offset],{state:'fresh',reason:'',chains:Array.from({length:count},(_,i)=>({name:`SYNTHETIC-${offset}-NETWORK-${String(i+1).padStart(2,'0')}`,deposit_open:i%3===0?false:i%3===1?true:null,withdraw_open:i%2===0}))});
     return {symbol,alert_count:timeline.length,latest:timeline[0],timeline,move_peaks,value_ranges,basis_exchange:'Binance',transfer_statuses};
   });

@@ -38,6 +38,7 @@ from sqlalchemy.orm import deferred
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from anomaly_streams import AlertStreamHub, Route
+from anomaly_engine import alert_round_ids, pulse_is_actionable
 
 load_dotenv()
 
@@ -12577,12 +12578,14 @@ def alert_binance_basis(item):
     return item.basis if alert_has_binance_basis_source(item) and item.basis is not None and math.isfinite(item.basis) else None
 
 
-def alert_pulse_read_payload(evidence):
+def alert_pulse_read_payload(evidence, *, qualified_only=False):
     """Retain only UI/range fields after one parse; full evidence stays in DB."""
     fields = ("id", "episode", "ordinal", "metric", "direction", "baseline", "baseline_at",
               "triggered_at", "peak", "peak_at", "current", "current_at", "state",
               "retrace_at", "ended_at", "quality", "notice_version", "noticed_at", "ranges")
     parsed = json.loads(evidence)
+    if qualified_only and not pulse_is_actionable(parsed):
+        return None
     return {key: parsed[key] for key in fields if parsed.get(key) is not None}
 
 
@@ -12632,8 +12635,12 @@ def alerts():
     pulse_rows = AlertPulse.query.join(AlertEvent, AlertPulse.alert_event_id == AlertEvent.id).filter(AlertEvent.created_at >= window_start, AlertEvent.created_at <= now)
     if view == "detail":
         pulse_rows = pulse_rows.filter(AlertEvent.symbol == symbol)
-    pulses = {event_id: alert_pulse_read_payload(evidence)
+    pulses = {event_id: alert_pulse_read_payload(evidence, qualified_only=True)
               for event_id, evidence in pulse_rows.with_entities(AlertPulse.alert_event_id, AlertPulse.evidence_json).yield_per(500)}
+    # Hide old low-threshold noise consistently in counts, ranges, detail and
+    # browser notifications. Original AlertEvent/AlertPulse evidence stays in DB.
+    all_events = [item for item in all_events if item.id not in pulses or pulses[item.id] is not None]
+    round_ids = alert_round_ids(all_events, pulses)
     grouped_events = {}
     for item in all_events:
         grouped_events.setdefault(item.symbol, []).append(item)
@@ -12713,7 +12720,17 @@ def alerts():
             pulse = {**pulse, "state": "data_gap"}
         if pulse:
             pulse = {key: value for key, value in pulse.items() if key in {"id", "episode", "ordinal", "metric", "direction", "baseline", "baseline_at", "triggered_at", "peak", "peak_at", "current", "current_at", "state", "retrace_at", "ended_at", "quality", "notice_version"}}
-        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "pulse": pulse, "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int(120 - (now.replace(tzinfo=timezone.utc).timestamp() - notice_epoch(item)))), **alert_context(item)}
+        notice_key = None
+        if pulse:
+            phase = "start"
+            if pulse.get("state") in ("expanded", "retraced"):
+                phase = pulse["state"]
+            if phase == "expanded":
+                phase += ":" + str(int(abs(pulse["peak"] - pulse["baseline"]) // (3 if pulse["metric"] == "price" else 1)))
+            if pulse.get("ordinal", 1) > 1:
+                phase = "restart:" + phase
+            notice_key = f"{round_ids[item.id]}:{phase}"
+        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "pulse": pulse, "round_id": round_ids[item.id], "notice_key": notice_key, "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int(120 - (now.replace(tzinfo=timezone.utc).timestamp() - notice_epoch(item)))), **alert_context(item)}
 
     if view == "detail":
         filtered = [item for item in all_events if (not selected_strategy or alert_context(item)["strategy"] == selected_strategy) and (selected_path is None or path_key(item) == selected_path)]
@@ -12749,12 +12766,13 @@ def alerts():
         paths = []
         for key, samples in path_items.items():
             context = alert_context(samples[0])
-            paths.append({"id": key, **context, "alert_count": len(samples), "latest": event_payload(samples[0]), "value_ranges": value_ranges(samples), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
+            paths.append({"id": key, **context, "alert_count": len({round_ids[item.id] for item in samples}), "observation_count": len(samples), "latest": event_payload(samples[0]), "value_ranges": value_ranges(samples), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
         return {
             "symbol": symbol,
             "latest": latest,
             "first_at": items[-1].created_at.strftime("%m-%d %H:%M:%S"),
-            "alert_count": len(items),
+            "alert_count": len({round_ids[item.id] for item in items}),
+            "observation_count": len(items),
             "move_peaks": {
                 "open_spread": absolute_peak("open_spread", max_spread_item.open_spread if max_spread_item else None),
                 "open_spread_at": max_spread_item.created_at.strftime("%m-%d %H:%M:%S") if max_spread_item else None,
@@ -12773,7 +12791,8 @@ def alerts():
         "realtime": ALERT_STREAM_HUB.status(),
         "window_hours": 24,
         "total_symbols": len(grouped_events),
-        "total_alerts": len(all_events),
+        "total_alerts": len(set(round_ids.values())),
+        "total_observations": len(all_events),
         "isolated_paths": [spot_divergence_payload(item, now) for item in sorted(isolated, key=lambda item: (item.symbol, item.long_exchange))],
         "events": [alert_group_payload(symbol, items) for symbol, items in grouped_events.items()],
         "active_events": [event_payload(item) for item in active_events],

@@ -88,6 +88,7 @@ const dualSortOptions=[
 const dualSortLabels=Object.fromEntries(dualSortOptions);
 let alertSignature = '';
 let alertAudibleSignature = '';
+const alertNoticeMemory = new Map();
 let alertsInitialized = false;
 let alertCountdownTimer;
 let selectedAlertSymbol = '';
@@ -591,7 +592,7 @@ function isAlertMuted(symbol){return mutedAlertSymbols.has(symbol)}
 function alertActionSymbol(symbol){return escapeChatHtml(JSON.stringify(String(symbol)))}
 function alertMuteButton(symbol){const muted=isAlertMuted(symbol);return `<button type="button" class="alert-mute-toggle ${muted?'muted':''}" onclick="toggleAlertMute(${alertActionSymbol(symbol)},event)" aria-label="${escapeChatHtml(symbol)} ${muted?'取消静音':'静音'}" aria-pressed="${muted}">${muted?'已静音':'静音'}</button>`}
 function alertSpeakerButton(symbol){const muted=isAlertMuted(symbol);return `<button class="alert-speaker-toggle ${muted?'muted':''}" title="${muted?'取消静音':'静音'}" onclick="toggleAlertMute(${alertActionSymbol(symbol)},event)" aria-label="${muted?'取消静音':'静音'}"><span>${muted?'🔇':'🔊'}</span></button>`}
-function pruneAlertMutes(groups,activeEvents){const visible=new Set([...(groups||[]).map(group=>group.symbol),...(activeEvents||[]).map(item=>item.symbol)]);[...mutedAlertSymbols].forEach(symbol=>{if(!visible.has(symbol))mutedAlertSymbols.delete(symbol)})}
+function pruneAlertMutes(){/* Filtering noise or a temporary empty response must not undo the user's mute choice. */}
 function toggleAlertMute(symbol,event){event?.stopPropagation();if(isAlertMuted(symbol))mutedAlertSymbols.delete(symbol);else mutedAlertSymbols.add(symbol);renderAlertMasterDetail(latestAlertGroups);renderAlertMuteList();renderTipsItems(latestActiveAlertEvents)}
 function renderAlertMuteList(){const target=byId('alertMuteList');if(!target)return;const muted=[...mutedAlertSymbols].sort();target.innerHTML=muted.length?muted.map(symbol=>`<button class="muted-symbol-pill" onclick="toggleAlertMute('${symbol}',event)">${symbol}<span>取消</span></button>`).join(''):'<p class="empty-alert">暂无静音币种。</p>'}
 function alertTimelineNode(item){
@@ -659,7 +660,7 @@ function alertDetailCard(group){
 }
 function alertSymbolCard(group){
   const symbol=escapeChatHtml(group.symbol),peaks=group.move_peaks||{};
-  return `<article class="alert-symbol-option ${group.symbol===selectedAlertSymbol?'active':''} ${alertClass(group.latest.type)} ${isAlertMuted(group.symbol)?'muted-alert':''}" data-alert-symbol="${symbol}"><div class="alert-symbol-cell"><button type="button" class="alert-coin-select ${delistingSymbolClass(group.symbol)}" data-market-symbol="${symbol}" onclick="selectAlertSymbol(${alertActionSymbol(group.symbol)})" aria-label="${symbol}，${group.alert_count}次报警，查看详情" aria-pressed="${group.symbol===selectedAlertSymbol}">${symbol}</button></div><span class="alert-symbol-count">${group.alert_count}</span><span class="alert-symbol-peak ${changeClass(peaks.open_spread)}">${alertCompactMetric(peaks.open_spread)}</span><span class="alert-symbol-peak ${changeClass(peaks.basis)}">${alertCompactMetric(peaks.basis)}</span>${alertMuteButton(group.symbol)}</article>`;
+  return `<article class="alert-symbol-option ${group.symbol===selectedAlertSymbol?'active':''} ${alertClass(group.latest.type)} ${isAlertMuted(group.symbol)?'muted-alert':''}" data-alert-symbol="${symbol}"><div class="alert-symbol-cell"><button type="button" class="alert-coin-select ${delistingSymbolClass(group.symbol)}" data-market-symbol="${symbol}" onclick="selectAlertSymbol(${alertActionSymbol(group.symbol)})" aria-label="${symbol}，${group.alert_count}轮异动，查看详情" aria-pressed="${group.symbol===selectedAlertSymbol}">${symbol}</button></div><span class="alert-symbol-count" title="按异动轮次计数；同轮回落、再启动及30秒内的多路径同步信号不重复累加，明细保留各路径记录">${group.alert_count}</span><span class="alert-symbol-peak ${changeClass(peaks.open_spread)}">${alertCompactMetric(peaks.open_spread)}</span><span class="alert-symbol-peak ${changeClass(peaks.basis)}">${alertCompactMetric(peaks.basis)}</span>${alertMuteButton(group.symbol)}</article>`;
 }
 function visibleAlertGroups(groups=latestAlertGroups){
   const query=alertListQuery.toUpperCase().replace(/[\s/_-]/g,'');
@@ -669,7 +670,7 @@ function visibleAlertGroups(groups=latestAlertGroups){
     return 0;
   });
 }
-function alertRosterColumnsMarkup(){return '<div class="alert-roster-columns" aria-hidden="true"><span>币种</span><span>次数</span><span>开差峰值</span><span>基差峰值</span><span>静音</span></div>'}
+function alertRosterColumnsMarkup(){return '<div class="alert-roster-columns" aria-hidden="true"><span>币种</span><span>轮次</span><span>开差峰值</span><span>基差峰值</span><span>静音</span></div>'}
 function renderAlertRoster(){
   const groups=visibleAlertGroups(),list=byId('alertSymbolList');if(!list)return;
   const top=list.scrollTop;
@@ -725,9 +726,11 @@ async function loadAlerts(force=false){
     pruneAlertMutes(groups,activeEvents);latestActiveAlertEvents=activeEvents;
     renderDivergenceRegister(data.isolated_paths);
     const signature=JSON.stringify({groups,tracking,activeEvents},(key,value)=>key==='remaining_seconds'?undefined:value);
-    const audibleKeys=activeEvents.filter(item=>!isAlertMuted(item.symbol)).map(item=>item.pulse?`${item.id}-${item.pulse.notice_version}`:`${item.symbol}-${item.type}-${item.open_spread}-${item.basis}-${item.created_at}`),audibleSignature=audibleKeys.join('|');
-    const previousAudible=new Set(alertAudibleSignature.split('|'));
-    const hasNewAlert=alertsInitialized&&audibleKeys.some(key=>!previousAudible.has(key));
+    const audibleKeys=activeEvents.filter(item=>!isAlertMuted(item.symbol)&&!['data_gap','isolated','settled'].includes(item.pulse?.state)).map(item=>item.notice_key||(item.pulse?`${item.id}-${item.pulse.notice_version}`:`${item.symbol}-${item.type}-${item.open_spread}-${item.basis}-${item.created_at}`)),audibleSignature=audibleKeys.join('|');
+    const noticeNow=Date.now();
+    for(const [key,seenAt] of alertNoticeMemory)if(noticeNow-seenAt>86400000)alertNoticeMemory.delete(key);
+    const hasNewAlert=alertsInitialized&&audibleKeys.some(key=>!alertNoticeMemory.has(key));
+    audibleKeys.forEach(key=>alertNoticeMemory.set(key,noticeNow));
     setPageRefreshSource('alerts',data.checked_at_epoch,'检查');
     if(!force&&signature===alertSignature){if(activeViewId()==='alerts')loadSelectedAlertHistory();return true}
     renderAlertMasterDetail(groups);

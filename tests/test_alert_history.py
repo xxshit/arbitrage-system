@@ -193,7 +193,7 @@ class AlertHistoryTests(unittest.TestCase):
         engine = PulseDetector()
         updates = {}
         path = ("spot_futures", "DEMO/USDT", "Gate", "Binance")
-        for i, value in enumerate((0, .3, 1.02, .1, .4)):
+        for i, value in enumerate((0, .55, 1.02, .1, .65)):
             context = {"open_spread": value, "close_spread": value+.02, "mid_spread": value+.01, "basis": -.32, "funding_rate": None}
             for pulse in engine.observe(path, "spread", value, self.now.replace(tzinfo=timezone.utc).timestamp()-10+i, context):
                 updates[pulse["id"]] = pulse
@@ -202,13 +202,16 @@ class AlertHistoryTests(unittest.TestCase):
             module.persist_alert_pulses(list(updates.values()))
         data = self.get(view="summary")
         coin = data["events"][0]
-        self.assertEqual(coin["alert_count"], 2)
+        self.assertEqual(coin["alert_count"], 1)
+        self.assertEqual(coin["observation_count"], 2)
         self.assertEqual(coin["move_peaks"]["open_spread"], 1.02)
         self.assertEqual(coin["paths"][0]["value_ranges"]["open_spread"], {"max": 1.02, "min": .1})
         self.assertEqual(data["active_events"][0]["pulse"]["ordinal"], 2)
+        self.assertTrue(data["active_events"][0]["notice_key"].endswith(":restart:start"))
         detail = self.get(view="detail", symbol="DEMO/USDT")["items"]
         self.assertEqual(detail[1]["pulse"]["state"], "retraced")
         self.assertEqual(detail[1]["pulse"]["peak"], 1.02)
+        self.assertNotEqual(detail[0]["notice_key"], detail[1]["notice_key"])
         self.assertEqual(detail[0]["pulse"]["baseline"], .1)
         self.assertNotIn("trigger_context", detail[0]["pulse"])
 
@@ -220,6 +223,44 @@ class AlertHistoryTests(unittest.TestCase):
         self.assertEqual(ids, sorted(ids, reverse=True))
         self.assertEqual(self.get(view="detail", symbol="DEMO/USDT", page=999, page_size=2)["page"], 2)
         self.assertEqual(self.get(view="detail", symbol="DEMO/USDT", page_size=999)["page_size"], 100)
+
+    def test_old_noise_is_excluded_consistently_without_deleting_evidence(self):
+        from tests.test_alert_quality import historical_pulse
+        epoch = self.now.replace(tzinfo=timezone.utc).timestamp()-10
+        pulses = [historical_pulse(identifier="noise"), historical_pulse(trigger=.2, peak=1.02, current=.1, identifier="spike")]
+        for index, pulse in enumerate(pulses):
+            pulse["path"] = ("spot_futures", "NOISE/USDT" if index == 0 else "REAL/USDT", "Gate", "Binance")
+            for key in ("baseline_at", "triggered_at", "peak_at", "current_at", "noticed_at", "retrace_at"):
+                pulse[key] += epoch-1000
+        with module.app.app_context():
+            module.persist_alert_pulses(pulses)
+        data = self.get(view="summary")
+        self.assertEqual([item["symbol"] for item in data["events"]], ["REAL/USDT"])
+        self.assertEqual([item["symbol"] for item in data["active_events"]], ["REAL/USDT"])
+        self.assertEqual(self.get(view="detail", symbol="NOISE/USDT")["total"], 0)
+        self.assertEqual(self.get(view="detail", symbol="REAL/USDT")["items"][0]["pulse"]["peak"], 1.02)
+        with module.app.app_context():
+            self.assertEqual(module.AlertPulse.query.count(), 2)
+            self.assertEqual(module.AlertEvent.query.count(), 2)
+
+    def test_synchronous_path_copies_count_once_without_combining_ranges(self):
+        from tests.test_alert_quality import historical_pulse
+        epoch = self.now.replace(tzinfo=timezone.utc).timestamp()-10
+        pulses = [historical_pulse(trigger=.6, peak=.7, identifier="gate"), historical_pulse(trigger=1.1, peak=1.3, identifier="bitget")]
+        for index, pulse in enumerate(pulses):
+            pulse["path"] = ("spot_futures", "DEMO/USDT", "Gate" if index == 0 else "Bitget", "Binance")
+            for key in ("baseline_at", "triggered_at", "peak_at", "current_at", "noticed_at", "retrace_at"):
+                pulse[key] += epoch-1000+index
+        with module.app.app_context():
+            module.persist_alert_pulses(pulses)
+        summary = self.get(view="summary")
+        group = summary["events"][0]
+        self.assertEqual((summary["total_alerts"], group["alert_count"], group["observation_count"]), (1, 1, 2))
+        paths = {item["long_exchange"]: item for item in group["paths"]}
+        self.assertEqual(paths["Gate"]["value_ranges"]["open_spread"]["max"], .7)
+        self.assertEqual(paths["Bitget"]["value_ranges"]["open_spread"]["max"], 1.3)
+        self.assertEqual(paths["Gate"]["latest"]["notice_key"], paths["Bitget"]["latest"]["notice_key"])
+        self.assertEqual(self.get(view="detail", symbol="DEMO/USDT")["total"], 2)
 
     def test_unicode_coin_and_invalid_parameters(self):
         self.insert([self.event("哈基米/USDT")])

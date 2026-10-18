@@ -7,13 +7,79 @@ undoes it. New pulses use the post-retracement turning point, not an old high.
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import timezone
 import math
 import uuid
 
 
-RULES = {"spread": ((15, .20), (30, .30), (120, .50)),
-         "basis": ((15, .20), (30, .30), (120, .50)),
-         "price": ((15, 1.0), (30, 1.5), (120, 3.0))}
+POLICY_VERSION = 2
+RULES = {"spread": ((15, .50), (30, .75), (120, 1.0)),
+         "basis": ((15, .50), (30, .75), (120, 1.0)),
+         "price": ((15, 1.5), (30, 2.5), (120, 4.0))}
+
+
+def motion_threshold(metric, baseline, value, age):
+    """Magnitude AND displacement; never make tiny zero-crossings actionable.
+
+    Preserve the user's early positive-spread case without a blanket 1% gate:
+    a near-zero anchor reaching +.5 can qualify before a full .5-point change.
+    """
+    if metric not in RULES or not all(finite(v) for v in (baseline, value, age)) or not 0 < age <= 300:
+        return None
+    if metric != "price" and max(abs(baseline), abs(value)) < .5 - 1e-9:
+        return None
+    if metric == "spread" and abs(baseline) <= .15 and value >= .5 - 1e-9 and value - baseline >= .4 - 1e-9:
+        return .4
+    return next((limit for seconds, limit in RULES[metric] if age <= seconds), 4.0 if metric == "price" else 1.0)
+
+
+def pulse_is_actionable(pulse):
+    """Apply the current policy to stored evidence without rewriting history.
+
+    A later retracement cannot revoke a qualified trigger or observed peak.
+    Missing quote evidence cannot be promoted into a confirmed displacement.
+    """
+    metric = pulse.get("metric")
+    for value_key, time_key, context_key in (("trigger", "triggered_at", "trigger_context"), ("peak", "peak_at", "peak_context")):
+        try:
+            baseline = Sample(pulse["baseline_at"], pulse["baseline"], pulse["baseline_context"])
+            sample = Sample(pulse[time_key], pulse[value_key], pulse[context_key])
+            limit = motion_threshold(metric, baseline.value, sample.value, sample.at - baseline.at)
+            if limit is not None and pulse.get("ordinal", 1) > 1:
+                limit = max(limit, RULES[metric][0][1])
+            if limit is not None and abs(sample.value - baseline.value) >= limit - 1e-9 and PulseDetector.supported(metric, baseline, sample, limit):
+                return True
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+    return False
+
+
+def alert_round_ids(events, pulses):
+    """Correlate counts only; never combine path-local prices or quarantine.
+
+    Restarts in one episode count once. New episodes starting within 30s of a
+    coin round's FIRST onset join it; later arrivals don't slide the window.
+    """
+    result, episodes, recent = {}, {}, {}
+    for item in sorted(events, key=lambda item: (item.created_at, item.id)):
+        pulse = pulses.get(item.id)
+        if not pulse:
+            result[item.id] = f"legacy:{item.id}"
+            continue
+        episode_key = (item.symbol, item.strategy, item.long_exchange, item.short_exchange,
+                       pulse.get("metric"), pulse.get("episode") or pulse["id"])
+        round_id = episodes.get(episode_key)
+        if round_id is None:
+            stamp = item.created_at.replace(tzinfo=timezone.utc).timestamp()
+            previous = recent.get(item.symbol)
+            if previous and 0 <= stamp - previous[0] <= 30:
+                round_id = previous[1]
+            else:
+                round_id = f"pulse:{item.id}"
+                recent[item.symbol] = (stamp, round_id)
+            episodes[episode_key] = round_id
+        result[item.id] = round_id
+    return result
 
 
 def finite(value):
@@ -147,7 +213,7 @@ class PulseDetector:
                     baseline = track.turning  # restart can be LOWER than the old peak
                 elif direction * (value - pulse["baseline"]) <= -threshold:
                     baseline = Sample(pulse["baseline_at"], pulse["baseline"], pulse["baseline_context"])
-                elif at - pulse["retrace_at"] >= 30:
+                elif at - pulse["retrace_at"] >= 180:
                     pulse["state"], pulse["ended_at"] = "settled", at
                     track.pulse, track.ordinal, track.episode = None, 0, ""
                     track.clear_history()
@@ -160,19 +226,22 @@ class PulseDetector:
                     track.turning = sample
                     if direction * (value - pulse["baseline"]) <= -threshold:
                         baseline = Sample(pulse["baseline_at"], pulse["baseline"], pulse["baseline_context"])
-                elif at - pulse["peak_at"] >= 120:
+                elif at - pulse["peak_at"] >= 300:
                     pulse["state"], pulse["ended_at"] = "settled", at
                     track.pulse, track.ordinal, track.episode = None, 0, ""
                     track.clear_history()
-                elif excursion >= (.5 if metric != "price" else 2):
+                elif excursion >= (1 if metric != "price" else 3):
                     pulse["state"] = "expanded"
             if pulse["state"] != prior_state and pulse["state"] in ("retraced", "expanded"):
                 pulse["notice_version"] += 1
                 pulse["noticed_at"] = at
             pulse["version"] += 1
             updates.append(deepcopy(pulse))
-            if baseline and not self.supported(metric, baseline, sample, threshold):
-                baseline = None
+            if baseline:
+                limit = motion_threshold(metric, baseline.value, value, at - baseline.at)
+                threshold = max(threshold, limit) if limit is not None else threshold
+                if limit is None or abs(value - baseline.value) < threshold - 1e-9 or not self.supported(metric, baseline, sample, threshold):
+                    baseline = None
             if baseline:
                 pulse["ended_at"] = at
                 updates[-1] = deepcopy(pulse)
@@ -189,16 +258,17 @@ class PulseDetector:
             # chronological extremum WITHIN the stated window, never 65s ago.
             candidates = []
             possible_change = track.possible_change(value)
-            for bucket in track.history if possible_change >= RULES[metric][0][1] - 1e-9 else ():
+            minimum = .4 if metric == "spread" else RULES[metric][0][1]
+            for bucket in track.history if possible_change >= minimum - 1e-9 else ():
                 for previous in bucket:
                     age = at - previous.at
                     if not 0 < age <= 120:
                         continue
                     # The shortest eligible window always has the smallest
                     # threshold and strongest score/support. Scan once, not 3x.
-                    limit = RULES[metric][0 if age <= 15 else 1 if age <= 30 else 2][1]
+                    limit = motion_threshold(metric, previous.value, value, age)
                     change = abs(value - previous.value)
-                    if change >= limit - 1e-9 and self.supported(metric, previous, sample, limit):
+                    if limit is not None and change >= limit - 1e-9 and self.supported(metric, previous, sample, limit):
                         candidates.append((change / limit, previous, limit))
             if candidates:
                 _, baseline, threshold = max(candidates, key=lambda item: item[0])
@@ -216,8 +286,8 @@ class PulseDetector:
                 if departures:
                     track.anchor = max(departures, key=lambda previous: abs(value - previous.value))
                     track.anchor_direction = 1 if value > track.anchor.value else -1
-            cumulative = .5 if metric != "price" else 3
-            if not baseline and track.anchor and abs(value - track.anchor.value) >= cumulative - 1e-9 and self.supported(metric, track.anchor, sample, cumulative):
+            cumulative = motion_threshold(metric, track.anchor.value, value, at - track.anchor.at) if track.anchor else None
+            if track.anchor and cumulative is not None and abs(value - track.anchor.value) >= cumulative - 1e-9 and self.supported(metric, track.anchor, sample, cumulative) and (baseline is None or abs(value - track.anchor.value) / cumulative > abs(value - baseline.value) / threshold):
                 baseline, threshold = track.anchor, cumulative
         if baseline:
             track.ordinal += 1
@@ -229,7 +299,8 @@ class PulseDetector:
                          trigger=value, triggered_at=at, trigger_context=dict(context),
                          peak=value, peak_at=at, peak_context=dict(context), current=value,
                          current_at=at, current_context=dict(context), threshold=threshold,
-                         state="expanded" if abs(value - baseline.value) >= (.5 if metric != "price" else 2) else "watch",
+                         state="expanded" if abs(value - baseline.value) >= (1 if metric != "price" else 3) else "watch",
+                         policy_version=POLICY_VERSION,
                          ranges=ranges, version=1, notice_version=1, noticed_at=at, quality="aligned_book" if metric != "basis" else "mark_index")
             track.pulse, track.turning = pulse, None
             track.anchor = None

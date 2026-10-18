@@ -30,7 +30,7 @@ class PulseDetectorTests(unittest.TestCase):
 
     def test_first_valid_crossing_does_not_wait_for_three_observations(self):
         self.sample(0, .03)
-        output = self.sample(.1, .25)
+        output = self.sample(.1, .55)
         self.assertEqual(len(output), 1)
         self.assertEqual(output[0]["triggered_at"], 1000.1)
         self.assertEqual(output[0]["state"], "watch")
@@ -60,7 +60,7 @@ class PulseDetectorTests(unittest.TestCase):
         retained = track.history[0][0]
         self.assertEqual(set(retained.context), {"close_spread", "mid_spread"})
         self.assertFalse(hasattr(retained, "__dict__"))
-        pulse = self.sample(250, .3)[0]
+        pulse = self.sample(250, .6)[0]
         self.assertEqual((pulse["baseline"], pulse["baseline_at"]), (0, 1249))
         self.assertIn("long_mid", pulse["peak_context"])
 
@@ -128,7 +128,7 @@ class PulseDetectorTests(unittest.TestCase):
         self.sample(0, 0)
         first = self.sample(1, 1)[0]
         self.sample(2, .1)
-        second = self.sample(3, .4)[-1]
+        second = self.sample(3, .65)[-1]
         self.assertNotEqual(first["id"], second["id"])
         self.assertEqual(first["episode"], second["episode"])
         self.assertEqual((second["ordinal"], second["baseline"]), (2, .1))
@@ -144,10 +144,10 @@ class PulseDetectorTests(unittest.TestCase):
         self.assertEqual(self.engine.tracks[(PATH, "spread")].ordinal, 8)
 
     def test_positive_to_negative_equal_absolute_values_trigger(self):
-        self.sample(0, .3)
-        pulse = self.sample(1, -.3)[0]
+        self.sample(0, .6)
+        pulse = self.sample(1, -.6)[0]
         self.assertEqual(pulse["direction"], -1)
-        self.assertAlmostEqual(pulse["peak"] - pulse["baseline"], -.6)
+        self.assertAlmostEqual(pulse["peak"] - pulse["baseline"], -1.2)
 
     def test_direct_reversal_records_opposite_leg_without_an_extra_tick(self):
         self.sample(0, 0)
@@ -160,7 +160,7 @@ class PulseDetectorTests(unittest.TestCase):
         self.sample(0, 0)
         self.sample(1, -.8)
         self.sample(2, -.1)
-        pulse = self.sample(3, -.4)[-1]
+        pulse = self.sample(3, -.65)[-1]
         self.assertEqual((pulse["ordinal"], pulse["direction"]), (2, -1))
 
     def test_gradual_ramp_uses_120_second_window(self):
@@ -169,7 +169,7 @@ class PulseDetectorTests(unittest.TestCase):
             outputs += self.sample(second, second * .005)
         self.assertTrue(outputs)
         self.assertAlmostEqual(outputs[0]["baseline"], 0)
-        self.assertEqual(outputs[0]["threshold"], .5)
+        self.assertEqual(outputs[0]["threshold"], .4)  # near-zero -> +.5 early lane
 
     def test_frozen_baseline_survives_continuing_ramp(self):
         self.sample(0, 0)
@@ -200,7 +200,7 @@ class PulseDetectorTests(unittest.TestCase):
 
     def test_no_absolute_one_percent_gate(self):
         self.sample(0, .01)
-        self.assertTrue(self.sample(2, .22))
+        self.assertTrue(self.sample(2, .51))
 
     def test_width_only_change_is_not_price_displacement(self):
         self.sample(0, 0)
@@ -208,7 +208,7 @@ class PulseDetectorTests(unittest.TestCase):
 
     def test_basis_does_not_require_funding_or_one_percent(self):
         self.sample(0, -.1, metric="basis", funding_rate=None)
-        self.assertTrue(self.sample(1, .11, metric="basis", funding_rate=None))
+        self.assertTrue(self.sample(1, .55, metric="basis", funding_rate=None))
 
     def test_both_prices_moving_with_flat_spread_is_detected(self):
         self.engine.observe(PATH, "price", 100 * math.log(100), 1000, context(0))
@@ -244,9 +244,9 @@ class PulseDetectorTests(unittest.TestCase):
 
     def test_notice_version_changes_on_state_not_every_tick(self):
         self.sample(0, 0)
-        self.assertEqual(self.sample(1, .21)[0]["notice_version"], 1)
-        self.assertEqual(self.sample(2, .25)[0]["notice_version"], 1)
-        self.assertEqual(self.sample(3, .51)[0]["notice_version"], 2)
+        self.assertEqual(self.sample(1, .51)[0]["notice_version"], 1)
+        self.assertEqual(self.sample(2, .55)[0]["notice_version"], 1)
+        self.assertEqual(self.sample(3, 1.01)[0]["notice_version"], 2)
         self.assertEqual(self.sample(4, .1)[0]["notice_version"], 3)
 
 
@@ -261,7 +261,7 @@ class StreamHubTests(unittest.TestCase):
         self.hub.ingest(feed, dict(dict(symbol=symbol, at=at, bid=mid-.001, ask=mid+.001, bid_qty=1, ask_qty=1), **extra), at)
 
     def test_end_to_end_peak_retrace_and_restart_queue(self):
-        for at, mid in ((1000, 100), (1001, 101), (1002, 100.1), (1003, 100.4)):
+        for at, mid in ((1000, 100), (1001, 101), (1002, 100.1), (1003, 100.65)):
             self.book("gate", at)
             self.book("bn_future", at+.001, mid)
         batch = [item for item in self.hub.batch() if item["metric"] == "spread"]
@@ -542,23 +542,23 @@ class PulseStorageTests(unittest.TestCase):
         engine = PulseDetector()
         now = datetime.now(timezone.utc).timestamp() - 3
         engine.observe(PATH, "spread", 0, now, context(0))
-        first = engine.observe(PATH, "spread", .3, now+1, context(.3))
+        first = engine.observe(PATH, "spread", .6, now+1, context(.6))
         last = engine.observe(PATH, "spread", .8, now+2, context(.8))
         module.persist_alert_pulses(first)
         module.persist_alert_pulses(last)
         module.persist_alert_pulses(first)
         self.assertEqual(module.AlertEvent.query.count(), 1)
         self.assertEqual(json.loads(module.AlertPulse.query.one().evidence_json)["peak"], .8)
-        self.assertEqual(module.AlertEvent.query.one().open_spread, .3)
+        self.assertEqual(module.AlertEvent.query.one().open_spread, .6)
 
     def test_compact_read_preserves_precision_and_nested_ranges_without_evidence_contexts(self):
         engine = PulseDetector()
         engine.observe(PATH, "spread", 0, 1000, context(0))
-        pulse = engine.observe(PATH, "spread", .321987, 1001, context(.321987))[0]
+        pulse = engine.observe(PATH, "spread", .621987, 1001, context(.621987))[0]
         module.persist_alert_pulses([pulse])
         projected = module.alert_pulse_read_payload(module.AlertPulse.query.one().evidence_json)
-        self.assertEqual(projected["peak"], .321987)
-        self.assertEqual(projected["ranges"]["open_spread"]["max"], .321987)
+        self.assertEqual(projected["peak"], .621987)
+        self.assertEqual(projected["ranges"]["open_spread"]["max"], .621987)
         self.assertEqual(projected["id"], pulse["id"])
         self.assertNotIn("ended_at", projected)
         self.assertNotIn("peak_context", projected)
@@ -569,7 +569,7 @@ class PulseStorageTests(unittest.TestCase):
         engine = PulseDetector()
         now = datetime.now(timezone.utc).timestamp() - 4
         updates = {}
-        for i, value in enumerate((0, 1, .1, .4)):
+        for i, value in enumerate((0, 1, .1, .65)):
             for pulse in engine.observe(PATH, "spread", value, now+i, context(value)):
                 updates[pulse["id"]] = pulse
         module.persist_alert_pulses(list(updates.values()))
@@ -581,7 +581,8 @@ class PulseStorageTests(unittest.TestCase):
         now = datetime.now(timezone.utc).timestamp()-2
         engine.observe(PATH, "spread", 0, now, context(0))
         with patch.object(module, "create_alert", side_effect=AssertionError("legacy gate")), patch.object(module, "urlopen", side_effect=AssertionError("no network")):
-            module.persist_alert_pulses(engine.observe(PATH, "spread", .2, now+1, context(.2)))
+            module.persist_alert_pulses(engine.observe(PATH, "spread", .6, now+1, context(.6)))
+        self.assertEqual(module.AlertEvent.query.count(), 1)
         self.assertEqual(module.LarkPushState.query.count(), 0)
 
 

@@ -42,6 +42,11 @@ test('gap and ended pulse never present their last quote as a live current value
   assert.ok(h.context.alertPulseLabel({pulse}).includes('数据中断'));
 });
 
+test('noise filtering and empty responses cannot silently unmute a user-selected coin',()=>{
+  const h=harness();h.run("mutedAlertSymbols.add('NOISE/USDT');pruneAlertMutes([],[])");
+  assert.equal(h.run("mutedAlertSymbols.has('NOISE/USDT')"),true);
+});
+
 test('restart and negative pulses use unambiguous labels',()=>{
   const h=harness();
   assert.ok(h.context.alertPulseLabel({pulse:{metric:'spread',state:'watch',ordinal:2}}).includes('再次启动'));

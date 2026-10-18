@@ -15,7 +15,7 @@ function harness(){
     setTimeout(fn,delay){const id=++nextId;timers.set(id,{fn,at:now+delay});return id},
     clearTimeout(id){timers.delete(id)},setInterval(){return 0},clearInterval(){},
     activeViewId:()=>context.active,active:'dashboard',authState:{is_admin:false},
-    renderAlertStreamStatus(){},
+    renderAlertStreamStatus(){},alertNoticeMemory:new Map(),
     document:{querySelectorAll:()=>[]},
     byId(id){if(!elements.has(id))elements.set(id,{textContent:''});return elements.get(id)},
     fetch:async()=>({ok:true,json:async()=>({items:[]})}),
@@ -172,6 +172,33 @@ test('tracking-only alert changes render without causing repeat sound',async()=>
   assert.equal(requests,2);assert.equal(renders,2);assert.equal(sounds,0);assert.ok(h.context.byId('basisTracking').innerHTML.includes('1.4%'));
   h.context.fetch=async()=>({ok:false,json:async()=>({error:'unavailable'})});
   const valid=h.context.byId('basisTracking').innerHTML;assert.equal(await h.context.loadAlerts(),false);assert.equal(h.context.byId('basisTracking').innerHTML,valid);
+});
+
+test('one round sounds once per meaningful phase despite path switches and temporary absence',async()=>{
+  const h=harness();let sounds=0;
+  Object.assign(h.context,{pruneAlertMutes(){},isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){},replaceHtmlKeepingExchangeLogos(){},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});
+  h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
+  let active=[];h.context.fetch=async()=>({ok:true,json:async()=>({active_events:active,events:[],basis_tracking:[],checked_at_epoch:100})});
+  await h.context.loadAlerts();
+  const event={id:1,symbol:'DEMO/USDT',notice_key:'pulse:1:start',pulse:{state:'watch',notice_version:1}};
+  active=[event];await h.context.loadAlerts();assert.equal(sounds,1);
+  active=[{...event,id:2}];await h.context.loadAlerts();assert.equal(sounds,1);
+  active=[];await h.context.loadAlerts();active=[event];await h.context.loadAlerts();assert.equal(sounds,1);
+  active=[{...event,notice_key:'pulse:1:retraced',pulse:{state:'retraced'}}];await h.context.loadAlerts();assert.equal(sounds,2);
+  active=[{...event,id:3,notice_key:'pulse:1:restart:retraced',pulse:{state:'retraced',ordinal:2}}];await h.context.loadAlerts();assert.equal(sounds,3);
+  active=[{...active[0],id:4,pulse:{state:'retraced',ordinal:3}}];await h.context.loadAlerts();assert.equal(sounds,3);
+  active=[{...event,id:5,notice_key:'pulse:5:start'}];await h.context.loadAlerts();assert.equal(sounds,4);
+});
+
+test('data gap, isolated and settled pulses cannot ring while a genuine new round can',async()=>{
+  const h=harness();let sounds=0;
+  Object.assign(h.context,{pruneAlertMutes(){},isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){},replaceHtmlKeepingExchangeLogos(){},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});
+  h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
+  let active=[];h.context.fetch=async()=>({ok:true,json:async()=>({active_events:active,events:[],basis_tracking:[],checked_at_epoch:100})});
+  await h.context.loadAlerts();
+  for(const state of ['data_gap','isolated','settled']){active=[{id:1,symbol:'DEMO/USDT',notice_key:`pulse:1:${state}`,pulse:{state}}];await h.context.loadAlerts()}
+  assert.equal(sounds,0);
+  active=[{id:2,symbol:'DEMO/USDT',notice_key:'pulse:2:start',pulse:{state:'watch'}}];await h.context.loadAlerts();assert.equal(sounds,1);
 });
 
 test('wallet metadata changes refresh the panel without replaying unchanged active alert sounds',async()=>{

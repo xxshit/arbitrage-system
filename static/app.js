@@ -532,6 +532,11 @@ function addDualBasisSortControls(){const button=byId('dual-futures')?.querySele
 function alertLabel(type){return type==='futures_pump'?'合约拉升':type==='spot_pump'?'现货拉升':type==='rapid_spread'?'开差速变':type==='rapid_basis'?'基差速变':type==='dual_spread_threshold'?'开差异动':type==='dual_basis_threshold'?'BN 基差异动':'基差异动'}
 function alertClass(type){return type==='futures_pump'?'futures':type==='spot_pump'?'spot':type==='rapid_spread'?'rapid-spread':type==='rapid_basis'?'rapid-basis':'basis'}
 function alertMetric(value){return value===null||value===undefined||!Number.isFinite(Number(value))?'—':percent(value)}
+function alertCompactMetric(value){
+  if(value===null||value===undefined||!Number.isFinite(Number(value)))return '—';
+  const rounded=Number(Number(value).toFixed(2));
+  return `${rounded>=0?'+':''}${rounded.toFixed(2)}%`;
+}
 function strategyLabel(strategy){return strategy==='futures_futures'?'期多期空':'现多期空'}
 function alertExchangeLeg(exchange,market,interval){return `<span>${exchangeName(exchange)} ${market}${interval?` <em class="interval-badge ${intervalClass(interval)}">${interval}H</em>`:''}</span>`}
 function alertExchangePair(item){return `<div class="alert-exchange-pair">${alertExchangeLeg(item.long_exchange,item.long_market,item.long_interval)}<b>→</b>${alertExchangeLeg(item.short_exchange,item.short_market,item.short_interval)}</div>`}
@@ -569,11 +574,11 @@ function toggleAlertMute(symbol,event){event?.stopPropagation();if(isAlertMuted(
 function renderAlertMuteList(){const target=byId('alertMuteList');if(!target)return;const muted=[...mutedAlertSymbols].sort();target.innerHTML=muted.length?muted.map(symbol=>`<button class="muted-symbol-pill" onclick="toggleAlertMute('${symbol}',event)">${symbol}<span>取消</span></button>`).join(''):'<p class="empty-alert">暂无静音币种。</p>'}
 function alertTimelineNode(item){
   const basis=item.basis_exchange==='Binance'?item.binance_basis:null;
-  return `<li class="alert-timeline-node ${alertClass(item.type)}"><time>${escapeChatHtml(item.created_at)}</time><div class="alert-event-context"><b>${alertLabel(item.type)}</b></div><span class="alert-event-metric ${changeClass(item.open_spread)}" data-label="开差">${alertMetric(item.open_spread)}</span><span class="alert-event-metric ${changeClass(basis)}" data-label="币安基差">${alertMetric(basis)}</span></li>`;
+  return `<li class="alert-timeline-node ${alertClass(item.type)}"><time>${escapeChatHtml(item.created_at)}</time><div class="alert-event-context"><b>${alertLabel(item.type)}</b></div><span class="alert-event-metric ${changeClass(item.open_spread)}" data-label="开差">${alertCompactMetric(item.open_spread)}</span><span class="alert-event-metric ${changeClass(basis)}" data-label="币安基差">${alertCompactMetric(basis)}</span></li>`;
 }
 function alertMetricRange(range){
   if(!Number.isFinite(range?.max)||!Number.isFinite(range?.min))return '<b class="alert-metric-range neutral">—</b>';
-  return `<b class="alert-metric-range" aria-label="最高 ${alertMetric(range.max)}，最低 ${alertMetric(range.min)}"><span class="${changeClass(range.max)}">${alertMetric(range.max)}</span><span class="alert-range-separator" aria-hidden="true">～</span><span class="${changeClass(range.min)}">${alertMetric(range.min)}</span></b>`;
+  return `<b class="alert-metric-range" aria-label="最高 ${alertCompactMetric(range.max)}，最低 ${alertCompactMetric(range.min)}"><span class="${changeClass(range.max)}">${alertCompactMetric(range.max)}</span><span class="alert-range-separator" aria-hidden="true">～</span><span class="${changeClass(range.min)}">${alertCompactMetric(range.min)}</span></b>`;
 }
 function alertPaths(group){return (Array.isArray(group?.paths)?group.paths:[]).filter(path=>path&&typeof path.id==='string'&&typeof path.strategy==='string')}
 function alertSelectedPath(group){return alertPaths(group).find(path=>path.id===alertDetailState.pathId)||null}
@@ -607,14 +612,9 @@ function alertDetailCard(group){
   const state=alertDetailState,path=alertSelectedPath(group),data=state.symbol===group.symbol&&state.data?.path_id===path?.id?state.data:null;
   return `<article class="alert-detail-card ${alertClass(path?.latest?.type||group.latest.type)}" aria-label="${escapeChatHtml(group.symbol)} 报警明细">${alertPathControls(group,path)}${alertTransferPanel(group,path)}<div class="alert-detail-metrics"><span title="所选策略及路径最近24小时确认报警样本的最高值～最低值，不混合其他交易所路径">24H开差范围 ${alertMetricRange(path?.value_ranges?.open_spread)}</span><span title="仅所选路径最近24小时确认报警样本中的币安合约标记价/指数基差；无币安端或缺失时不补零">24H币安基差范围 ${alertMetricRange(path?.basis_exchange==='Binance'?path.value_ranges?.basis:null)}</span></div><div class="alert-detail-status" role="status">${state.error?escapeChatHtml(state.error):''}</div><div class="alert-timeline-scroll" tabindex="0" role="region" aria-label="${escapeChatHtml(group.symbol)} 报警明细，可滚动"><div class="alert-timeline-head"><span>时间（UTC）</span><span>报警类型</span><span>开差</span><span>币安基差</span></div><ol class="alert-timeline">${data?.items?.length?data.items.map(alertTimelineNode).join(''):`<li class="empty-alert">${state.error?'读取失败，可重试；已有记录不会被清除。':!path?'暂无可用路径记录。':data?'最近24小时没有该路径的确认报警。':'正在读取该路径的报警时间线…'}</li>`}</ol></div><div class="alert-detail-pagination"><button type="button" onclick="loadSelectedAlertHistory(${Math.max(1,(data?.page||1)-1)},true)" ${!data||data.page<=1||state.loading?'disabled':''}>上一页</button><span>${data?`第 ${data.page} / ${data.pages} 页 · ${data.page_size}条/页`:'每页40条，全部可翻页'}</span><button type="button" onclick="loadSelectedAlertHistory(${(data?.page||1)+1},true)" ${!data||data.page>=data.pages||state.loading?'disabled':''}>下一页</button>${state.error?'<button type="button" onclick="loadSelectedAlertHistory()">重试</button>':''}</div></article>`;
 }
-function alertPeakMetric(value){
-  if(value===null||value===undefined||!Number.isFinite(Number(value)))return '—';
-  const rounded=Number(Number(value).toFixed(2));
-  return `${rounded>=0?'+':''}${rounded.toFixed(2)}%`;
-}
 function alertSymbolCard(group){
   const symbol=escapeChatHtml(group.symbol),peaks=group.move_peaks||{};
-  return `<article class="alert-symbol-option ${group.symbol===selectedAlertSymbol?'active':''} ${alertClass(group.latest.type)} ${isAlertMuted(group.symbol)?'muted-alert':''}" data-alert-symbol="${symbol}"><div class="alert-symbol-cell"><button type="button" class="alert-coin-select ${delistingSymbolClass(group.symbol)}" data-market-symbol="${symbol}" onclick="selectAlertSymbol(${alertActionSymbol(group.symbol)})" aria-label="${symbol}，${group.alert_count}次报警，查看详情" aria-pressed="${group.symbol===selectedAlertSymbol}">${symbol}</button></div><span class="alert-symbol-count">${group.alert_count}</span><span class="alert-symbol-peak ${changeClass(peaks.open_spread)}">${alertPeakMetric(peaks.open_spread)}</span><span class="alert-symbol-peak ${changeClass(peaks.basis)}">${alertPeakMetric(peaks.basis)}</span>${alertMuteButton(group.symbol)}</article>`;
+  return `<article class="alert-symbol-option ${group.symbol===selectedAlertSymbol?'active':''} ${alertClass(group.latest.type)} ${isAlertMuted(group.symbol)?'muted-alert':''}" data-alert-symbol="${symbol}"><div class="alert-symbol-cell"><button type="button" class="alert-coin-select ${delistingSymbolClass(group.symbol)}" data-market-symbol="${symbol}" onclick="selectAlertSymbol(${alertActionSymbol(group.symbol)})" aria-label="${symbol}，${group.alert_count}次报警，查看详情" aria-pressed="${group.symbol===selectedAlertSymbol}">${symbol}</button></div><span class="alert-symbol-count">${group.alert_count}</span><span class="alert-symbol-peak ${changeClass(peaks.open_spread)}">${alertCompactMetric(peaks.open_spread)}</span><span class="alert-symbol-peak ${changeClass(peaks.basis)}">${alertCompactMetric(peaks.basis)}</span>${alertMuteButton(group.symbol)}</article>`;
 }
 function visibleAlertGroups(groups=latestAlertGroups){
   const query=alertListQuery.toUpperCase().replace(/[\s/_-]/g,'');

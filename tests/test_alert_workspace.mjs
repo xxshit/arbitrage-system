@@ -36,15 +36,27 @@ test('compact coin rows contain name, count, mute and signed peaks but no timest
 
 test('roster peaks round to two decimals, normalize negative zero and preserve missing values',()=>{
   const h=harness();
-  for(const [value,expected] of [[-6.9763,'-6.98%'],[0.3789,'+0.38%'],[-76.7095,'-76.71%'],[10,'+10.00%'],[0,'+0.00%'],[-0.0001,'+0.00%'],[null,'—'],[undefined,'—'],[NaN,'—'],[Infinity,'—']])assert.equal(h.context.alertPeakMetric(value),expected);
+  for(const [value,expected] of [[-6.9763,'-6.98%'],[0.3789,'+0.38%'],[-76.7095,'-76.71%'],[10,'+10.00%'],[0,'+0.00%'],[-0.0001,'+0.00%'],[null,'—'],[undefined,'—'],[NaN,'—'],[Infinity,'—']])assert.equal(h.context.alertCompactMetric(value),expected);
 });
 
-test('roster rounding does not modify raw peaks, peak sorting or detailed metric precision',()=>{
+test('workspace rounding does not modify raw peaks, peak sorting or other percentage formatting',()=>{
   const h=harness(),first=group('FIRST/USDT',3,-6.9763,0.3789),second=group('SECOND/USDT',3,-6.9764,0.3791),original=JSON.stringify(first);
   const markup=h.context.alertSymbolCard(first);
   assert.ok(markup.includes('-6.98%'));assert.ok(markup.includes('+0.38%'));assert.equal(JSON.stringify(first),original);
   h.context.renderAlertMasterDetail([first,second]);h.context.sortAlertSymbols('open_spread');assert.equal(h.context.visibleAlertGroups()[0].symbol,'SECOND/USDT');
-  assert.equal(h.context.alertMetric(-6.9763),'-6.9763%');assert.ok(h.context.alertMetricRange({max:0.3789,min:-6.9763}).includes('+0.3789%'));
+  assert.equal(h.context.alertMetric(-6.9763),'-6.9763%');assert.ok(h.context.alertMetricRange({max:0.3789,min:-6.9763}).includes('+0.38%'));
+});
+
+test('detail rows round only their displayed spread and sourced Binance basis without changing raw values',()=>{
+  const h=harness(),row={...detail().items[0],open_spread:-76.7095,binance_basis:0.3789},original=JSON.stringify(row),markup=h.context.alertTimelineNode(row);
+  assert.ok(markup.includes('-76.71%'));assert.ok(markup.includes('+0.38%'));assert.ok(!markup.includes('-76.7095%'));assert.equal(JSON.stringify(row),original);
+  const missing=h.context.alertTimelineNode({...row,open_spread:null,binance_basis:undefined});assert.equal((missing.match(/>—<\/span>/g)||[]).length,2);assert.ok(!missing.includes('+0.00%'));
+});
+
+test('range endpoints and accessible labels share two decimals without mutating full precision bounds',()=>{
+  const h=harness(),range={max:1.36431,min:-2.62568},original=JSON.stringify(range),markup=h.context.alertMetricRange(range);
+  assert.ok(markup.includes('aria-label="最高 +1.36%，最低 -2.63%"'));assert.ok(markup.includes('>+1.36%</span>'));assert.ok(markup.includes('>-2.63%</span>'));assert.equal(JSON.stringify(range),original);
+  assert.ok(h.context.alertMetricRange({max:0.0049,min:-0.0049}).includes('最高 +0.00%，最低 +0.00%'));
 });
 
 test('all 168 coins are rendered without an 80-coin list or viewport limit',()=>{
@@ -113,7 +125,7 @@ test('a response for the wrong coin is never installed as the current history',a
 test('timeline omits the detail toggle and its message, close-spread and funding content entirely',()=>{
   const h=harness(),markup=h.context.alertTimelineNode({id:42,type:'rapid_basis',strategy:'spot_futures',created_at:'10-18 10:00',message:'<img onerror=alert(1)> hidden-message',long_exchange:'Gate',short_exchange:'Binance',open_spread:0.5,basis:-1,binance_basis:-1,basis_exchange:'Binance',close_spread:-0.6943,funding_rate:0.0035});
   for(const value of ['详细说明','<details','<summary','alert-event-message','ontoggle','hidden-message','<img onerror','平差','资费','-0.6943%','+0.0035%'])assert.ok(!markup.includes(value),value);
-  for(const value of ['10-18 10:00','基差速变','+0.5000%','-1.0000%'])assert.ok(markup.includes(value),value);
+  for(const value of ['10-18 10:00','基差速变','+0.50%','-1.00%'])assert.ok(markup.includes(value),value);
   for(const value of ['现多期空','Gate','Binance','alert-exchange-pair'])assert.ok(!markup.includes(value),value);
   assert.ok(!source.includes('setAlertMessageExpanded'));assert.ok(!source.includes('alertDetailState.expanded'));assert.ok(!css.includes('.alert-event-message'));
 });
@@ -152,9 +164,9 @@ test('detail omits repeated coin header, mute and normal status while keeping me
 
 test('detail ranges show the full-window maximum then minimum with independently signed colors',()=>{
   const h=harness();h.context.renderAlertMasterDetail([group()]);const markup=h.node('alertDetailPane').innerHTML;
-  assert.ok(markup.includes('最高 +10.0000%，最低 -50.0000%'));
-  assert.ok(markup.includes('<span class="positive">+10.0000%</span><span class="alert-range-separator" aria-hidden="true">～</span><span class="negative">-50.0000%</span>'));
-  assert.ok(markup.includes('最高 +3.0000%，最低 -2.0000%'));
+  assert.ok(markup.includes('最高 +10.00%，最低 -50.00%'));
+  assert.ok(markup.includes('<span class="positive">+10.00%</span><span class="alert-range-separator" aria-hidden="true">～</span><span class="negative">-50.00%</span>'));
+  assert.ok(markup.includes('最高 +3.00%，最低 -2.00%'));
   assert.ok(!markup.includes('24H开差峰值'));assert.ok(!markup.includes('24H基差峰值'));
   assert.ok(css.includes('.alert-metric-range {display:flex;align-items:baseline;flex-wrap:wrap;'));
 });
@@ -165,13 +177,13 @@ test('Binance range is explicitly labelled and never trusts an unspecified or di
   for(const exchange of [undefined,null,'Bybit','OKX']){
     const coin=group();coin.paths[0].basis_exchange=exchange;coin.value_ranges.basis={max:999,min:-999};h.context.renderAlertMasterDetail([coin]);markup=h.node('alertDetailPane').innerHTML;
     assert.ok(markup.includes('24H币安基差范围 <b class="alert-metric-range neutral">—</b>'));
-    assert.ok(!markup.includes('999.0000%'));assert.ok(markup.includes('最高 +10.0000%，最低 -50.0000%'));
+    assert.ok(!markup.includes('999.00%'));assert.ok(markup.includes('最高 +10.00%，最低 -50.00%'));
   }
 });
 
 test('ranges retain all-positive, all-negative, zero and equal endpoints without inventing another sign',()=>{
   const h=harness();
-  for(const [max,min,label] of [[5,1,'最高 +5.0000%，最低 +1.0000%'],[-1,-5,'最高 -1.0000%，最低 -5.0000%'],[0,0,'最高 +0.0000%，最低 +0.0000%'],[2,2,'最高 +2.0000%，最低 +2.0000%']])assert.ok(h.context.alertMetricRange({max,min}).includes(label));
+  for(const [max,min,label] of [[5,1,'最高 +5.00%，最低 +1.00%'],[-1,-5,'最高 -1.00%，最低 -5.00%'],[0,0,'最高 +0.00%，最低 +0.00%'],[2,2,'最高 +2.00%，最低 +2.00%']])assert.ok(h.context.alertMetricRange({max,min}).includes(label));
 });
 
 test('missing or non-finite ranges show an unavailable marker instead of zero or the legacy single peak',()=>{
@@ -183,7 +195,7 @@ test('missing or non-finite ranges show an unavailable marker instead of zero or
 test('a refreshed summary updates ranges without clearing the selected history page or scroll position',async()=>{
   const h=harness(async()=>detail('DEMO/USDT',2));h.context.renderAlertMasterDetail([group()]);await h.context.loadSelectedAlertHistory(2);h.scroll.scrollTop=210;
   const updated=group();updated.value_ranges.open_spread={max:2,min:-5};h.context.renderAlertMasterDetail([updated]);
-  assert.ok(h.node('alertDetailPane').innerHTML.includes('最高 +2.0000%，最低 -5.0000%'));assert.ok(!h.node('alertDetailPane').innerHTML.includes('最高 +10.0000%，最低 -50.0000%'));
+  assert.ok(h.node('alertDetailPane').innerHTML.includes('最高 +2.00%，最低 -5.00%'));assert.ok(!h.node('alertDetailPane').innerHTML.includes('最高 +10.00%，最低 -50.00%'));
   assert.equal(h.run('selectedAlertSymbol'),'DEMO/USDT');assert.equal(h.run('alertDetailState.data.page'),2);assert.equal(h.scroll.scrollTop,210);
 });
 
@@ -297,7 +309,7 @@ test('two strategies have separate path menus and switching resets page and time
 test('path-specific ranges and wallet statuses never borrow a different venue or global aggregate',async()=>{
   const h=harness(),coin=group(),bitget=addPath(coin);coin.transfer_statuses=[wallet(),wallet('Bitget',{chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}]}),wallet('Binance',{state:'unknown',chains:[]})];
   h.context.renderAlertMasterDetail([coin]);await h.context.setAlertPath(bitget.id);const markup=h.node('alertDetailPane').innerHTML;
-  assert.ok(markup.includes('最高 +2.0000%，最低 -1.0000%'));assert.ok(!markup.includes('最高 +10.0000%，最低 -50.0000%'));
+  assert.ok(markup.includes('最高 +2.00%，最低 -1.00%'));assert.ok(!markup.includes('最高 +10.00%，最低 -50.00%'));
   assert.equal((markup.match(/class="transfer-status-control/g)||[]).length,2);assert.ok(markup.includes('充提正常'));assert.ok(!markup.includes('充提异常'));assert.ok(!markup.includes('<b>Gate</b>'));
 });
 
@@ -310,8 +322,8 @@ test('every filtered request carries strategy and exact directional path, not ju
 test('a non-Binance path and its legacy zero or foreign basis samples display unavailable',async()=>{
   const h=harness(),coin=group(),path=addPath(coin,'futures_futures','Bybit','OKX');path.value_ranges.basis={max:999,min:0};coin.paths=[path];h.context.renderAlertMasterDetail([coin]);await h.context.loadSelectedAlertHistory();
   assert.ok(h.node('alertDetailPane').innerHTML.includes('24H币安基差范围 <b class="alert-metric-range neutral">—</b>'));
-  for(const source of [undefined,null,'Bybit']){const markup=h.context.alertTimelineNode({...detail().items[0],basis:0,binance_basis:999,basis_exchange:source});assert.ok(!markup.includes('999.0000%'));assert.ok(!markup.includes('+0.0000%'))}
-  assert.ok(h.context.alertTimelineNode({...detail().items[0],binance_basis:0,basis_exchange:'Binance'}).includes('+0.0000%'));
+  for(const source of [undefined,null,'Bybit']){const markup=h.context.alertTimelineNode({...detail().items[0],basis:0,binance_basis:999,basis_exchange:source});assert.ok(!markup.includes('999.00%'));assert.ok(!markup.includes('+0.00%'))}
+  assert.ok(h.context.alertTimelineNode({...detail().items[0],binance_basis:0,basis_exchange:'Binance'}).includes('+0.00%'));
 });
 
 test('rapid same-coin path changes reject old responses even when switching back to the first path',async()=>{
@@ -332,13 +344,13 @@ test('wrong-path responses or individual rows are rejected even if they name the
 test('refreshes preserve the selected path and page, then remove expired choices without stale data',async()=>{
   const h=harness(),coin=group(),other=addPath(coin);h.context.renderAlertMasterDetail([coin]);await h.context.setAlertPath(other.id);await h.context.loadSelectedAlertHistory(2);h.scroll.scrollTop=217;
   const updated=structuredClone(coin);updated.paths.reverse();updated.paths[0].value_ranges.open_spread={max:4,min:-3};h.context.renderAlertMasterDetail([updated]);
-  assert.equal(h.run('alertDetailState.pathId'),other.id);assert.equal(h.run('alertDetailState.data.page'),2);assert.equal(h.scroll.scrollTop,217);assert.ok(h.node('alertDetailPane').innerHTML.includes('最高 +4.0000%，最低 -3.0000%'));
+  assert.equal(h.run('alertDetailState.pathId'),other.id);assert.equal(h.run('alertDetailState.data.page'),2);assert.equal(h.scroll.scrollTop,217);assert.ok(h.node('alertDetailPane').innerHTML.includes('最高 +4.00%，最低 -3.00%'));
   updated.paths=updated.paths.filter(path=>path.id!==other.id);h.context.renderAlertMasterDetail([updated]);assert.equal(h.run('alertDetailState.pathId'),coin.paths[0].id);assert.equal(h.run('alertDetailState.data'),null);assert.equal(h.scroll.scrollTop,0);
 });
 
 test('missing path metadata cannot re-enable globally mixed ranges or fake paths',async()=>{
   const h=harness(),coin=group();delete coin.paths;h.context.renderAlertMasterDetail([coin]);assert.equal(await h.context.loadSelectedAlertHistory(),false);
-  const markup=h.node('alertDetailPane').innerHTML;assert.ok(markup.includes('暂无可用路径记录'));assert.ok(!markup.includes('最高 +10.0000%'));assert.ok(!markup.includes('id="alertPathSelect"'));
+  const markup=h.node('alertDetailPane').innerHTML;assert.ok(markup.includes('暂无可用路径记录'));assert.ok(!markup.includes('最高 +10.00%'));assert.ok(!markup.includes('id="alertPathSelect"'));
 });
 
 test('path menu escapes untrusted labels and identities and missing venues remain explicitly unrecorded',()=>{

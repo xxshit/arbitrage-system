@@ -289,13 +289,10 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 .transfer-closed {color:#d63b3b}
 .transfer-unknown,.transfer-delayed,.transfer-data-note {color:#936b16}
 .transfer-data-note {font-size:10px;overflow-wrap:anywhere}
-.transfer-updated {font-size:9px;color:#7c8c83;overflow-wrap:anywhere}
 .transfer-chain-list {display:flex;flex-wrap:wrap;align-items:baseline;gap:5px;min-width:0}
 .transfer-popup {max-width:min(480px,calc(100vw - 24px));max-height:min(360px,calc(100vh - 24px));overflow:auto;box-sizing:border-box;white-space:normal}
 .layout-view#alerts .alert-transfer-panel {display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 9px;flex:0 0 auto;max-height:132px;overflow:auto;min-width:0;margin:0 0 7px;padding:5px 6px;border:1px solid #dfe7dc;border-radius:4px;background:#f7faf3;box-sizing:border-box}
-.layout-view#alerts .alert-transfer-heading {font-size:10px;color:#6b7e7c}
 .layout-view#alerts .alert-transfer-panel.has-restriction {border-color:#edc5bc;background:#fff8f4}
-.layout-view#alerts .alert-transfer-panel.has-restriction .alert-transfer-heading {color:#b34a34}
 .layout-view#alerts .alert-transfer-exchanges {display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;min-width:0}
 .layout-view#alerts .alert-transfer-exchange {display:flex;flex-wrap:wrap;align-items:baseline;gap:3px 5px;min-width:0;font-size:10px;overflow-wrap:anywhere}
 .layout-view#alerts .alert-transfer-exchange > b {color:#49616a;font-size:10px}

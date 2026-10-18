@@ -323,12 +323,13 @@ function transferHasRestriction(status){return status?.state==='fresh'&&transfer
 function transferStatusMarkup(status={}){
   status=status&&typeof status==='object'?status:{};
   const fresh=status.state==='fresh',chains=transferChains(status),reasonText=String(status.reason||'当前状态未知'),reason=escapeChatHtml(reasonText),captureText=String(status.captured_at||''),updated=escapeChatHtml(captureText),source=escapeChatHtml(status.source_url||'');
+  const provenance=`${updated?`；快照采集：${updated}`:''}${source?`；来源：${source}`:''}；非历史报警发生时状态`;
   const chainMarkup=chains.map(chain=>{
     const deposit=fresh?chain.deposit_open:null,withdraw=fresh?chain.withdraw_open:null,delayed=fresh&&withdraw!==false&&chain.withdraw_delayed===true;
-    return `<span class="transfer-network-chip" title="${fresh?'该交易所该链的现货充提状态':`当前未知；上次快照：充${transferFlagText(chain.deposit_open)}、提${transferFlagText(chain.withdraw_open)}`}；${updated}"><b>${escapeChatHtml(chain.name||'未知链')}</b><i class="${transferFlagClass(deposit)}">充${transferFlagText(deposit)}</i><i class="${delayed?'transfer-delayed':transferFlagClass(withdraw)}">提${delayed?'延迟':transferFlagText(withdraw)}</i></span>`;
+    return `<span class="transfer-network-chip" title="${fresh?'该交易所该链的现货充提状态':`当前未知；上次快照：充${transferFlagText(chain.deposit_open)}、提${transferFlagText(chain.withdraw_open)}`}${provenance}"><b>${escapeChatHtml(chain.name||'未知链')}</b><i class="${transferFlagClass(deposit)}">充${transferFlagText(deposit)}</i><i class="${delayed?'transfer-delayed':transferFlagClass(withdraw)}">提${delayed?'延迟':transferFlagText(withdraw)}</i></span>`;
   }).join('');
-  const note=!fresh||!chains.length?`<span class="transfer-data-note" title="${reason}">${status.state==='stale'?'快照过期':'充提未知'}${!chains.length&&reasonText.includes('未接入')?' · 未接入':''}</span>`:'';
-  return `${note}${chainMarkup}${updated?`<time class="transfer-updated" title="快照采集：${updated}；来源：${source}；非历史报警发生时状态">${status.state==='stale'?updated:escapeChatHtml(captureText.slice(6,11))+' UTC'}</time>`:''}`;
+  const note=!fresh||!chains.length?`<span class="transfer-data-note" title="${reason}${provenance}">${status.state==='stale'?'快照过期':'充提未知'}${!chains.length&&reasonText.includes('未接入')?' · 未接入':''}</span>`:'';
+  return `${note}${chainMarkup}`;
 }
 function spotTransferStatus(row){
   const status=row.transfer_status||{state:'unknown',reason:'充提状态尚未读取',chains:[]},chains=transferChains(status),fresh=status.state==='fresh';
@@ -524,7 +525,7 @@ function alertMetricRange(range){
 function alertTransferPanel(group){
   const priority=status=>transferHasRestriction(status)?0:status.state==='fresh'?1:status.state==='stale'?2:3;
   const statuses=(Array.isArray(group.transfer_statuses)?group.transfer_statuses:[]).filter(status=>status&&typeof status==='object').slice().sort((a,b)=>priority(a)-priority(b)),restricted=statuses.some(transferHasRestriction);
-  return `<section class="alert-transfer-panel ${restricted?'has-restriction':''}" tabindex="0" role="region" aria-label="${escapeChatHtml(group.symbol)} 当前现货充提快照，非历史报警时状态"><span class="alert-transfer-heading" title="按交易所逐链显示当前现货通道；独立同步，不随5秒行情实时更新；充提关闭不等同于公链停机或已确认价格脱钩">当前充提${restricted?' · 受限，价差需复核':''}</span><div class="alert-transfer-exchanges">${statuses.length?statuses.map(status=>`<div class="alert-transfer-exchange"><b>${escapeChatHtml(status.exchange)}</b>${transferStatusMarkup(status)}</div>`).join(''):'<span class="transfer-data-note">充提未知 · 尚未读取</span>'}</div></section>`;
+  return `<section class="alert-transfer-panel ${restricted?'has-restriction':''}" tabindex="0" role="region" aria-label="${escapeChatHtml(group.symbol)} 当前现货充提快照，非历史报警时状态" title="${restricted?'通道受限，价差需复核；':''}按交易所逐链显示该币种现货通道；独立同步，不随5秒行情实时更新；充提关闭不等同于公链停机或已确认价格脱钩"><div class="alert-transfer-exchanges">${statuses.length?statuses.map(status=>`<div class="alert-transfer-exchange"><b>${escapeChatHtml(status.exchange)}</b>${transferStatusMarkup(status)}</div>`).join(''):'<span class="transfer-data-note">充提未知 · 尚未读取</span>'}</div></section>`;
 }
 function alertDetailCard(group){
   const latest=group.latest,data=alertDetailState.symbol===group.symbol?alertDetailState.data:null,state=alertDetailState;
@@ -557,8 +558,11 @@ function sortAlertSymbols(value){alertListSort=['latest','count','open_spread','
 function renderAlertDetailPane(){
   const group=latestAlertGroups.find(item=>item.symbol===selectedAlertSymbol),pane=byId('alertDetailPane');if(!pane)return;
   const top=pane.querySelector('.alert-timeline-scroll')?.scrollTop||0;
+  const transferTop=pane.dataset.alertSymbol===group?.symbol?pane.querySelector('.alert-transfer-panel')?.scrollTop||0:0;
   replaceHtmlKeepingExchangeLogos(pane,group?alertDetailCard(group):'<p class="empty-alert">选择左侧币种查看最近24小时的报警明细。</p>');
+  pane.dataset.alertSymbol=group?.symbol||'';
   const scroll=pane.querySelector('.alert-timeline-scroll');if(scroll)scroll.scrollTop=top;
+  const transferPanel=pane.querySelector('.alert-transfer-panel');if(transferPanel)transferPanel.scrollTop=transferTop;
 }
 function renderAlertMasterDetail(groups){
   latestAlertGroups=groups;

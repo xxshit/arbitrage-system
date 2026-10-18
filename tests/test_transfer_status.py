@@ -65,6 +65,29 @@ class TransferStatusTests(unittest.TestCase):
         self.assertEqual(parsed["RBIIB/USDT"][0]["withdraw_open"], False)
         self.assertIsNone(parsed["RBIIB/USDT"][1]["withdraw_open"])
 
+    def test_all_source_chains_survive_parse_storage_and_api_without_filtering_or_cap(self):
+        names = [f"SYNTHETIC-NETWORK-{index:02d}" for index in range(30)]
+        with module.app.app_context():
+            for exchange in ("Gate", "Bitget"):
+                raw_chains = [({"name": name, "deposit_disabled": index % 3 == 0, "withdraw_disabled": index % 2 == 0} if exchange == "Gate" else {"chain": name, "rechargeable": "false" if index % 3 == 0 else "true", "withdrawable": "false" if index % 2 == 0 else "true"}) for index, name in enumerate(names)]
+                payload = [{"currency": "MANY", "chains": raw_chains}] if exchange == "Gate" else {"code": "00000", "data": [{"coin": "MANY", "chains": raw_chains}]}
+                parsed = module.parse_transfer_networks(exchange, payload)
+                module.store_transfer_networks(exchange, parsed)
+                status = self.status("MANY/USDT", exchange)
+                self.assertEqual(status["chains"], parsed["MANY/USDT"])
+                self.assertEqual([chain["name"] for chain in status["chains"]], names)
+                module.db.session.add(module.AlertEvent(symbol="MANY/USDT", strategy="spot_futures", alert_type="rapid_basis", message=f"{exchange} 确认后的合成报警", long_exchange=exchange, short_exchange="Binance", basis=1.2, created_at=self.now))
+            module.db.session.commit()
+        with patch.object(module, "is_rwa_stock_pair", return_value=False), patch.object(module, "get_json", side_effect=AssertionError("summary must not fetch upstream")):
+            response = self.client.get("/api/alerts?view=summary")
+        self.assertEqual(response.status_code, 200)
+        statuses = {status["exchange"]: status for status in response.get_json()["events"][0]["transfer_statuses"]}
+        for exchange in ("Gate", "Bitget"):
+            self.assertEqual(len(statuses[exchange]["chains"]), 30)
+            self.assertEqual([chain["name"] for chain in statuses[exchange]["chains"]], names)
+            self.assertIs(statuses[exchange]["chains"][0]["deposit_open"], False)
+        self.assertEqual(statuses["Binance"]["chains"], [])
+
     def test_invalid_or_failed_lists_raise_instead_of_refreshing_old_data_as_success(self):
         for exchange, payload in [("Gate", []), ("Gate", {}), ("Gate", [{"currency": "X", "chains": ["bad"]}]), ("Bitget", {"code": "40000", "data": []}), ("Bitget", {"code": "00000", "data": []})]:
             with self.subTest(exchange=exchange, payload=payload), self.assertRaises(ValueError):

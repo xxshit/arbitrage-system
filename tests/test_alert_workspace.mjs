@@ -14,13 +14,13 @@ const group=(symbol='DEMO/USDT',count=3,spread=1,basis=2)=>({symbol,alert_count:
 const detail=(symbol='DEMO/USDT',page=1)=>({symbol,total:43,page,pages:2,page_size:40,items:[{id:page,symbol,type:'rapid_basis',created_at:'10-18 10:00:00',message:'Synthetic detail',open_spread:0.5,basis:1}]});
 
 function harness(fetcher=async url=>detail(new URL(url,'https://example.test').searchParams.get('symbol'))){
-  const nodes=new Map(),scroll={scrollTop:0};
-  const node=id=>{if(!nodes.has(id))nodes.set(id,{id,textContent:'',innerHTML:'',scrollTop:0,querySelector:()=>scroll,scrollIntoView(){}});return nodes.get(id)};
+  const nodes=new Map(),scroll={scrollTop:0},transferScroll={scrollTop:0};
+  const node=id=>{if(!nodes.has(id))nodes.set(id,{id,textContent:'',innerHTML:'',scrollTop:0,dataset:{},querySelector:selector=>selector==='.alert-transfer-panel'?transferScroll:scroll,scrollIntoView(){}});return nodes.get(id)};
   const context={URLSearchParams,console,window:{innerWidth:1280},byId:node,escapeChatHtml:escape,delistingSymbolClass:()=>'',changeClass:value=>value<0?'negative':'positive',percent:value=>(value>=0?'+':'')+Number(value).toFixed(4)+'%',intervalClass:()=>'',exchangeName:escape,fetchRefreshJson:fetcher,renderTipsItems(){},
     replaceHtmlKeepingExchangeLogos:(target,markup)=>{if(target.innerHTML!==markup)target.innerHTML=markup}};
   vm.createContext(context);
   vm.runInContext("let mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+transferHelpers+'\n'+helpers+'\n'+functions,context);
-  return {context,node,scroll,run:code=>vm.runInContext(code,context)};
+  return {context,node,scroll,transferScroll,run:code=>vm.runInContext(code,context)};
 }
 
 test('compact coin rows contain name, count, mute and signed peaks but no timestamps or large metadata cards',()=>{
@@ -173,8 +173,38 @@ const wallet=(exchange='Gate',overrides={})=>({exchange,state:'fresh',chains:[{n
 test('wallet panel groups exchanges once per coin rather than repeating statuses on every historical event',async()=>{
   const h=harness(),coin=group();coin.transfer_statuses=[wallet(),wallet('Binance',{state:'unknown',chains:[],reason:'尚未接入该交易所的账户只读充提接口'})];h.context.renderAlertMasterDetail([coin]);await h.context.loadSelectedAlertHistory();
   const markup=h.node('alertDetailPane').innerHTML;assert.equal((markup.match(/class="alert-transfer-panel/g)||[]).length,1);
-  for(const text of ['当前充提','受限，价差需复核','Gate','BSC','充关','提开','Binance','充提未知 · 未接入','非历史报警时状态','11:30 UTC'])assert.ok(markup.includes(text),text);
+  for(const text of ['受限，价差需复核','Gate','BSC','充关','提开','Binance','充提未知 · 未接入','非历史报警时状态','快照采集：10-18 11:30:00 UTC'])assert.ok(markup.includes(text),text);
   assert.ok(!markup.includes('详细说明'));assert.ok(!h.context.alertTimelineNode(detail().items[0]).includes('transfer-network-chip'));
+});
+
+test('wallet strips omit the heading and visible capture times without discarding freshness provenance',()=>{
+  const h=harness();
+  for(const state of ['fresh','stale','unknown']){
+    const coin=group();coin.transfer_statuses=[wallet('Gate',{state,source_url:'https://api.gateio.ws/api/v4/spot/currencies'})];
+    const markup=h.context.alertTransferPanel(coin),visible=markup.replace(/<[^>]*>/g,'');
+    for(const unwanted of ['当前充提','UTC','11:30','快照采集'])assert.ok(!visible.includes(unwanted),`${state}: ${unwanted}`);
+    assert.ok(!markup.includes('<time'));assert.ok(!markup.includes('alert-transfer-heading'));assert.ok(!markup.includes('transfer-updated'));
+    assert.ok(markup.includes('快照采集：10-18 11:30:00 UTC'));assert.ok(markup.includes('来源：https://api.gateio.ws/api/v4/spot/currencies'));
+    assert.ok(visible.includes(state==='fresh'?'充关':'充未知'));
+  }
+  assert.ok(!css.includes('.transfer-updated'));assert.ok(!css.includes('.alert-transfer-heading'));
+});
+
+test('every source chain remains visible per exchange with no first-chain, open-only or short-list cap',()=>{
+  const h=harness(),coin=group(),chains=(prefix,count)=>Array.from({length:count},(_,i)=>({name:`${prefix}-NETWORK-${i}`,deposit_open:i%3===0?false:i%3===1?true:null,withdraw_open:i%2===0}));
+  coin.transfer_statuses=[wallet('Gate',{chains:chains('GATE',30)}),wallet('Bitget',{chains:chains('BITGET',21)}),wallet('Binance',{state:'unknown',chains:[],reason:'尚未接入账户只读充提接口'})];
+  const markup=h.context.alertTransferPanel(coin);
+  assert.equal((markup.match(/class="transfer-network-chip"/g)||[]).length,51);
+  for(const [prefix,count] of [['GATE',30],['BITGET',21]])for(let i=0;i<count;i++)assert.ok(markup.includes(`<b>${prefix}-NETWORK-${i}</b>`));
+  assert.ok(markup.includes('充关'));assert.ok(markup.includes('充开'));assert.ok(markup.includes('充未知'));assert.ok(markup.includes('提关'));
+  const missing=h.context.transferStatusMarkup(wallet('Binance',{state:'unknown',chains:[]}));assert.ok(!missing.includes('transfer-network-chip'));
+});
+
+test('multi-chain reading position survives summary and detail rerenders but resets for another coin',async()=>{
+  const h=harness();h.context.renderAlertMasterDetail([group(),group('OTHER/USDT')]);h.transferScroll.scrollTop=240;h.scroll.scrollTop=180;
+  await h.context.loadSelectedAlertHistory();assert.equal(h.transferScroll.scrollTop,240);assert.equal(h.scroll.scrollTop,180);
+  h.context.renderAlertMasterDetail([group(),group('OTHER/USDT')]);assert.equal(h.transferScroll.scrollTop,240);
+  h.context.selectAlertSymbol('OTHER/USDT');assert.equal(h.transferScroll.scrollTop,0);
 });
 
 test('per-chain labels never collapse partial closures into a claim that every chain is closed',()=>{

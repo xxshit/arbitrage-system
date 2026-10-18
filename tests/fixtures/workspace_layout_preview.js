@@ -24,14 +24,22 @@
   const event = {id:1,symbol:'DEMO/USDT',strategy:'spot_futures',type:'rapid_basis',message:'合成报警：连续两次确认后的基差变化，仅用于布局和详细说明测试。',basis:1.4,open_spread:0.85,close_spread:-0.93,created_at:stamp,
     long_exchange:'Gate',short_exchange:'Binance',long_market:'现货',short_market:'合约',short_interval:4,funding_interval_hours:4,remaining_seconds:90,expires_at_epoch:now()+90};
   const alertGroups = [...symbols,...Array.from({length:164},(_,i)=>`TESTCOIN${String(i+1).padStart(3,'0')}/USDT`)].map((symbol,index) => {
-    const timeline=Array.from({length:index?3:93},(_,i)=>({...event,id:index*100+i+1,symbol,strategy:i%2?'futures_futures':'spot_futures',long_exchange:i%2?'Bybit':'Gate',long_market:i%2?'合约':'现货',long_interval:i%2?4:null,created_at:`10-18 ${String(10-Math.floor(i/12)).padStart(2,'0')}:${String(59-i%12*5).padStart(2,'0')}:00`,open_spread:i%2?-0.8512:0.8534,basis:i%2?-1.4012:1.4034}));
+    const timeline=Array.from({length:index?3:93},(_,i)=>{
+      const strategy=index===1||index===2?'spot_futures':index===3||i%2?'futures_futures':'spot_futures',isSpot=strategy==='spot_futures';
+      const long_exchange=isSpot?((index===0&&[20,22].includes(i))||(index===2&&i===2)?'Bitget':'Gate'):'Bybit',short_exchange=!isSpot&&(index===3||[3,7].includes(i))?'OKX':'Binance';
+      return {...event,id:index*100+i+1,symbol,strategy,long_exchange,short_exchange,long_market:isSpot?'现货':'合约',long_interval:isSpot?null:4,created_at:`10-18 ${String(10-Math.floor(i/12)).padStart(2,'0')}:${String(59-i%12*5).padStart(2,'0')}:00`,open_spread:i%2?-0.8512:0.8534,basis:i%2?-1.4012:1.4034,path_id:JSON.stringify([strategy,long_exchange,short_exchange])};
+    });
     if(index===0){Object.assign(timeline[91],{open_spread:10.1234,basis:2.277});Object.assign(timeline[92],{open_spread:-50.5678,basis:-7.8047})}
     const value_ranges=Object.fromEntries(['open_spread','basis'].map(field=>{const values=timeline.map(item=>item[field]);return [field,{max:Math.max(...values),min:Math.min(...values)}]}));
     const move_peaks=Object.fromEntries(Object.entries(value_ranges).map(([field,{max,min}])=>[field,Math.abs(max)>=Math.abs(min)?max:min]));
     const transfer_statuses=[wallet('Gate',{chains:[{name:'BSC',deposit_open:index===1,withdraw_open:true},{name:'ETH',deposit_open:true,withdraw_open:false}]}),wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC',chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}],reason:'快照已过期'}),wallet('Binance',{state:'unknown',chains:[],captured_at:null,reason:'尚未接入账户只读充提接口'})];
     if(index===1){transfer_statuses[0].chains.forEach(chain=>{chain.deposit_open=true;chain.withdraw_open=true});Object.assign(transfer_statuses[1],{state:'fresh',reason:''})}
     if(index===2)for(const [offset,count] of [[0,30],[1,21]])Object.assign(transfer_statuses[offset],{state:'fresh',reason:'',chains:Array.from({length:count},(_,i)=>({name:`SYNTHETIC-${offset}-NETWORK-${String(i+1).padStart(2,'0')}`,deposit_open:i%3===0?false:i%3===1?true:null,withdraw_open:i%2===0}))});
-    return {symbol,alert_count:timeline.length,latest:timeline[0],timeline,move_peaks,value_ranges,basis_exchange:'Binance',transfer_statuses};
+    transfer_statuses.push(...['Bybit','OKX'].map(exchange=>wallet(exchange,{state:'unknown',chains:[],reason:'尚未接入账户只读充提接口'})));
+    timeline.forEach(item=>{item.binance_basis=item.short_exchange==='Binance'?item.basis:null;item.basis_exchange=item.binance_basis===null?null:'Binance'});
+    const buckets=new Map();timeline.forEach(item=>{if(!buckets.has(item.path_id))buckets.set(item.path_id,[]);buckets.get(item.path_id).push(item)});
+    const paths=[...buckets].map(([id,items])=>({id,strategy:items[0].strategy,long_exchange:items[0].long_exchange,short_exchange:items[0].short_exchange,long_market:items[0].long_market,short_market:'合约',alert_count:items.length,latest:items[0],basis_exchange:items[0].basis_exchange,value_ranges:Object.fromEntries(['open_spread','basis'].map(field=>{const values=items.map(item=>field==='basis'?item.binance_basis:item[field]).filter(value=>value!==null);return [field,{max:values.length?Math.max(...values):null,min:values.length?Math.min(...values):null}]}))}));
+    return {symbol,alert_count:timeline.length,latest:timeline[0],timeline,move_peaks,value_ranges,basis_exchange:'Binance',transfer_statuses,paths};
   });
   const plans = symbols.slice(0,2).map((symbol,index) => ({id:index+1,symbol,direction:index?'short':'long',status:'open',horizon:'short',pnl:1.8,
     leverage:1,entry_price:1.23,current_price:1.25,stop_price:1.16,take_profit_1:1.35,take_profit_2:1.42,max_hold_minutes:60,thesis:'合成样本，用于检查长说明、多腿数值和详细记录的布局。'}));
@@ -104,8 +112,8 @@
     const payload = structuredClone(fixtures[path]);
     if(path==='/api/alerts'){
       if(url.searchParams.get('view')==='detail'){
-        const symbol=url.searchParams.get('symbol'),group=alertGroups.find(item=>item.symbol===symbol),items=group?.timeline||[],size=Math.min(100,Number(url.searchParams.get('page_size'))||40),pages=Math.max(1,Math.ceil(items.length/size)),page=Math.min(pages,Number(url.searchParams.get('page'))||1);
-        return Response.json({symbol,items:items.slice((page-1)*size,page*size),total:items.length,page,pages,page_size:size,window_hours:24,checked_at_epoch:now()});
+        const symbol=url.searchParams.get('symbol'),strategy=url.searchParams.get('strategy')||null,path_id=url.searchParams.get('path')||null,group=alertGroups.find(item=>item.symbol===symbol),items=(group?.timeline||[]).filter(item=>(!strategy||item.strategy===strategy)&&(!path_id||item.path_id===path_id)),size=Math.min(100,Number(url.searchParams.get('page_size'))||40),pages=Math.max(1,Math.ceil(items.length/size)),page=Math.min(pages,Number(url.searchParams.get('page'))||1);
+        return Response.json({symbol,strategy,path_id,items:items.slice((page-1)*size,page*size),total:items.length,page,pages,page_size:size,window_hours:24,checked_at_epoch:now()});
       }
       payload.events.forEach(group=>group.timeline=[]);payload.window_hours=24;payload.total_symbols=alertGroups.length;payload.total_alerts=alertGroups.reduce((sum,group)=>sum+group.alert_count,0);
     }

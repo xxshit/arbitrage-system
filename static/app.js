@@ -98,7 +98,7 @@ let alertListQuery = '';
 let alertListSort = 'latest';
 let alertDetailVersion = 0;
 let alertDetailRequest = null;
-let alertDetailState = {symbol:'',data:null,loading:false,error:''};
+let alertDetailState = {symbol:'',strategy:'',pathId:'',data:null,loading:false,error:''};
 let alarmSoundEnabled = localStorage.getItem('arbi-alarm-sound') === 'on';
 const savedChatSoundSetting=localStorage.getItem('arbi-chat-sound');
 let chatSoundEnabled=savedChatSoundSetting===null?alarmSoundEnabled:savedChatSoundSetting==='on';
@@ -531,7 +531,7 @@ function addDualLiquidityHeader(){const table=byId('dual-futures')?.querySelecto
 function addDualBasisSortControls(){const button=byId('dual-futures')?.querySelector('[data-dual-sort="binance_basis"]');if(!button||button.closest('.basis-sort-controls'))return;const wrapper=document.createElement('div');wrapper.className='basis-sort-controls';wrapper.innerHTML='<span>合约基差</span><div><button class="dual-sort-header" data-dual-sort="binance_basis" onclick="setDualSort(\'binance_basis\')">BN</button><button class="dual-sort-header" data-dual-sort="bybit_basis" onclick="setDualSort(\'bybit_basis\')">BY</button><button class="dual-sort-header" data-dual-sort="okx_basis" onclick="setDualSort(\'okx_basis\')">OK</button></div>';button.replaceWith(wrapper)}
 function alertLabel(type){return type==='futures_pump'?'合约拉升':type==='spot_pump'?'现货拉升':type==='rapid_spread'?'开差速变':type==='rapid_basis'?'基差速变':type==='dual_spread_threshold'?'开差异动':type==='dual_basis_threshold'?'BN 基差异动':'基差异动'}
 function alertClass(type){return type==='futures_pump'?'futures':type==='spot_pump'?'spot':type==='rapid_spread'?'rapid-spread':type==='rapid_basis'?'rapid-basis':'basis'}
-function alertMetric(value){return value===null||value===undefined?'—':percent(value)}
+function alertMetric(value){return value===null||value===undefined||!Number.isFinite(Number(value))?'—':percent(value)}
 function strategyLabel(strategy){return strategy==='futures_futures'?'期多期空':'现多期空'}
 function alertExchangeLeg(exchange,market,interval){return `<span>${exchangeName(exchange)} ${market}${interval?` <em class="interval-badge ${intervalClass(interval)}">${interval}H</em>`:''}</span>`}
 function alertExchangePair(item){return `<div class="alert-exchange-pair">${alertExchangeLeg(item.long_exchange,item.long_market,item.long_interval)}<b>→</b>${alertExchangeLeg(item.short_exchange,item.short_market,item.short_interval)}</div>`}
@@ -568,20 +568,44 @@ function pruneAlertMutes(groups,activeEvents){const visible=new Set([...(groups|
 function toggleAlertMute(symbol,event){event?.stopPropagation();if(isAlertMuted(symbol))mutedAlertSymbols.delete(symbol);else mutedAlertSymbols.add(symbol);renderAlertMasterDetail(latestAlertGroups);renderAlertMuteList();renderTipsItems(latestActiveAlertEvents)}
 function renderAlertMuteList(){const target=byId('alertMuteList');if(!target)return;const muted=[...mutedAlertSymbols].sort();target.innerHTML=muted.length?muted.map(symbol=>`<button class="muted-symbol-pill" onclick="toggleAlertMute('${symbol}',event)">${symbol}<span>取消</span></button>`).join(''):'<p class="empty-alert">暂无静音币种。</p>'}
 function alertTimelineNode(item){
-  return `<li class="alert-timeline-node ${alertClass(item.type)}"><time>${escapeChatHtml(item.created_at)}</time><div class="alert-event-context"><b>${strategyLabel(item.strategy)} · ${alertLabel(item.type)}</b>${alertExchangePair(item)}</div><span class="alert-event-metric ${changeClass(item.open_spread)}" data-label="开差">${alertMetric(item.open_spread)}</span><span class="alert-event-metric ${changeClass(item.basis)}" data-label="基差">${alertMetric(item.basis)}</span></li>`;
+  const basis=item.basis_exchange==='Binance'?item.binance_basis:null;
+  return `<li class="alert-timeline-node ${alertClass(item.type)}"><time>${escapeChatHtml(item.created_at)}</time><div class="alert-event-context"><b>${alertLabel(item.type)}</b></div><span class="alert-event-metric ${changeClass(item.open_spread)}" data-label="开差">${alertMetric(item.open_spread)}</span><span class="alert-event-metric ${changeClass(basis)}" data-label="币安基差">${alertMetric(basis)}</span></li>`;
 }
 function alertMetricRange(range){
   if(!Number.isFinite(range?.max)||!Number.isFinite(range?.min))return '<b class="alert-metric-range neutral">—</b>';
   return `<b class="alert-metric-range" aria-label="最高 ${alertMetric(range.max)}，最低 ${alertMetric(range.min)}"><span class="${changeClass(range.max)}">${alertMetric(range.max)}</span><span class="alert-range-separator" aria-hidden="true">～</span><span class="${changeClass(range.min)}">${alertMetric(range.min)}</span></b>`;
 }
-function alertTransferPanel(group){
+function alertPaths(group){return (Array.isArray(group?.paths)?group.paths:[]).filter(path=>path&&typeof path.id==='string'&&typeof path.strategy==='string')}
+function alertSelectedPath(group){return alertPaths(group).find(path=>path.id===alertDetailState.pathId)||null}
+function alertStrategyLabel(strategy){return ['spot_futures','futures_futures'].includes(strategy)?strategyLabel(strategy):'未分类'}
+function alertPathLabel(path){const leg=(exchange,market)=>exchange?`${exchange==='Binance'?'币安':exchange}${market||''}`:`${market==='现货'?'现货所':market==='合约'?'合约所':'交易所'}未记录`;return `${leg(path.long_exchange,path.long_market)} → ${leg(path.short_exchange,path.short_market)}`}
+function syncAlertDetailSelection(group){
+  const paths=alertPaths(group),state=alertDetailState,symbol=group?.symbol||'',sameCoin=state.symbol===symbol;
+  const path=(sameCoin&&paths.find(item=>item.id===state.pathId))||(sameCoin&&paths.find(item=>item.strategy===state.strategy))||paths.find(item=>item.id===group?.latest?.path_id)||paths[0];
+  if(!sameCoin||state.pathId!==(path?.id||'')){alertDetailVersion++;alertDetailState={symbol,strategy:path?.strategy||'',pathId:path?.id||'',data:null,loading:false,error:''}}
+}
+function alertPathControls(group,path){
+  const paths=alertPaths(group),available=[...new Set(paths.map(item=>item.strategy))],strategies=['spot_futures','futures_futures',...available.filter(item=>!['spot_futures','futures_futures'].includes(item))].filter(item=>available.includes(item));
+  if(!path)return '';
+  return `<div class="alert-detail-controls"><div class="alert-strategy-switch" role="group" aria-label="报警策略">${strategies.map(strategy=>`<button type="button" class="${strategy===path.strategy?'active':''}" aria-pressed="${strategy===path.strategy}" onclick="setAlertStrategy(${alertActionSymbol(strategy)})">${alertStrategyLabel(strategy)}</button>`).join('')}</div><label class="alert-path-field"><span>路径</span><select id="alertPathSelect" aria-label="交易路径" title="${escapeChatHtml(alertPathLabel(path))}" onchange="setAlertPath(this.value)">${paths.filter(item=>item.strategy===path.strategy).map(item=>`<option value="${escapeChatHtml(item.id)}" ${item.id===path.id?'selected':''}>${escapeChatHtml(alertPathLabel(item))}</option>`).join('')}</select></label></div>`;
+}
+function setAlertStrategy(strategy){
+  if(alertDetailState.strategy===strategy)return false;
+  const group=latestAlertGroups.find(item=>item.symbol===selectedAlertSymbol),path=alertPaths(group).find(item=>item.strategy===strategy);return path?setAlertPath(path.id):false;
+}
+function setAlertPath(id){
+  const group=latestAlertGroups.find(item=>item.symbol===selectedAlertSymbol),path=alertPaths(group).find(item=>item.id===id);if(!path||path.id===alertDetailState.pathId)return false;
+  closeTransferPopover();alertDetailVersion++;alertDetailState={symbol:selectedAlertSymbol,strategy:path.strategy,pathId:path.id,data:null,loading:false,error:''};renderAlertDetailPane();return loadSelectedAlertHistory(1,true);
+}
+function alertTransferPanel(group,path=alertSelectedPath(group)||alertPaths(group)[0]||null){
   const priority=status=>transferHasRestriction(status)?0:status.state==='fresh'?1:status.state==='stale'?2:3;
-  const statuses=(Array.isArray(group.transfer_statuses)?group.transfer_statuses:[]).filter(status=>status&&typeof status==='object').slice().sort((a,b)=>priority(a)-priority(b));
-  return `<section class="alert-transfer-panel" tabindex="0" role="region" aria-label="${escapeChatHtml(group.symbol)} 当前现货充提快照，非历史报警时状态"><div class="alert-transfer-exchanges">${statuses.length?statuses.map(status=>`<div class="alert-transfer-exchange"><b>${escapeChatHtml(status.exchange)}</b>${transferStatusControl(status,group.symbol)}</div>`).join(''):'<span class="transfer-data-note">充提未知 · 尚未读取</span>'}</div></section>`;
+  const available=(Array.isArray(group.transfer_statuses)?group.transfer_statuses:[]).filter(status=>status&&typeof status==='object'),exchanges=[...new Set([path?.long_exchange,path?.short_exchange].filter(Boolean))];
+  const statuses=exchanges.map(exchange=>available.find(status=>status.exchange===exchange)||{exchange,state:'unknown',chains:[],reason:'该交易所充提状态尚未读取'}).sort((a,b)=>priority(a)-priority(b));
+  return `<section class="alert-transfer-panel" tabindex="0" role="region" aria-label="${escapeChatHtml(group.symbol)} 所选路径当前现货充提快照，非历史报警时状态"><div class="alert-transfer-exchanges">${statuses.length?statuses.map(status=>`<div class="alert-transfer-exchange"><b>${escapeChatHtml(status.exchange)}</b>${transferStatusControl(status,group.symbol)}</div>`).join(''):'<span class="transfer-data-note">充提未知 · 交易所未记录</span>'}</div>${path?.strategy==='futures_futures'?'<small class="alert-transfer-market-note">现货充提 · 非合约权限</small>':''}</section>`;
 }
 function alertDetailCard(group){
-  const latest=group.latest,data=alertDetailState.symbol===group.symbol?alertDetailState.data:null,state=alertDetailState;
-  return `<article class="alert-detail-card ${alertClass(latest.type)}" aria-label="${escapeChatHtml(group.symbol)} 报警明细"><div class="alert-detail-metrics"><span>最近开差 <b class="${changeClass(latest.open_spread)}">${alertMetric(latest.open_spread)}</b></span><span>最近基差 <b class="${changeClass(latest.basis)}">${alertMetric(latest.basis)}</b></span><span title="最近24小时确认报警的最高值～最低值">24H开差范围 ${alertMetricRange(group.value_ranges?.open_spread)}</span><span title="最近24小时确认报警中，币安合约标记价相对币安现货指数的基差最高值～最低值；不含币安合约的路径不参与">24H币安基差范围 ${alertMetricRange(group.basis_exchange==='Binance'?group.value_ranges?.basis:null)}</span></div>${alertTransferPanel(group)}<div class="alert-detail-status" role="status">${state.error?escapeChatHtml(state.error):''}</div><div class="alert-timeline-scroll" tabindex="0" role="region" aria-label="${escapeChatHtml(group.symbol)} 报警明细，可滚动"><div class="alert-timeline-head"><span>时间（UTC）</span><span>类型 / 交易路径</span><span>开差</span><span>基差</span></div><ol class="alert-timeline">${data?.items?.length?data.items.map(alertTimelineNode).join(''):`<li class="empty-alert">${state.error?'读取失败，可重试；已有记录不会被清除。':data?'最近24小时没有该币种的确认报警。':'正在读取该币种的报警时间线…'}</li>`}</ol></div><div class="alert-detail-pagination"><button type="button" onclick="loadSelectedAlertHistory(${Math.max(1,(data?.page||1)-1)},true)" ${!data||data.page<=1||state.loading?'disabled':''}>上一页</button><span>${data?`第 ${data.page} / ${data.pages} 页 · ${data.page_size}条/页`:'每页40条，全部可翻页'}</span><button type="button" onclick="loadSelectedAlertHistory(${(data?.page||1)+1},true)" ${!data||data.page>=data.pages||state.loading?'disabled':''}>下一页</button>${state.error?'<button type="button" onclick="loadSelectedAlertHistory()">重试</button>':''}</div></article>`;
+  const state=alertDetailState,path=alertSelectedPath(group),data=state.symbol===group.symbol&&state.data?.path_id===path?.id?state.data:null;
+  return `<article class="alert-detail-card ${alertClass(path?.latest?.type||group.latest.type)}" aria-label="${escapeChatHtml(group.symbol)} 报警明细">${alertPathControls(group,path)}${alertTransferPanel(group,path)}<div class="alert-detail-metrics"><span title="所选策略及路径最近24小时确认报警样本的最高值～最低值，不混合其他交易所路径">24H开差范围 ${alertMetricRange(path?.value_ranges?.open_spread)}</span><span title="仅所选路径最近24小时确认报警样本中的币安合约标记价/指数基差；无币安端或缺失时不补零">24H币安基差范围 ${alertMetricRange(path?.basis_exchange==='Binance'?path.value_ranges?.basis:null)}</span></div><div class="alert-detail-status" role="status">${state.error?escapeChatHtml(state.error):''}</div><div class="alert-timeline-scroll" tabindex="0" role="region" aria-label="${escapeChatHtml(group.symbol)} 报警明细，可滚动"><div class="alert-timeline-head"><span>时间（UTC）</span><span>报警类型</span><span>开差</span><span>币安基差</span></div><ol class="alert-timeline">${data?.items?.length?data.items.map(alertTimelineNode).join(''):`<li class="empty-alert">${state.error?'读取失败，可重试；已有记录不会被清除。':!path?'暂无可用路径记录。':data?'最近24小时没有该路径的确认报警。':'正在读取该路径的报警时间线…'}</li>`}</ol></div><div class="alert-detail-pagination"><button type="button" onclick="loadSelectedAlertHistory(${Math.max(1,(data?.page||1)-1)},true)" ${!data||data.page<=1||state.loading?'disabled':''}>上一页</button><span>${data?`第 ${data.page} / ${data.pages} 页 · ${data.page_size}条/页`:'每页40条，全部可翻页'}</span><button type="button" onclick="loadSelectedAlertHistory(${(data?.page||1)+1},true)" ${!data||data.page>=data.pages||state.loading?'disabled':''}>下一页</button>${state.error?'<button type="button" onclick="loadSelectedAlertHistory()">重试</button>':''}</div></article>`;
 }
 function alertSymbolCard(group){
   const symbol=escapeChatHtml(group.symbol),peaks=group.move_peaks||{};
@@ -609,17 +633,19 @@ function filterAlertSymbols(value){alertListQuery=String(value||'');if(byId('ale
 function sortAlertSymbols(value){alertListSort=['latest','count','open_spread','basis'].includes(value)?value:'latest';if(byId('alertSymbolList'))byId('alertSymbolList').scrollTop=0;renderAlertRoster()}
 function renderAlertDetailPane(){
   const group=latestAlertGroups.find(item=>item.symbol===selectedAlertSymbol),pane=byId('alertDetailPane');if(!pane)return;
-  const top=pane.querySelector('.alert-timeline-scroll')?.scrollTop||0;
+  const key=JSON.stringify([group?.symbol||'',alertDetailState.pathId]),samePath=pane.dataset.alertKey===key;
+  const top=samePath?pane.querySelector('.alert-timeline-scroll')?.scrollTop||0:0;
   const transferTop=pane.dataset.alertSymbol===group?.symbol?pane.querySelector('.alert-transfer-panel')?.scrollTop||0:0;
   replaceHtmlKeepingExchangeLogos(pane,group?alertDetailCard(group):'<p class="empty-alert">选择左侧币种查看最近24小时的报警明细。</p>');
-  pane.dataset.alertSymbol=group?.symbol||'';
+  pane.dataset.alertSymbol=group?.symbol||'';pane.dataset.alertKey=key;
+  const selector=pane.querySelector('#alertPathSelect');if(selector&&selector.value!==alertDetailState.pathId)selector.value=alertDetailState.pathId;
   const scroll=pane.querySelector('.alert-timeline-scroll');if(scroll)scroll.scrollTop=top;
   const transferPanel=pane.querySelector('.alert-transfer-panel');if(transferPanel)transferPanel.scrollTop=transferTop;
 }
 function renderAlertMasterDetail(groups){
   latestAlertGroups=groups;
   if(!groups.some(group=>group.symbol===selectedAlertSymbol))selectedAlertSymbol=groups[0]?.symbol||'';
-  if(alertDetailState.symbol!==selectedAlertSymbol){alertDetailVersion++;alertDetailState={symbol:selectedAlertSymbol,data:null,loading:false,error:''}}
+  syncAlertDetailSelection(groups.find(group=>group.symbol===selectedAlertSymbol));
   renderAlertRoster();renderAlertDetailPane();
 }
 function selectAlertSymbol(symbol){
@@ -628,13 +654,13 @@ function selectAlertSymbol(symbol){
   if(window.innerWidth<1100)byId('alertDetailPane')?.scrollIntoView({block:'start',behavior:'smooth'});
 }
 async function loadSelectedAlertHistory(page=alertDetailState.data?.page||1,resetScroll=false){
-  const symbol=selectedAlertSymbol;if(!symbol)return false;
-  const key=`${symbol}|${page}`;if(alertDetailRequest?.key===key)return alertDetailRequest.promise;
+  const symbol=selectedAlertSymbol,{strategy,pathId}=alertDetailState;if(!symbol||!pathId)return false;
+  const key=JSON.stringify([symbol,strategy,pathId,page]);if(alertDetailRequest?.key===key)return alertDetailRequest.promise;
   const version=++alertDetailVersion;alertDetailState.loading=true;alertDetailState.error='';renderAlertDetailPane();
   const promise=(async()=>{try{
-    const data=await fetchRefreshJson(`/api/alerts?${new URLSearchParams({view:'detail',symbol,page:String(page),page_size:'40'})}`);
-    if(version!==alertDetailVersion||symbol!==selectedAlertSymbol)return false;
-    if(data.symbol!==symbol||!Array.isArray(data.items)||data.items.some(item=>item.symbol!==symbol))throw new Error('明细币种不一致');
+    const data=await fetchRefreshJson(`/api/alerts?${new URLSearchParams({view:'detail',symbol,strategy,path:pathId,page:String(page),page_size:'40'})}`);
+    if(version!==alertDetailVersion||symbol!==selectedAlertSymbol||pathId!==alertDetailState.pathId)return false;
+    if(data.symbol!==symbol||data.path_id!==pathId||data.strategy!==strategy||!Array.isArray(data.items)||data.items.some(item=>item.symbol!==symbol||item.path_id!==pathId||item.strategy!==strategy))throw new Error('明细币种或路径不一致');
     alertDetailState.data=data;alertDetailState.loading=false;renderAlertDetailPane();
     if(resetScroll){const scroll=byId('alertDetailPane')?.querySelector('.alert-timeline-scroll');if(scroll)scroll.scrollTop=0}return true;
   }catch(error){if(version===alertDetailVersion&&symbol===selectedAlertSymbol){alertDetailState.loading=false;alertDetailState.error='明细读取失败，已保留上次记录，可重试。';renderAlertDetailPane()}return false}

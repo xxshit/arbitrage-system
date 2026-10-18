@@ -12495,6 +12495,7 @@ def alerts():
     # 旧版拉升报警没有连续采样确认凭证，不能再作为可靠信号展示。
     query = query.filter(or_(AlertEvent.alert_type == "basis_threshold", AlertEvent.alert_type.startswith("rapid_", autoescape=True), AlertEvent.message.contains("确认后的")))
     page, page_size = 1, 40
+    selected_strategy, selected_path = request.args.get("strategy", ""), None
     if view == "detail":
         symbol = str(request.args.get("symbol", "")).strip().upper()
         try:
@@ -12504,6 +12505,19 @@ def alerts():
             return jsonify({"error": "无效的报警页码"}), 400
         if len(symbol) > 30 or not re.fullmatch(r"[\w.-]+/(?:USDT|USDC)", symbol):
             return jsonify({"error": "请提供有效的币种交易对"}), 400
+        if selected_strategy and (len(selected_strategy) > 30 or not re.fullmatch(r"[\w-]+", selected_strategy)):
+            return jsonify({"error": "无效的报警策略"}), 400
+        if "path" in request.args:
+            try:
+                raw_path = request.args["path"]
+                selected_path = json.loads(raw_path) if len(raw_path) <= 256 else None
+                if not isinstance(selected_path, list) or len(selected_path) != 3 or not isinstance(selected_path[0], str) or not selected_path[0] or any(value is not None and (not isinstance(value, str) or len(value) > 30) for value in selected_path):
+                    raise ValueError("invalid path")
+                if not re.fullmatch(r"[\w-]+", selected_path[0]) or (selected_strategy and selected_path[0] != selected_strategy):
+                    raise ValueError("strategy/path mismatch")
+                selected_strategy = selected_path[0]
+            except (ValueError, TypeError):
+                return jsonify({"error": "无效的报警路径"}), 400
         query = query.filter(AlertEvent.symbol == symbol)
     all_events = [item for item in query.order_by(AlertEvent.created_at.desc(), AlertEvent.id.desc()).all() if not is_rwa_stock_pair(item.symbol)]
     grouped_events = {}
@@ -12527,40 +12541,62 @@ def alerts():
             latest = dual_context.get((item.symbol, item.long_exchange, item.short_exchange))
             return {
                 "strategy": "futures_futures",
-                "long_exchange": item.long_exchange or "Bybit",
+                "long_exchange": item.long_exchange,
                 "long_market": "合约",
-                "short_exchange": item.short_exchange or "Binance",
+                "short_exchange": item.short_exchange,
                 "short_market": "合约",
                 "long_interval": latest.long_funding_interval_hours if latest else None,
                 "short_interval": latest.short_funding_interval_hours if latest else None,
             }
-        long_exchange = next((name for name in ("Binance", "Gate", "Bitget") if item.message.startswith(name)), "Binance")
+        if item.strategy != "spot_futures":
+            return {"strategy": item.strategy or "unknown", "long_exchange": item.long_exchange, "long_market": "未记录", "short_exchange": item.short_exchange, "short_market": "未记录", "long_interval": None, "short_interval": None}
+        # Explicit columns win. Only recover a missing spot venue from an anchored,
+        # known legacy prefix; an arbitrary message must never become Binance spot.
+        prefix = re.match(r"^(Binance|Gate|Bitget)(?=\s|现货|$)", item.message or "")
+        long_exchange = item.long_exchange or (prefix.group(1) if prefix else None)
         latest = market_context.get(item.symbol)
         return {
             "strategy": "spot_futures",
             "long_exchange": long_exchange,
             "long_market": "现货",
-            "short_exchange": "Binance",
+            "short_exchange": item.short_exchange or "Binance",
             "short_market": "合约",
             "long_interval": None,
-            "short_interval": latest.funding_interval_hours if latest else None,
+            "short_interval": latest.funding_interval_hours if latest and item.short_exchange in (None, "Binance") else None,
         }
 
+    def path_key(item):
+        context = alert_context(item)
+        return [context["strategy"], context["long_exchange"], context["short_exchange"]]
+
+    def path_id(key):
+        return json.dumps(key, ensure_ascii=False, separators=(",", ":"))
+
+    def value_ranges(items):
+        ranges = {}
+        for field in ("open_spread", "basis"):
+            samples = [alert_binance_basis(item) if field == "basis" else item.open_spread for item in items]
+            values = [value for value in samples if value is not None and math.isfinite(value)]
+            ranges[field] = {"max": max(values, default=None), "min": min(values, default=None)}
+        return ranges
+
     def event_payload(item):
-        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int(120 - (now - item.created_at).total_seconds())), **alert_context(item)}
+        basis = alert_binance_basis(item)
+        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int(120 - (now - item.created_at).total_seconds())), **alert_context(item)}
 
     if view == "detail":
-        total = len(all_events)
+        filtered = [item for item in all_events if (not selected_strategy or alert_context(item)["strategy"] == selected_strategy) and (selected_path is None or path_key(item) == selected_path)]
+        total = len(filtered)
         pages = max(1, math.ceil(total / page_size))
         page = min(page, pages)
-        return jsonify({"symbol": symbol, "items": [event_payload(item) for item in all_events[(page - 1) * page_size:page * page_size]], "total": total, "page": page, "pages": pages, "page_size": page_size, "window_hours": 24, "checked_at_epoch": time.time()})
+        return jsonify({"symbol": symbol, "strategy": selected_strategy or None, "path_id": path_id(selected_path) if selected_path is not None else None, "items": [event_payload(item) for item in filtered[(page - 1) * page_size:page * page_size]], "total": total, "page": page, "pages": pages, "page_size": page_size, "window_hours": 24, "checked_at_epoch": time.time()})
 
     transfer_exchanges = {}
     for symbol, items in grouped_events.items():
         exchanges = set()
         for item in items:
             context = alert_context(item)
-            exchanges.update((context["long_exchange"], context["short_exchange"]))
+            exchanges.update(exchange for exchange in (context["long_exchange"], context["short_exchange"]) if exchange)
         transfer_exchanges[symbol] = sorted(exchanges)
     transfer_statuses = load_transfer_statuses((symbol, exchange) for symbol, exchanges in transfer_exchanges.items() for exchange in exchanges)
 
@@ -12571,11 +12607,13 @@ def alerts():
         basis_items = [item for item in items if item.basis is not None]
         max_spread_item = max(spread_items, key=lambda item: abs(item.open_spread or 0), default=None)
         max_basis_item = max(basis_items, key=lambda item: abs(item.basis or 0), default=None)
-        value_ranges = {}
-        for field in ("open_spread", "basis"):
-            samples = [alert_binance_basis(item) if field == "basis" else item.open_spread for item in items]
-            values = [value for value in samples if value is not None and math.isfinite(value)]
-            value_ranges[field] = {"max": max(values, default=None), "min": min(values, default=None)}
+        path_items = {}
+        for item in items:
+            path_items.setdefault(path_id(path_key(item)), []).append(item)
+        paths = []
+        for key, samples in path_items.items():
+            context = alert_context(samples[0])
+            paths.append({"id": key, **context, "alert_count": len(samples), "latest": event_payload(samples[0]), "value_ranges": value_ranges(samples), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
         return {
             "symbol": symbol,
             "latest": latest,
@@ -12587,7 +12625,8 @@ def alerts():
                 "basis": max_basis_item.basis if max_basis_item else None,
                 "basis_at": max_basis_item.created_at.strftime("%m-%d %H:%M:%S") if max_basis_item else None,
             },
-            "value_ranges": value_ranges,
+            "value_ranges": value_ranges(items),
+            "paths": paths,
             "basis_exchange": "Binance",
             "transfer_statuses": [transfer_statuses[(symbol, exchange)] for exchange in transfer_exchanges[symbol]],
             "timeline": timeline,

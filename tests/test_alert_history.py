@@ -231,6 +231,84 @@ class AlertHistoryTests(unittest.TestCase):
         with module.app.app_context():
             self.assertEqual(module.AlertEvent.query.count(), 1)
 
+    def test_paths_separate_strategy_exchange_and_direction_without_changing_coin_totals(self):
+        self.insert([
+            self.event(long_exchange="Gate", short_exchange="Binance", open_spread=-50, basis=-2),
+            self.event(long_exchange="Bitget", short_exchange="Binance", open_spread=2, basis=1),
+            self.event(strategy="futures_futures", long_exchange="Bybit", short_exchange="Binance", open_spread=3, basis=4),
+            self.event(strategy="futures_futures", long_exchange="Binance", short_exchange="Bybit", open_spread=5, basis=6),
+        ])
+        group = self.get(view="summary")["events"][0]
+        self.assertEqual(group["alert_count"], 4)
+        self.assertEqual(group["move_peaks"]["open_spread"], -50)
+        paths = {tuple(json.loads(path["id"])): path for path in group["paths"]}
+        self.assertEqual(len(paths), 4)
+        self.assertEqual(sum(path["alert_count"] for path in paths.values()), 4)
+        for key, spread in [(('spot_futures', 'Gate', 'Binance'), -50), (('spot_futures', 'Bitget', 'Binance'), 2), (('futures_futures', 'Bybit', 'Binance'), 3), (('futures_futures', 'Binance', 'Bybit'), 5)]:
+            self.assertEqual(paths[key]["value_ranges"]["open_spread"], {"max": spread, "min": spread})
+            self.assertEqual(paths[key]["latest"]["path_id"], paths[key]["id"])
+
+    def test_only_strategies_with_actual_confirmed_samples_have_paths(self):
+        self.insert([self.event("SPOT/USDT", long_exchange="Gate"), self.event("DUAL/USDT", strategy="futures_futures", long_exchange="Bybit", short_exchange="OKX"), self.event("SPOT/USDT", strategy="futures_futures", alert_type="futures_pump", message="未确认旧记录")])
+        groups = {group["symbol"]: group for group in self.get(view="summary")["events"]}
+        self.assertEqual([path["strategy"] for path in groups["SPOT/USDT"]["paths"]], ["spot_futures"])
+        self.assertEqual([path["strategy"] for path in groups["DUAL/USDT"]["paths"]], ["futures_futures"])
+
+    def test_path_ranges_cover_full_window_and_filtered_pagination_excludes_other_venues(self):
+        self.insert([self.event(long_exchange="Gate", short_exchange="Binance", created_at=self.now - timedelta(minutes=i+1)) for i in range(91)] + [self.event(long_exchange="Gate", short_exchange="Binance", open_spread=-12, basis=-4, created_at=self.now-timedelta(hours=24)), self.event(long_exchange="Bitget", short_exchange="Binance", open_spread=999, basis=999), self.event(long_exchange="Gate", open_spread=-999, created_at=self.now-timedelta(hours=24, seconds=1))])
+        path = next(path for path in self.get(view="summary")["events"][0]["paths"] if path["long_exchange"] == "Gate")
+        self.assertEqual(path["alert_count"], 92)
+        self.assertEqual(path["value_ranges"]["open_spread"], {"max": 0.8, "min": -12})
+        self.assertEqual(path["value_ranges"]["basis"], {"max": 1.2, "min": -4})
+        pages = [self.get(view="detail", symbol="DEMO/USDT", strategy="spot_futures", path=path["id"], page=page) for page in (1, 2, 3)]
+        self.assertEqual([len(page["items"]) for page in pages], [40, 40, 12])
+        self.assertEqual(len({item["id"] for page in pages for item in page["items"]}), 92)
+        for page in pages:
+            self.assertEqual((page["strategy"], page["path_id"], page["total"]), ("spot_futures", path["id"], 92))
+            self.assertTrue(all(item["path_id"] == path["id"] and item["long_exchange"] == "Gate" for item in page["items"]))
+
+    def test_nonbinance_path_never_inherits_another_path_basis_or_legacy_zero(self):
+        self.insert([self.event(long_exchange="Gate", basis=20), self.event(strategy="futures_futures", long_exchange="Bybit", short_exchange="OKX", basis=0)])
+        path = next(path for path in self.get(view="summary")["events"][0]["paths"] if path["strategy"] == "futures_futures")
+        self.assertIsNone(path["basis_exchange"])
+        self.assertEqual(path["value_ranges"]["basis"], {"max": None, "min": None})
+        event = self.get(view="detail", symbol="DEMO/USDT", path=path["id"])["items"][0]
+        self.assertEqual(event["basis"], 0)  # Preserve historical storage/legacy contract.
+        self.assertIsNone(event["binance_basis"])
+        self.assertIsNone(event["basis_exchange"])
+
+    def test_explicit_path_columns_win_and_legacy_prefix_requires_a_real_boundary(self):
+        self.insert([self.event(long_exchange="Bitget", short_exchange="Bybit", message="Gate 现货旧说明"), self.event(message="Gate 现货与 Binance 合约：确认后的报警"), self.event(message="Gatekeeper unrelated"), self.event(strategy="futures_futures", long_exchange=None, short_exchange=None)])
+        paths = {tuple(json.loads(path["id"])) for path in self.get(view="summary")["events"][0]["paths"]}
+        self.assertEqual(paths, {("spot_futures", "Bitget", "Bybit"), ("spot_futures", "Gate", "Binance"), ("spot_futures", None, "Binance"), ("futures_futures", None, None)})
+
+    def test_path_filter_does_not_fall_back_to_all_when_the_selected_path_has_expired(self):
+        self.insert([self.event(long_exchange="Gate", short_exchange="Binance")])
+        result = self.get(view="detail", symbol="DEMO/USDT", path=json.dumps(["spot_futures", "Bitget", "Binance"]), page=999)
+        self.assertEqual((result["items"], result["total"], result["page"], result["pages"]), ([], 0, 1, 1))
+
+    def test_invalid_or_mismatched_path_filters_return_400_not_a_broader_history(self):
+        for value in ["", "null", "{}", "[]", '["spot_futures","Gate"]', '[true,"Gate","Binance"]', '["spot_futures",{},"Binance"]', '["bad<script>","Gate","Binance"]', json.dumps(["spot_futures", "X"*31, "Binance"]), "x"*257]:
+            with self.subTest(path=value):
+                self.assertEqual(self.client.get("/api/alerts", query_string={"view": "detail", "symbol": "DEMO/USDT", "path": value}).status_code, 400)
+        self.assertEqual(self.client.get("/api/alerts", query_string={"view":"detail", "symbol":"DEMO/USDT", "strategy":"futures_futures", "path":json.dumps(["spot_futures","Gate","Binance"])}).status_code, 400)
+
+    def test_unknown_strategy_is_preserved_instead_of_mislabelled_as_spot_futures(self):
+        self.insert([self.event(strategy="unrecognized", long_exchange="Gate", short_exchange="Binance", basis=999)])
+        path = self.get(view="summary")["events"][0]["paths"][0]
+        self.assertEqual(path["strategy"], "unrecognized")
+        self.assertEqual(path["long_market"], "未记录")
+        self.assertIsNone(path["basis_exchange"])
+
+    def test_path_reads_are_authenticated_uncached_readonly_and_do_not_query_upstream(self):
+        self.insert([self.event(long_exchange="Gate", short_exchange="Binance")])
+        params = {"view":"detail", "symbol":"DEMO/USDT", "path":json.dumps(["spot_futures","Gate","Binance"])}
+        self.assertEqual(module.app.test_client().get("/api/alerts", query_string=params).status_code, 401)
+        self.get(**params)  # Complete the existing login last_seen heartbeat first.
+        with patch.object(module, "get_json", side_effect=AssertionError("no upstream")), patch.object(module.db.session, "commit", side_effect=AssertionError("no writes")):
+            self.assertEqual(self.get(**params)["total"], 1)
+        self.assertIn("no-store", self.client.get("/api/alerts", query_string=params).headers["Cache-Control"])
+
 
 if __name__ == "__main__":
     unittest.main()

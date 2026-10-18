@@ -10,13 +10,17 @@ const functions=source.slice(source.indexOf('function isAlertMuted('),source.ind
 const helpers=source.slice(source.indexOf('function alertLabel('),source.indexOf('function toggleTips('));
 const transferHelpers=source.slice(source.indexOf('function transferFlagText('),source.indexOf('function spotRows('));
 const escape=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-const group=(symbol='DEMO/USDT',count=3,spread=1,basis=2)=>({symbol,alert_count:count,latest:{symbol,created_at:'10-18 10:00:00',type:'rapid_basis',strategy:'spot_futures',open_spread:0.5,basis:1},move_peaks:{open_spread:spread,basis},value_ranges:{open_spread:{max:10,min:-50},basis:{max:3,min:-2}},basis_exchange:'Binance'});
-const detail=(symbol='DEMO/USDT',page=1)=>({symbol,total:43,page,pages:2,page_size:40,items:[{id:page,symbol,type:'rapid_basis',created_at:'10-18 10:00:00',message:'Synthetic detail',open_spread:0.5,basis:1}]});
+const pathKey=(strategy='spot_futures',long='Gate',short='Binance')=>JSON.stringify([strategy,long,short]);
+const group=(symbol='DEMO/USDT',count=3,spread=1,basis=2)=>{
+  const latest={symbol,created_at:'10-18 10:00:00',type:'rapid_basis',strategy:'spot_futures',path_id:pathKey(),open_spread:0.5,basis:1},value_ranges={open_spread:{max:10,min:-50},basis:{max:3,min:-2}};
+  return {symbol,alert_count:count,latest,move_peaks:{open_spread:spread,basis},value_ranges,basis_exchange:'Binance',paths:[{id:pathKey(),strategy:'spot_futures',long_exchange:'Gate',short_exchange:'Binance',long_market:'现货',short_market:'合约',latest,value_ranges,basis_exchange:'Binance'}]};
+};
+const detail=(symbol='DEMO/USDT',page=1,path_id=pathKey())=>({symbol,strategy:JSON.parse(path_id)[0],path_id,total:43,page,pages:2,page_size:40,items:[{id:page,symbol,strategy:JSON.parse(path_id)[0],path_id,type:'rapid_basis',created_at:'10-18 10:00:00',message:'Synthetic detail',open_spread:0.5,basis:1,binance_basis:1,basis_exchange:'Binance'}]});
 
-function harness(fetcher=async url=>detail(new URL(url,'https://example.test').searchParams.get('symbol'))){
+function harness(fetcher=async url=>{const params=new URL(url,'https://example.test').searchParams;return detail(params.get('symbol'),Number(params.get('page')),params.get('path'))}){
   const nodes=new Map(),scroll={scrollTop:0},transferScroll={scrollTop:0};
-  const node=id=>{if(!nodes.has(id))nodes.set(id,{id,textContent:'',innerHTML:'',scrollTop:0,dataset:{},querySelector:selector=>selector==='.alert-transfer-panel'?transferScroll:scroll,scrollIntoView(){}});return nodes.get(id)};
-  const context={URLSearchParams,console,window:{innerWidth:1280},byId:node,escapeChatHtml:escape,delistingSymbolClass:()=>'',changeClass:value=>value<0?'negative':'positive',percent:value=>(value>=0?'+':'')+Number(value).toFixed(4)+'%',intervalClass:()=>'',exchangeName:escape,fetchRefreshJson:fetcher,renderTipsItems(){},
+  const node=id=>{if(!nodes.has(id))nodes.set(id,{id,textContent:'',innerHTML:'',scrollTop:0,dataset:{},querySelector:selector=>selector==='#alertPathSelect'?null:selector==='.alert-transfer-panel'?transferScroll:scroll,scrollIntoView(){}});return nodes.get(id)};
+  const context={URLSearchParams,console,clearTimeout(){},window:{innerWidth:1280},byId:node,escapeChatHtml:escape,delistingSymbolClass:()=>'',changeClass:value=>value<0?'negative':'positive',percent:value=>(value>=0?'+':'')+Number(value).toFixed(4)+'%',intervalClass:()=>'',exchangeName:escape,fetchRefreshJson:fetcher,renderTipsItems(){},
     replaceHtmlKeepingExchangeLogos:(target,markup)=>{if(target.innerHTML!==markup)target.innerHTML=markup}};
   vm.createContext(context);
   vm.runInContext("let mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+transferHelpers+'\n'+helpers+'\n'+functions,context);
@@ -94,9 +98,10 @@ test('a response for the wrong coin is never installed as the current history',a
 });
 
 test('timeline omits the detail toggle and its message, close-spread and funding content entirely',()=>{
-  const h=harness(),markup=h.context.alertTimelineNode({id:42,type:'rapid_basis',strategy:'spot_futures',created_at:'10-18 10:00',message:'<img onerror=alert(1)> hidden-message',long_exchange:'Gate',short_exchange:'Binance',open_spread:0.5,basis:-1,close_spread:-0.6943,funding_rate:0.0035});
+  const h=harness(),markup=h.context.alertTimelineNode({id:42,type:'rapid_basis',strategy:'spot_futures',created_at:'10-18 10:00',message:'<img onerror=alert(1)> hidden-message',long_exchange:'Gate',short_exchange:'Binance',open_spread:0.5,basis:-1,binance_basis:-1,basis_exchange:'Binance',close_spread:-0.6943,funding_rate:0.0035});
   for(const value of ['详细说明','<details','<summary','alert-event-message','ontoggle','hidden-message','<img onerror','平差','资费','-0.6943%','+0.0035%'])assert.ok(!markup.includes(value),value);
-  for(const value of ['10-18 10:00','现多期空','基差速变','Gate','Binance','+0.5000%','-1.0000%'])assert.ok(markup.includes(value),value);
+  for(const value of ['10-18 10:00','基差速变','+0.5000%','-1.0000%'])assert.ok(markup.includes(value),value);
+  for(const value of ['现多期空','Gate','Binance','alert-exchange-pair'])assert.ok(!markup.includes(value),value);
   assert.ok(!source.includes('setAlertMessageExpanded'));assert.ok(!source.includes('alertDetailState.expanded'));assert.ok(!css.includes('.alert-event-message'));
 });
 
@@ -126,7 +131,8 @@ test('sticky roster header shares the data scroll gutter, grid and horizontal pa
 test('detail omits repeated coin header, mute and normal status while keeping metrics, timeline and pagination',async()=>{
   const h=harness();h.context.renderAlertMasterDetail([group()]);await h.context.loadSelectedAlertHistory();const markup=h.node('alertDetailPane').innerHTML;
   for(const value of ['<header','<h4','alert-latest-label','strategy-badge','alert-mute-toggle','新到旧','共 43 条'])assert.ok(!markup.includes(value),value);
-  for(const value of ['最近开差','最近基差','24H开差范围','24H币安基差范围','alert-timeline-scroll','10-18 10:00:00','alert-detail-pagination','aria-label="DEMO/USDT 报警明细"'])assert.ok(markup.includes(value),value);
+  for(const value of ['最近开差','最近基差','两种策略都有数据','仅现多期空有数据','仅期多期空有数据'])assert.ok(!markup.includes(value),value);
+  for(const value of ['24H开差范围','24H币安基差范围','alert-timeline-scroll','10-18 10:00:00','alert-detail-pagination','aria-label="DEMO/USDT 报警明细"'])assert.ok(markup.includes(value),value);
   assert.ok(markup.includes('<div class="alert-detail-status" role="status"></div>'));assert.ok(css.includes('.alert-detail-status:empty {display:none}'));
   h.run('alertDetailState.loading=true');h.context.renderAlertDetailPane();assert.ok(!h.node('alertDetailPane').innerHTML.includes('正在读取明细…'));
 });
@@ -142,9 +148,9 @@ test('detail ranges show the full-window maximum then minimum with independently
 
 test('Binance range is explicitly labelled and never trusts an unspecified or different basis source',()=>{
   const h=harness();h.context.renderAlertMasterDetail([group()]);let markup=h.node('alertDetailPane').innerHTML;
-  assert.ok(markup.includes('24H币安基差范围'));assert.ok(markup.includes('币安合约标记价相对币安现货指数'));
+  assert.ok(markup.includes('24H币安基差范围'));assert.ok(markup.includes('币安合约标记价/指数基差'));
   for(const exchange of [undefined,null,'Bybit','OKX']){
-    const coin=group();coin.basis_exchange=exchange;coin.value_ranges.basis={max:999,min:-999};h.context.renderAlertMasterDetail([coin]);markup=h.node('alertDetailPane').innerHTML;
+    const coin=group();coin.paths[0].basis_exchange=exchange;coin.value_ranges.basis={max:999,min:-999};h.context.renderAlertMasterDetail([coin]);markup=h.node('alertDetailPane').innerHTML;
     assert.ok(markup.includes('24H币安基差范围 <b class="alert-metric-range neutral">—</b>'));
     assert.ok(!markup.includes('999.0000%'));assert.ok(markup.includes('最高 +10.0000%，最低 -50.0000%'));
   }
@@ -158,7 +164,7 @@ test('ranges retain all-positive, all-negative, zero and equal endpoints without
 test('missing or non-finite ranges show an unavailable marker instead of zero or the legacy single peak',()=>{
   const h=harness();
   for(const range of [undefined,null,{}, {max:null,min:null},{max:1,min:null},{max:NaN,min:1},{max:Infinity,min:-1},{max:'10',min:-1}])assert.equal(h.context.alertMetricRange(range),'<b class="alert-metric-range neutral">—</b>');
-  const legacy=group();delete legacy.value_ranges;h.context.renderAlertMasterDetail([legacy]);assert.equal((h.node('alertDetailPane').innerHTML.match(/alert-metric-range neutral/g)||[]).length,2);
+  const legacy=group();delete legacy.paths[0].value_ranges;h.context.renderAlertMasterDetail([legacy]);assert.equal((h.node('alertDetailPane').innerHTML.match(/alert-metric-range neutral/g)||[]).length,2);
 });
 
 test('a refreshed summary updates ranges without clearing the selected history page or scroll position',async()=>{
@@ -236,6 +242,7 @@ test('withdrawal delay remains visible even if the explicit withdrawal switch is
 
 test('untrusted exchange, chain, reason and timestamp text cannot inject HTML or attributes',()=>{
   const h=harness(),coin=group();coin.transfer_statuses=[wallet('<img onerror=1>',{state:'unknown',chains:[{name:'"><svg onload=1>',deposit_open:null}],reason:'"><img onerror=1>',captured_at:'"><script>alert(1)</script>'})];
+  coin.paths[0].long_exchange='<img onerror=1>';
   for(const markup of [h.context.alertTransferPanel(coin),h.context.transferPopoverMarkup(coin.transfer_statuses[0])]){assert.ok(!markup.includes('<img'));assert.ok(!markup.includes('<svg'));assert.ok(!markup.includes('<script>'));assert.ok(markup.includes('&lt;img'))}
   assert.ok(h.context.transferPopoverMarkup(coin.transfer_statuses[0]).includes('&lt;svg'));
 });
@@ -250,4 +257,84 @@ test('wallet-only updates replace the current status without clearing history se
   const h=harness(async()=>detail('DEMO/USDT',2)),coin=group();coin.transfer_statuses=[wallet()];h.context.renderAlertMasterDetail([coin]);await h.context.loadSelectedAlertHistory(2);h.scroll.scrollTop=210;
   const updated=group();updated.transfer_statuses=[wallet('Gate',{chains:[{name:'BSC',deposit_open:true,withdraw_open:true}]})];h.context.renderAlertMasterDetail([updated]);
   assert.ok(!h.node('alertDetailPane').innerHTML.includes('受限，价差需复核'));assert.equal(h.run('selectedAlertSymbol'),'DEMO/USDT');assert.equal(h.run('alertDetailState.data.page'),2);assert.equal(h.scroll.scrollTop,210);
+});
+
+function addPath(coin,strategy='spot_futures',long='Bitget',short='Binance',range={max:2,min:-1}){
+  const path={...coin.paths[0],id:pathKey(strategy,long,short),strategy,long_exchange:long,short_exchange:short,long_market:strategy==='spot_futures'?'现货':'合约',short_market:'合约',value_ranges:{open_spread:range,basis:{max:1,min:-1}},basis_exchange:short==='Binance'||long==='Binance'?'Binance':null};
+  path.latest={...coin.latest,strategy,path_id:path.id};coin.paths.push(path);return path;
+}
+
+test('only present strategies appear, with no mockup scenario captions or ghost tabs',()=>{
+  const h=harness(),coin=group();h.context.renderAlertMasterDetail([coin]);let markup=h.node('alertDetailPane').innerHTML;
+  assert.equal((markup.match(/onclick="setAlertStrategy/g)||[]).length,1);assert.ok(!markup.includes('>期多期空</button>'));
+  const dual=addPath(coin,'futures_futures','Bybit','OKX');coin.paths=[dual];h.context.renderAlertMasterDetail([coin]);markup=h.node('alertDetailPane').innerHTML;
+  assert.equal((markup.match(/onclick="setAlertStrategy/g)||[]).length,1);assert.ok(!markup.includes('>现多期空</button>'));assert.ok(markup.includes('>期多期空</button>'));
+  for(const text of ['两种都有数据','两种策略都有数据','仅现多期空有数据','仅期多期空有数据'])assert.ok(!markup.includes(text));
+});
+
+test('two strategies have separate path menus and switching resets page and timeline scroll',async()=>{
+  const h=harness(),coin=group(),spot=addPath(coin),dual=addPath(coin,'futures_futures','Bybit','OKX');h.context.renderAlertMasterDetail([coin]);await h.context.loadSelectedAlertHistory(2);h.scroll.scrollTop=230;
+  assert.equal((h.node('alertDetailPane').innerHTML.match(/onclick="setAlertStrategy/g)||[]).length,2);
+  await h.context.setAlertStrategy('futures_futures');const markup=h.node('alertDetailPane').innerHTML;
+  assert.equal(h.run('alertDetailState.pathId'),dual.id);assert.equal(h.run('alertDetailState.data.page'),1);assert.equal(h.scroll.scrollTop,0);
+  assert.ok(markup.includes('Bybit合约 → OKX合约'));assert.ok(!markup.includes('Bitget现货'));assert.ok(markup.includes('现货充提 · 非合约权限'));
+  await h.context.setAlertStrategy('spot_futures');await h.context.setAlertPath(spot.id);assert.ok(h.node('alertDetailPane').innerHTML.includes('Bitget现货 → 币安合约'));
+});
+
+test('path-specific ranges and wallet statuses never borrow a different venue or global aggregate',async()=>{
+  const h=harness(),coin=group(),bitget=addPath(coin);coin.transfer_statuses=[wallet(),wallet('Bitget',{chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}]}),wallet('Binance',{state:'unknown',chains:[]})];
+  h.context.renderAlertMasterDetail([coin]);await h.context.setAlertPath(bitget.id);const markup=h.node('alertDetailPane').innerHTML;
+  assert.ok(markup.includes('最高 +2.0000%，最低 -1.0000%'));assert.ok(!markup.includes('最高 +10.0000%，最低 -50.0000%'));
+  assert.equal((markup.match(/class="transfer-status-control/g)||[]).length,2);assert.ok(markup.includes('充提正常'));assert.ok(!markup.includes('充提异常'));assert.ok(!markup.includes('<b>Gate</b>'));
+});
+
+test('every filtered request carries strategy and exact directional path, not just a coin name',async()=>{
+  let url;const h=harness(async value=>{url=new URL(value,'https://example.test');return detail('DEMO/USDT',1,url.searchParams.get('path'))}),coin=group(),path=addPath(coin,'futures_futures','OKX','Binance');
+  h.context.renderAlertMasterDetail([coin]);await h.context.setAlertPath(path.id);
+  assert.equal(url.searchParams.get('strategy'),'futures_futures');assert.equal(url.searchParams.get('path'),path.id);assert.equal(url.searchParams.get('page'),'1');
+});
+
+test('a non-Binance path and its legacy zero or foreign basis samples display unavailable',async()=>{
+  const h=harness(),coin=group(),path=addPath(coin,'futures_futures','Bybit','OKX');path.value_ranges.basis={max:999,min:0};coin.paths=[path];h.context.renderAlertMasterDetail([coin]);await h.context.loadSelectedAlertHistory();
+  assert.ok(h.node('alertDetailPane').innerHTML.includes('24H币安基差范围 <b class="alert-metric-range neutral">—</b>'));
+  for(const source of [undefined,null,'Bybit']){const markup=h.context.alertTimelineNode({...detail().items[0],basis:0,binance_basis:999,basis_exchange:source});assert.ok(!markup.includes('999.0000%'));assert.ok(!markup.includes('+0.0000%'))}
+  assert.ok(h.context.alertTimelineNode({...detail().items[0],binance_basis:0,basis_exchange:'Binance'}).includes('+0.0000%'));
+});
+
+test('rapid same-coin path changes reject old responses even when switching back to the first path',async()=>{
+  const pending=[],h=harness(url=>new Promise(resolve=>pending.push({url:new URL(url,'https://example.test'),resolve}))),coin=group(),other=addPath(coin);h.context.renderAlertMasterDetail([coin]);
+  const first=h.context.loadSelectedAlertHistory(),second=h.context.setAlertPath(other.id),third=h.context.setAlertPath(coin.paths[0].id);
+  pending[2].resolve(detail('DEMO/USDT',2,pending[2].url.searchParams.get('path')));await third;
+  pending[1].resolve(detail('DEMO/USDT',1,pending[1].url.searchParams.get('path')));await second;pending[0].resolve(detail());await first;
+  assert.equal(h.run('alertDetailState.pathId'),coin.paths[0].id);assert.equal(h.run('alertDetailState.data.page'),2);assert.equal(h.run('alertDetailState.data.path_id'),coin.paths[0].id);
+});
+
+test('wrong-path responses or individual rows are rejected even if they name the right coin',async()=>{
+  for(const rowOnly of [false,true]){
+    const h=harness(async()=>{const response=detail();if(rowOnly)response.items[0].path_id=pathKey('spot_futures','Bitget');else response.path_id=pathKey('spot_futures','Bitget');return response});
+    h.context.renderAlertMasterDetail([group()]);assert.equal(await h.context.loadSelectedAlertHistory(),false);assert.equal(h.run('alertDetailState.data'),null);
+  }
+});
+
+test('refreshes preserve the selected path and page, then remove expired choices without stale data',async()=>{
+  const h=harness(),coin=group(),other=addPath(coin);h.context.renderAlertMasterDetail([coin]);await h.context.setAlertPath(other.id);await h.context.loadSelectedAlertHistory(2);h.scroll.scrollTop=217;
+  const updated=structuredClone(coin);updated.paths.reverse();updated.paths[0].value_ranges.open_spread={max:4,min:-3};h.context.renderAlertMasterDetail([updated]);
+  assert.equal(h.run('alertDetailState.pathId'),other.id);assert.equal(h.run('alertDetailState.data.page'),2);assert.equal(h.scroll.scrollTop,217);assert.ok(h.node('alertDetailPane').innerHTML.includes('最高 +4.0000%，最低 -3.0000%'));
+  updated.paths=updated.paths.filter(path=>path.id!==other.id);h.context.renderAlertMasterDetail([updated]);assert.equal(h.run('alertDetailState.pathId'),coin.paths[0].id);assert.equal(h.run('alertDetailState.data'),null);assert.equal(h.scroll.scrollTop,0);
+});
+
+test('missing path metadata cannot re-enable globally mixed ranges or fake paths',async()=>{
+  const h=harness(),coin=group();delete coin.paths;h.context.renderAlertMasterDetail([coin]);assert.equal(await h.context.loadSelectedAlertHistory(),false);
+  const markup=h.node('alertDetailPane').innerHTML;assert.ok(markup.includes('暂无可用路径记录'));assert.ok(!markup.includes('最高 +10.0000%'));assert.ok(!markup.includes('id="alertPathSelect"'));
+});
+
+test('path menu escapes untrusted labels and identities and missing venues remain explicitly unrecorded',()=>{
+  const h=harness(),coin=group(),path=addPath(coin,'futures_futures','<img onerror=1>','OKX');coin.paths=[path];h.context.renderAlertMasterDetail([coin]);const markup=h.node('alertDetailPane').innerHTML;
+  assert.ok(!markup.includes('<img'));assert.ok(markup.includes('&lt;img'));assert.ok(markup.includes('&quot;'));
+  assert.equal(h.context.alertPathLabel({long_market:'现货',short_exchange:'Binance',short_market:'合约'}),'现货所未记录 → 币安合约');
+});
+
+test('mobile path selectors retain a readable non-zooming font and touch height',()=>{
+  assert.ok(css.includes('.alert-path-field select {font-size:16px;min-height:40px}'));
+  assert.ok(css.includes('.alert-strategy-switch button {min-height:36px}'));
 });

@@ -276,9 +276,17 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 .layout-view#alerts .alert-detail-card {display:flex;flex-direction:column;height:100%;min-height:0;padding:11px;border:1px solid var(--desk-line);border-left:3px solid #95b4a5;border-radius:8px;box-shadow:none;box-sizing:border-box}
 .layout-view#alerts .alert-card-title {justify-content:flex-start;gap:8px;margin:0 0 4px}
 .layout-view#alerts .alert-card-title h4 {font-size:16px}
-.layout-view#alerts .alert-detail-metrics {display:grid;grid-template-columns:repeat(2,minmax(0,.65fr)) repeat(2,minmax(0,1fr));gap:5px;margin:0 0 7px;flex:0 0 auto}
-.layout-view#alerts .alert-detail-metrics > span {display:grid;gap:2px;padding:5px 6px;background:#f1f6ee;border-radius:4px;font-size:9px;color:#6b7e7c;overflow-wrap:anywhere}
-.layout-view#alerts .alert-detail-metrics b {font-size:12px;font-variant-numeric:tabular-nums}
+.layout-view#alerts .alert-detail-controls {display:flex;align-items:center;flex-wrap:wrap;gap:7px 12px;margin:0 0 7px;flex:0 0 auto;min-width:0}
+.layout-view#alerts .alert-strategy-switch {display:flex;flex:0 0 auto;gap:0;max-width:100%;border:1px solid #cededc;border-radius:5px;overflow:hidden}
+.layout-view#alerts .alert-strategy-switch button {padding:7px 10px;min-height:32px;border:0;border-radius:0;background:#f2f7f5;color:#355870;font-size:12px;font-weight:700;white-space:nowrap}
+.layout-view#alerts .alert-strategy-switch button.active {background:#135b91;color:#fff}
+.layout-view#alerts .alert-strategy-switch button:focus-visible {outline:2px solid #269caa;outline-offset:-3px}
+.layout-view#alerts .alert-path-field {display:flex;align-items:center;gap:7px;flex:1 1 210px;min-width:0;margin:0;color:#607c7b;font-size:11px}
+.layout-view#alerts .alert-path-field select {width:100%;min-width:0;max-width:100%;min-height:32px;box-sizing:border-box;padding:5px 7px;border:1px solid #cededc;border-radius:5px;background:#fffef9;color:#294e68;font-size:12px}
+.layout-view#alerts .alert-path-field > span {flex:0 0 auto}
+.layout-view#alerts .alert-detail-metrics {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:0 0 7px;flex:0 0 auto}
+.layout-view#alerts .alert-detail-metrics > span {display:grid;gap:3px;padding:7px 8px;background:#f1f6ee;border-radius:4px;font-size:10px;color:#6b7e7c;overflow-wrap:anywhere}
+.layout-view#alerts .alert-detail-metrics b {font-size:15px;font-variant-numeric:tabular-nums}
 .layout-view#alerts .alert-metric-range {display:flex;align-items:baseline;flex-wrap:wrap;column-gap:1px;row-gap:0}
 .layout-view#alerts .alert-metric-range > span {white-space:nowrap}
 .layout-view#alerts .alert-range-separator {color:#6b7e7c}
@@ -312,6 +320,7 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 .layout-view#alerts .alert-transfer-exchanges {display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px;min-width:0}
 .layout-view#alerts .alert-transfer-exchange {display:flex;flex-wrap:wrap;align-items:baseline;gap:3px 5px;min-width:0;font-size:10px;overflow-wrap:anywhere}
 .layout-view#alerts .alert-transfer-exchange > b {color:#49616a;font-size:10px}
+.layout-view#alerts .alert-transfer-market-note {margin-left:auto;color:#798681;font-size:9px}
 .layout-view#alerts .alert-detail-status {font-size:10px;color:#7c8c87;min-height:17px;flex:0 0 auto}
 .layout-view#alerts .alert-detail-status:empty {display:none}
 .layout-view#alerts .alert-timeline-scroll {min-height:0;flex:1 1 auto;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
@@ -498,6 +507,10 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
   .layout-view#alerts .alert-roster {height:340px}
   .layout-view#alerts .alert-detail-pane {height:560px;scroll-margin-top:12px}
   .layout-view#alerts .basis-side-grid {grid-template-columns:1fr}
+}
+@media(max-width:760px) {
+  .layout-view#alerts .alert-path-field select {font-size:16px;min-height:40px}
+  .layout-view#alerts .alert-strategy-switch button {min-height:36px}
 }
 @media(max-width:600px) {
   .layout-view#alerts .alert-overview {gap:6px 12px}

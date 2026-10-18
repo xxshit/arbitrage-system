@@ -18,7 +18,7 @@ function harness(fetcher=async url=>detail(new URL(url,'https://example.test').s
   const context={URLSearchParams,console,window:{innerWidth:1280},byId:node,escapeChatHtml:escape,delistingSymbolClass:()=>'',changeClass:value=>value<0?'negative':'positive',percent:value=>(value>=0?'+':'')+Number(value).toFixed(4)+'%',intervalClass:()=>'',exchangeName:escape,fetchRefreshJson:fetcher,renderTipsItems(){},
     replaceHtmlKeepingExchangeLogos:(target,markup)=>{if(target.innerHTML!==markup)target.innerHTML=markup}};
   vm.createContext(context);
-  vm.runInContext("let mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:'',expanded:new Set()};\n"+helpers+'\n'+functions,context);
+  vm.runInContext("let mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+helpers+'\n'+functions,context);
   return {context,node,scroll,run:code=>vm.runInContext(code,context)};
 }
 
@@ -92,10 +92,11 @@ test('a response for the wrong coin is never installed as the current history',a
   const h=harness(async()=>detail('OTHER/USDT'));h.context.renderAlertMasterDetail([group()]);assert.equal(await h.context.loadSelectedAlertHistory(),false);assert.equal(h.run('alertDetailState.data'),null);
 });
 
-test('original message stays escaped and expanded rows survive the next render',()=>{
-  const h=harness();h.context.renderAlertMasterDetail([group()]);h.context.setAlertMessageExpanded(42,true);
-  const markup=h.context.alertTimelineNode({id:42,type:'rapid_basis',created_at:'10-18 10:00',message:'<img onerror=alert(1)>',long_exchange:'Gate',short_exchange:'Binance'});
-  assert.ok(markup.includes('data-alert-event="42" open'));assert.ok(markup.includes('&lt;img'));assert.ok(!markup.includes('<img onerror'));h.context.setAlertMessageExpanded(42,false);assert.equal(h.run('alertDetailState.expanded.size'),0);
+test('timeline omits the detail toggle and its message, close-spread and funding content entirely',()=>{
+  const h=harness(),markup=h.context.alertTimelineNode({id:42,type:'rapid_basis',strategy:'spot_futures',created_at:'10-18 10:00',message:'<img onerror=alert(1)> hidden-message',long_exchange:'Gate',short_exchange:'Binance',open_spread:0.5,basis:-1,close_spread:-0.6943,funding_rate:0.0035});
+  for(const value of ['详细说明','<details','<summary','alert-event-message','ontoggle','hidden-message','<img onerror','平差','资费','-0.6943%','+0.0035%'])assert.ok(!markup.includes(value),value);
+  for(const value of ['10-18 10:00','现多期空','基差速变','Gate','Binance','+0.5000%','-1.0000%'])assert.ok(markup.includes(value),value);
+  assert.ok(!source.includes('setAlertMessageExpanded'));assert.ok(!source.includes('alertDetailState.expanded'));assert.ok(!css.includes('.alert-event-message'));
 });
 
 test('untrusted coin strings cannot break markup or inline action arguments',()=>{

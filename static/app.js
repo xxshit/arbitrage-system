@@ -98,7 +98,7 @@ let alertListQuery = '';
 let alertListSort = 'latest';
 let alertDetailVersion = 0;
 let alertDetailRequest = null;
-let alertDetailState = {symbol:'',data:null,loading:false,error:'',expanded:new Set()};
+let alertDetailState = {symbol:'',data:null,loading:false,error:''};
 let alarmSoundEnabled = localStorage.getItem('arbi-alarm-sound') === 'on';
 const savedChatSoundSetting=localStorage.getItem('arbi-chat-sound');
 let chatSoundEnabled=savedChatSoundSetting===null?alarmSoundEnabled:savedChatSoundSetting==='on';
@@ -495,10 +495,8 @@ function pruneAlertMutes(groups,activeEvents){const visible=new Set([...(groups|
 function toggleAlertMute(symbol,event){event?.stopPropagation();if(isAlertMuted(symbol))mutedAlertSymbols.delete(symbol);else mutedAlertSymbols.add(symbol);renderAlertMasterDetail(latestAlertGroups);renderAlertMuteList();renderTipsItems(latestActiveAlertEvents)}
 function renderAlertMuteList(){const target=byId('alertMuteList');if(!target)return;const muted=[...mutedAlertSymbols].sort();target.innerHTML=muted.length?muted.map(symbol=>`<button class="muted-symbol-pill" onclick="toggleAlertMute('${symbol}',event)">${symbol}<span>取消</span></button>`).join(''):'<p class="empty-alert">暂无静音币种。</p>'}
 function alertTimelineNode(item){
-  const id=Number(item.id)||0;
-  return `<li class="alert-timeline-node ${alertClass(item.type)}"><time>${escapeChatHtml(item.created_at)}</time><div class="alert-event-context"><b>${strategyLabel(item.strategy)} · ${alertLabel(item.type)}</b>${alertExchangePair(item)}<details class="alert-event-message" data-alert-event="${id}" ${alertDetailState.expanded.has(id)?'open':''} ontoggle="setAlertMessageExpanded(${id},this.open)"><summary>详细说明</summary><p>${escapeChatHtml(item.message||'未记录额外说明')}</p><span>平差 ${alertMetric(item.close_spread)} · 资费 ${alertMetric(item.funding_rate)}</span></details></div><span class="alert-event-metric ${changeClass(item.open_spread)}" data-label="开差">${alertMetric(item.open_spread)}</span><span class="alert-event-metric ${changeClass(item.basis)}" data-label="基差">${alertMetric(item.basis)}</span></li>`;
+  return `<li class="alert-timeline-node ${alertClass(item.type)}"><time>${escapeChatHtml(item.created_at)}</time><div class="alert-event-context"><b>${strategyLabel(item.strategy)} · ${alertLabel(item.type)}</b>${alertExchangePair(item)}</div><span class="alert-event-metric ${changeClass(item.open_spread)}" data-label="开差">${alertMetric(item.open_spread)}</span><span class="alert-event-metric ${changeClass(item.basis)}" data-label="基差">${alertMetric(item.basis)}</span></li>`;
 }
-function setAlertMessageExpanded(id,open){open?alertDetailState.expanded.add(id):alertDetailState.expanded.delete(id)}
 function alertMetricRange(range){
   if(!Number.isFinite(range?.max)||!Number.isFinite(range?.min))return '<b class="alert-metric-range neutral">—</b>';
   return `<b class="alert-metric-range" aria-label="最高 ${alertMetric(range.max)}，最低 ${alertMetric(range.min)}"><span class="${changeClass(range.max)}">${alertMetric(range.max)}</span><span class="alert-range-separator" aria-hidden="true">～</span><span class="${changeClass(range.min)}">${alertMetric(range.min)}</span></b>`;
@@ -540,7 +538,7 @@ function renderAlertDetailPane(){
 function renderAlertMasterDetail(groups){
   latestAlertGroups=groups;
   if(!groups.some(group=>group.symbol===selectedAlertSymbol))selectedAlertSymbol=groups[0]?.symbol||'';
-  if(alertDetailState.symbol!==selectedAlertSymbol){alertDetailVersion++;alertDetailState={symbol:selectedAlertSymbol,data:null,loading:false,error:'',expanded:new Set()}}
+  if(alertDetailState.symbol!==selectedAlertSymbol){alertDetailVersion++;alertDetailState={symbol:selectedAlertSymbol,data:null,loading:false,error:''}}
   renderAlertRoster();renderAlertDetailPane();
 }
 function selectAlertSymbol(symbol){

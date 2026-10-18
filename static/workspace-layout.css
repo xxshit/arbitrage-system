@@ -298,10 +298,6 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 .layout-view#alerts .alert-exchange-pair img {width:13px;height:13px}
 .layout-view#alerts .alert-exchange-pair > span {font-size:10px}
 .layout-view#alerts .alert-event-metric {font-size:11px!important;font-weight:700;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
-.layout-view#alerts .alert-event-message {font-size:10px;color:#6b7c79;margin-top:3px}
-.layout-view#alerts .alert-event-message summary {cursor:pointer;list-style:none;color:#6b8c8d;font-size:10px}
-.layout-view#alerts .alert-event-message p {margin:5px 0;line-height:1.7;overflow-wrap:anywhere;color:#49616a}
-.layout-view#alerts .alert-event-message > span {font-size:10px;overflow-wrap:anywhere}
 .layout-view#alerts .alert-detail-pagination {display:flex;align-items:center;flex-wrap:wrap;justify-content:space-between;gap:6px;padding-top:8px;flex:0 0 auto;font-size:10px;color:#6b7d79}
 .layout-view#alerts .alert-detail-pagination button {padding:5px 9px;min-height:28px;font-size:10px}
 .layout-view#alerts .alert-detail-pagination button:disabled {opacity:.4;cursor:default}

@@ -29,9 +29,22 @@ function harness(fetcher=async url=>{const params=new URL(url,'https://example.t
 
 test('compact coin rows contain name, count, mute and signed peaks but no timestamps or large metadata cards',()=>{
   const h=harness(),markup=h.context.alertSymbolCard(group());
-  for(const value of ['DEMO/USDT','alert-symbol-count','alert-symbol-peak','静音','+1.0000%','+2.0000%'])assert.ok(markup.includes(value),value);
+  for(const value of ['DEMO/USDT','alert-symbol-count','alert-symbol-peak','静音','+1.00%','+2.00%'])assert.ok(markup.includes(value),value);
   for(const value of ['10-18','alert-symbol-meta','alert-latest-metrics','最近开差','最近基差'])assert.ok(!markup.includes(value),value);
   assert.ok(markup.includes('aria-pressed="false"'));assert.ok(markup.includes('查看详情'));
+});
+
+test('roster peaks round to two decimals, normalize negative zero and preserve missing values',()=>{
+  const h=harness();
+  for(const [value,expected] of [[-6.9763,'-6.98%'],[0.3789,'+0.38%'],[-76.7095,'-76.71%'],[10,'+10.00%'],[0,'+0.00%'],[-0.0001,'+0.00%'],[null,'—'],[undefined,'—'],[NaN,'—'],[Infinity,'—']])assert.equal(h.context.alertPeakMetric(value),expected);
+});
+
+test('roster rounding does not modify raw peaks, peak sorting or detailed metric precision',()=>{
+  const h=harness(),first=group('FIRST/USDT',3,-6.9763,0.3789),second=group('SECOND/USDT',3,-6.9764,0.3791),original=JSON.stringify(first);
+  const markup=h.context.alertSymbolCard(first);
+  assert.ok(markup.includes('-6.98%'));assert.ok(markup.includes('+0.38%'));assert.equal(JSON.stringify(first),original);
+  h.context.renderAlertMasterDetail([first,second]);h.context.sortAlertSymbols('open_spread');assert.equal(h.context.visibleAlertGroups()[0].symbol,'SECOND/USDT');
+  assert.equal(h.context.alertMetric(-6.9763),'-6.9763%');assert.ok(h.context.alertMetricRange({max:0.3789,min:-6.9763}).includes('+0.3789%'));
 });
 
 test('all 168 coins are rendered without an 80-coin list or viewport limit',()=>{

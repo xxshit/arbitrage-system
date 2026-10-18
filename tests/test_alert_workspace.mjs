@@ -352,6 +352,14 @@ test('mobile path selectors retain a readable non-zooming font and touch height'
   assert.ok(css.includes('.alert-strategy-switch button {min-height:36px}'));
 });
 
+test('path controls use intrinsic content width without stretching into unused space',()=>{
+  const field=css.match(/\.layout-view#alerts \.alert-path-field \{([^}]+)\}/)?.[1],select=css.match(/\.layout-view#alerts \.alert-path-field select \{([^}]+)\}/)?.[1];
+  assert.ok(field.includes('flex:0 1 auto'));assert.ok(field.includes('min-width:0;max-width:100%'));
+  assert.ok(select.includes('width:auto;flex:0 1 auto'));assert.ok(select.includes('min-width:0;max-width:100%'));
+  assert.ok(!field.includes('210px'));assert.ok(!select.startsWith('width:100%'));
+  assert.ok(css.includes('.alert-detail-controls {display:flex;align-items:center;flex-wrap:wrap;'));
+});
+
 test('read errors surface the bounded escaped reason without claiming nonexistent history was retained',async()=>{
   const h=harness(async()=>{throw new Error('<img src=x onerror=1>')});h.context.renderAlertMasterDetail([group()]);assert.equal(await h.context.loadSelectedAlertHistory(),false);
   const markup=h.node('alertDetailPane').innerHTML;assert.ok(markup.includes('明细读取失败：&lt;img'));assert.ok(!markup.includes('<img'));assert.ok(!markup.includes('已保留上次记录'));

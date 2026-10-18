@@ -7,7 +7,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from anomaly_streams import ENDPOINTS, parse_frame, subscription
-import websocket
+from websockets.sync.client import connect
 
 
 def probe(feed):
@@ -15,15 +15,15 @@ def probe(feed):
     started = time.monotonic()
     sock = None
     try:
-        sock = websocket.create_connection(ENDPOINTS[feed], timeout=10)
+        sock = connect(ENDPOINTS[feed], open_timeout=10, close_timeout=1, ping_interval=None, proxy=None)
         sock.send(json.dumps(subscription(feed, [symbol])))
         while time.monotonic() - started < 20:
-            frame = sock.recv()
+            frame = sock.recv(timeout=5)
             now = time.time()
             items = parse_frame(feed, frame, now)
             if items:
                 item = items[0]
-                return dict(feed=feed, ok=True, lag_ms=round((now-item["at"])*1000), timestamp_source=item.get("timestamp_source", "exchange"), fields=sorted(item))
+                return dict(feed=feed, ok=True, compressed=bool(sock.response.headers.get("Sec-WebSocket-Extensions")), lag_ms=round((now-item["at"])*1000), timestamp_source=item.get("timestamp_source", "exchange"), fields=sorted(item))
         return dict(feed=feed, ok=False, error="no_public_data")
     except Exception as error:
         return dict(feed=feed, ok=False, error=type(error).__name__)

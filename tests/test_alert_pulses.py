@@ -311,12 +311,37 @@ class StreamHubTests(unittest.TestCase):
 
 
 class PublicParserTests(unittest.TestCase):
-    def test_fast_receive_still_rejects_invalid_utf8(self):
-        import websocket
-        connection = websocket.WebSocket(skip_utf8_validation=True)
-        with patch.object(connection, "recv_data", return_value=(websocket.ABNF.OPCODE_TEXT, b"\xff")):
-            with self.assertRaises(UnicodeDecodeError):
-                connection.recv()
+    def test_compressed_transport_preserves_order_and_rejects_invalid_utf8(self):
+        import threading
+        from websockets.sync.client import connect
+        from websockets.sync.server import serve
+        from websockets.exceptions import ConnectionClosedError
+
+        def handler(socket):
+            for value in (100, 101, 100.1, 100.4):
+                socket.send(json.dumps(dict(s="BTCUSDT", b=value, a=value+.01, B=2, A=2)))
+            socket.send(b"\xff", text=True)
+            socket.recv(timeout=2)
+
+        def safe_handler(socket):
+            try:
+                handler(socket)
+            except ConnectionClosedError:
+                pass  # client correctly closes the invalid-UTF8 connection
+
+        with serve(safe_handler, "127.0.0.1", 0) as server:
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                with connect(f"ws://127.0.0.1:{server.socket.getsockname()[1]}", proxy=None) as socket:
+                    self.assertIn("permessage-deflate", socket.response.headers["Sec-WebSocket-Extensions"])
+                    values = [parse_frame("bn_spot", socket.recv(timeout=2), 1000)[0]["bid"] for _ in range(4)]
+                    self.assertEqual(values, [100, 101, 100.1, 100.4])
+                    with self.assertRaises(ConnectionClosedError):
+                        socket.recv(timeout=2)
+            finally:
+                server.shutdown()
+                thread.join(timeout=2)
 
     def test_only_public_subscriptions_no_auth_or_orders(self):
         for feed in ("bn_spot", "bn_future", "bn_mark", "gate", "bitget", "bybit", "okx"):

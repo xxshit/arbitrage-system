@@ -308,18 +308,20 @@ class PublicWorker:
         self.last_error_type = None
 
     def run(self):
-        import websocket
+        from websockets.sync.client import connect
         backoff = 1
         keys = [(self.feed, symbol) for symbol in self.symbols]
         while not self.stop.is_set():
             socket = None
             connected_at = time.monotonic()
             try:
-                # recv() still performs strict UTF-8 decoding in C. Avoid the
-                # redundant Python byte-by-byte pre-scan on high-volume feeds;
-                # TLS verification, strict JSON parsing and quote checks remain.
-                socket = websocket.create_connection(ENDPOINTS[self.feed], timeout=5, enable_multithread=True, skip_utf8_validation=True)
-                socket.settimeout(2)
+                # Negotiate lossless compression to leave network headroom for
+                # full-market feeds. Bounded receive buffers apply backpressure,
+                # never silently discard price frames. Default TLS verification
+                # and strict UTF-8 decoding remain enabled.
+                socket = connect(ENDPOINTS[self.feed], open_timeout=5, close_timeout=1,
+                                 ping_interval=None, proxy=None, compression="deflate",
+                                 max_size=1048576, max_queue=16)
                 socket.send(json.dumps(subscription(self.feed, self.symbols)))
                 self.connected = True
                 self.last_message = time.time()
@@ -339,8 +341,8 @@ class PublicWorker:
                             socket.ping()
                         last_ping = now
                     try:
-                        message = socket.recv()
-                    except websocket.WebSocketTimeoutException:
+                        message = socket.recv(timeout=2)
+                    except TimeoutError:
                         continue
                     if not message:
                         break

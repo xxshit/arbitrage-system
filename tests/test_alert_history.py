@@ -95,6 +95,40 @@ class AlertHistoryTests(unittest.TestCase):
         self.assertTrue(all(row["symbol"] == "DEMO/USDT" for row in rows))
         self.assertTrue(all(rows[i]["created_at_epoch"] >= rows[i+1]["created_at_epoch"] for i in range(len(rows)-1)))
 
+    def test_ranges_use_all_24h_confirmed_events_not_the_current_page_or_legacy_timeline(self):
+        self.insert([self.event(created_at=self.now - timedelta(minutes=i + 1)) for i in range(90)] + [
+            self.event(open_spread=10, basis=4, created_at=self.now - timedelta(hours=23)),
+            self.event(open_spread=-50, basis=-8, created_at=self.now - timedelta(hours=24)),
+            self.event(open_spread=999, basis=-999, created_at=self.now - timedelta(hours=24, seconds=1)),
+            self.event(open_spread=888, basis=-888, created_at=self.now + timedelta(seconds=1)),
+            self.event(alert_type="spot_pump", message="旧版未确认", open_spread=777, basis=-777),
+        ])
+        for params in ({"view": "summary"}, {}):
+            group = self.get(**params)["events"][0]
+            self.assertEqual(group["alert_count"], 92)
+            self.assertEqual(group["value_ranges"], {"open_spread": {"max": 10, "min": -50}, "basis": {"max": 4, "min": -8}})
+            self.assertEqual((group["move_peaks"]["open_spread"], group["move_peaks"]["basis"]), (-50, -8))
+        self.assertTrue(all(item["open_spread"] == 0.8 for item in self.get(view="detail", symbol="DEMO/USDT")["items"]))
+
+    def test_ranges_preserve_one_sided_zero_equal_and_missing_values(self):
+        self.insert([
+            self.event("POSITIVE/USDT", open_spread=10, basis=2), self.event("POSITIVE/USDT", open_spread=3, basis=1),
+            self.event("NEGATIVE/USDT", open_spread=-2, basis=-3), self.event("NEGATIVE/USDT", open_spread=-50, basis=-8),
+            self.event("ZERO/USDT", open_spread=0, basis=0),
+            self.event("MISSING/USDT", open_spread=None, basis=None),
+            self.event("PARTIAL/USDT", open_spread=None, basis=2), self.event("PARTIAL/USDT", open_spread=4, basis=None),
+        ])
+        groups = {group["symbol"]: group["value_ranges"] for group in self.get(view="summary")["events"]}
+        self.assertEqual(groups["POSITIVE/USDT"], {"open_spread": {"max": 10, "min": 3}, "basis": {"max": 2, "min": 1}})
+        self.assertEqual(groups["NEGATIVE/USDT"], {"open_spread": {"max": -2, "min": -50}, "basis": {"max": -3, "min": -8}})
+        self.assertEqual(groups["ZERO/USDT"], {field: {"max": 0, "min": 0} for field in ("open_spread", "basis")})
+        self.assertEqual(groups["MISSING/USDT"], {field: {"max": None, "min": None} for field in ("open_spread", "basis")})
+        self.assertEqual(groups["PARTIAL/USDT"], {"open_spread": {"max": 4, "min": 4}, "basis": {"max": 2, "min": 2}})
+
+    def test_ranges_ignore_nonfinite_values_without_inventing_zero(self):
+        self.insert([self.event(open_spread=float("inf"), basis=float("-inf")), self.event(open_spread=3, basis=None)])
+        self.assertEqual(self.get(view="summary")["events"][0]["value_ranges"], {"open_spread": {"max": 3, "min": 3}, "basis": {"max": None, "min": None}})
+
     def test_tied_timestamps_have_stable_id_order_and_page_bounds(self):
         self.insert([self.event() for _ in range(4)])
         data = self.get(view="detail", symbol="DEMO/USDT", page_size=2)

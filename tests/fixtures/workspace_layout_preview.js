@@ -24,7 +24,10 @@
     long_exchange:'Gate',short_exchange:'Binance',long_market:'现货',short_market:'合约',short_interval:4,funding_interval_hours:4,remaining_seconds:90,expires_at_epoch:now()+90};
   const alertGroups = [...symbols,...Array.from({length:164},(_,i)=>`TESTCOIN${String(i+1).padStart(3,'0')}/USDT`)].map((symbol,index) => {
     const timeline=Array.from({length:index?3:93},(_,i)=>({...event,id:index*100+i+1,symbol,strategy:i%2?'futures_futures':'spot_futures',long_exchange:i%2?'Bybit':'Gate',long_market:i%2?'合约':'现货',long_interval:i%2?4:null,created_at:`10-18 ${String(10-Math.floor(i/12)).padStart(2,'0')}:${String(59-i%12*5).padStart(2,'0')}:00`,open_spread:i%2?-0.8512:0.8534,basis:i%2?-1.4012:1.4034}));
-    return {symbol,alert_count:timeline.length,latest:timeline[0],timeline,move_peaks:{open_spread:index%2?-12.3485:1.3,basis:1.4}};
+    if(index===0){Object.assign(timeline[91],{open_spread:10.1234,basis:2.277});Object.assign(timeline[92],{open_spread:-50.5678,basis:-7.8047})}
+    const value_ranges=Object.fromEntries(['open_spread','basis'].map(field=>{const values=timeline.map(item=>item[field]);return [field,{max:Math.max(...values),min:Math.min(...values)}]}));
+    const move_peaks=Object.fromEntries(Object.entries(value_ranges).map(([field,{max,min}])=>[field,Math.abs(max)>=Math.abs(min)?max:min]));
+    return {symbol,alert_count:timeline.length,latest:timeline[0],timeline,move_peaks,value_ranges};
   });
   const plans = symbols.slice(0,2).map((symbol,index) => ({id:index+1,symbol,direction:index?'short':'long',status:'open',horizon:'short',pnl:1.8,
     leverage:1,entry_price:1.23,current_price:1.25,stop_price:1.16,take_profit_1:1.35,take_profit_2:1.42,max_hold_minutes:60,thesis:'合成样本，用于检查长说明、多腿数值和详细记录的布局。'}));

@@ -12484,6 +12484,10 @@ def alerts():
         basis_items = [item for item in items if item.basis is not None]
         max_spread_item = max(spread_items, key=lambda item: abs(item.open_spread or 0), default=None)
         max_basis_item = max(basis_items, key=lambda item: abs(item.basis or 0), default=None)
+        value_ranges = {}
+        for field in ("open_spread", "basis"):
+            values = [getattr(item, field) for item in items if getattr(item, field) is not None and math.isfinite(getattr(item, field))]
+            value_ranges[field] = {"max": max(values, default=None), "min": min(values, default=None)}
         return {
             "symbol": symbol,
             "latest": latest,
@@ -12495,6 +12499,7 @@ def alerts():
                 "basis": max_basis_item.basis if max_basis_item else None,
                 "basis_at": max_basis_item.created_at.strftime("%m-%d %H:%M:%S") if max_basis_item else None,
             },
+            "value_ranges": value_ranges,
             "timeline": timeline,
         }
 

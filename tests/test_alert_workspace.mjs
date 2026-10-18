@@ -9,7 +9,7 @@ const css=readFileSync(new URL('../static/workspace-layout.css',import.meta.url)
 const functions=source.slice(source.indexOf('function isAlertMuted('),source.indexOf('function renderTipsItems('));
 const helpers=source.slice(source.indexOf('function alertLabel('),source.indexOf('function toggleTips('));
 const escape=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-const group=(symbol='DEMO/USDT',count=3,spread=1,basis=2)=>({symbol,alert_count:count,latest:{symbol,created_at:'10-18 10:00:00',type:'rapid_basis',strategy:'spot_futures',open_spread:0.5,basis:1},move_peaks:{open_spread:spread,basis}});
+const group=(symbol='DEMO/USDT',count=3,spread=1,basis=2)=>({symbol,alert_count:count,latest:{symbol,created_at:'10-18 10:00:00',type:'rapid_basis',strategy:'spot_futures',open_spread:0.5,basis:1},move_peaks:{open_spread:spread,basis},value_ranges:{open_spread:{max:10,min:-50},basis:{max:3,min:-2}}});
 const detail=(symbol='DEMO/USDT',page=1)=>({symbol,total:43,page,pages:2,page_size:40,items:[{id:page,symbol,type:'rapid_basis',created_at:'10-18 10:00:00',message:'Synthetic detail',open_spread:0.5,basis:1}]});
 
 function harness(fetcher=async url=>detail(new URL(url,'https://example.test').searchParams.get('symbol'))){
@@ -124,7 +124,34 @@ test('sticky roster header shares the data scroll gutter, grid and horizontal pa
 test('detail omits repeated coin header, mute and normal status while keeping metrics, timeline and pagination',async()=>{
   const h=harness();h.context.renderAlertMasterDetail([group()]);await h.context.loadSelectedAlertHistory();const markup=h.node('alertDetailPane').innerHTML;
   for(const value of ['<header','<h4','alert-latest-label','strategy-badge','alert-mute-toggle','新到旧','共 43 条'])assert.ok(!markup.includes(value),value);
-  for(const value of ['最近开差','最近基差','24H开差峰值','24H基差峰值','alert-timeline-scroll','10-18 10:00:00','alert-detail-pagination','aria-label="DEMO/USDT 报警明细"'])assert.ok(markup.includes(value),value);
+  for(const value of ['最近开差','最近基差','24H开差范围','24H基差范围','alert-timeline-scroll','10-18 10:00:00','alert-detail-pagination','aria-label="DEMO/USDT 报警明细"'])assert.ok(markup.includes(value),value);
   assert.ok(markup.includes('<div class="alert-detail-status" role="status"></div>'));assert.ok(css.includes('.alert-detail-status:empty {display:none}'));
   h.run('alertDetailState.loading=true');h.context.renderAlertDetailPane();assert.ok(!h.node('alertDetailPane').innerHTML.includes('正在读取明细…'));
+});
+
+test('detail ranges show the full-window maximum then minimum with independently signed colors',()=>{
+  const h=harness();h.context.renderAlertMasterDetail([group()]);const markup=h.node('alertDetailPane').innerHTML;
+  assert.ok(markup.includes('最高 +10.0000%，最低 -50.0000%'));
+  assert.ok(markup.includes('<span class="positive">+10.0000%</span><span class="alert-range-separator" aria-hidden="true">～</span><span class="negative">-50.0000%</span>'));
+  assert.ok(markup.includes('最高 +3.0000%，最低 -2.0000%'));
+  assert.ok(!markup.includes('24H开差峰值'));assert.ok(!markup.includes('24H基差峰值'));
+  assert.ok(css.includes('.alert-metric-range {display:flex;align-items:baseline;flex-wrap:wrap;'));
+});
+
+test('ranges retain all-positive, all-negative, zero and equal endpoints without inventing another sign',()=>{
+  const h=harness();
+  for(const [max,min,label] of [[5,1,'最高 +5.0000%，最低 +1.0000%'],[-1,-5,'最高 -1.0000%，最低 -5.0000%'],[0,0,'最高 +0.0000%，最低 +0.0000%'],[2,2,'最高 +2.0000%，最低 +2.0000%']])assert.ok(h.context.alertMetricRange({max,min}).includes(label));
+});
+
+test('missing or non-finite ranges show an unavailable marker instead of zero or the legacy single peak',()=>{
+  const h=harness();
+  for(const range of [undefined,null,{}, {max:null,min:null},{max:1,min:null},{max:NaN,min:1},{max:Infinity,min:-1},{max:'10',min:-1}])assert.equal(h.context.alertMetricRange(range),'<b class="alert-metric-range neutral">—</b>');
+  const legacy=group();delete legacy.value_ranges;h.context.renderAlertMasterDetail([legacy]);assert.equal((h.node('alertDetailPane').innerHTML.match(/alert-metric-range neutral/g)||[]).length,2);
+});
+
+test('a refreshed summary updates ranges without clearing the selected history page or scroll position',async()=>{
+  const h=harness(async()=>detail('DEMO/USDT',2));h.context.renderAlertMasterDetail([group()]);await h.context.loadSelectedAlertHistory(2);h.scroll.scrollTop=210;
+  const updated=group();updated.value_ranges.open_spread={max:2,min:-5};h.context.renderAlertMasterDetail([updated]);
+  assert.ok(h.node('alertDetailPane').innerHTML.includes('最高 +2.0000%，最低 -5.0000%'));assert.ok(!h.node('alertDetailPane').innerHTML.includes('最高 +10.0000%，最低 -50.0000%'));
+  assert.equal(h.run('selectedAlertSymbol'),'DEMO/USDT');assert.equal(h.run('alertDetailState.data.page'),2);assert.equal(h.scroll.scrollTop,210);
 });

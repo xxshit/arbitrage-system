@@ -276,9 +276,12 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 .layout-view#alerts .alert-detail-card {display:flex;flex-direction:column;height:100%;min-height:0;padding:11px;border:1px solid var(--desk-line);border-left:3px solid #95b4a5;border-radius:8px;box-shadow:none;box-sizing:border-box}
 .layout-view#alerts .alert-card-title {justify-content:flex-start;gap:8px;margin:0 0 4px}
 .layout-view#alerts .alert-card-title h4 {font-size:16px}
-.layout-view#alerts .alert-detail-metrics {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px;margin:0 0 7px;flex:0 0 auto}
+.layout-view#alerts .alert-detail-metrics {display:grid;grid-template-columns:repeat(2,minmax(0,.65fr)) repeat(2,minmax(0,1fr));gap:5px;margin:0 0 7px;flex:0 0 auto}
 .layout-view#alerts .alert-detail-metrics > span {display:grid;gap:2px;padding:5px 6px;background:#f1f6ee;border-radius:4px;font-size:9px;color:#6b7e7c;overflow-wrap:anywhere}
 .layout-view#alerts .alert-detail-metrics b {font-size:12px;font-variant-numeric:tabular-nums}
+.layout-view#alerts .alert-metric-range {display:flex;align-items:baseline;flex-wrap:wrap;column-gap:1px;row-gap:0}
+.layout-view#alerts .alert-metric-range > span {white-space:nowrap}
+.layout-view#alerts .alert-range-separator {color:#6b7e7c}
 .layout-view#alerts .alert-detail-status {font-size:10px;color:#7c8c87;min-height:17px;flex:0 0 auto}
 .layout-view#alerts .alert-detail-status:empty {display:none}
 .layout-view#alerts .alert-timeline-scroll {min-height:0;flex:1 1 auto;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}

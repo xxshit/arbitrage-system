@@ -111,3 +111,12 @@ test('the roster and details have separate keyboard-scrollable containers and co
   assert.ok(css.includes('grid-template-columns:minmax(345px,390px) minmax(0,1fr)!important'));
   assert.ok(source.includes("fetchRefreshJson('/api/alerts?view=summary')"));
 });
+
+test('sticky roster header shares the data scroll gutter, grid and horizontal padding',()=>{
+  const list=html.indexOf('id="alertSymbolList"'),columns=html.indexOf('class="alert-roster-columns"');assert.ok(list<columns);
+  assert.ok(source.includes('alertRosterColumnsMarkup()+(groups.length?'));
+  assert.ok(css.includes(':is(.alert-roster-columns,.alert-symbol-option) {display:grid;grid-template-columns:'));
+  assert.ok(css.includes('align-items:center;padding:5px 6px 5px 7px;border-left:3px solid transparent;box-sizing:border-box'));
+  assert.ok(css.includes('.alert-roster-columns {position:sticky;top:0;z-index:3;'));
+  assert.ok(css.includes('.alert-symbol-option > .alert-mute-toggle {justify-self:stretch;width:100%'));
+});

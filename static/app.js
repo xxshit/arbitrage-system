@@ -515,10 +515,11 @@ function visibleAlertGroups(groups=latestAlertGroups){
     return 0;
   });
 }
+function alertRosterColumnsMarkup(){return '<div class="alert-roster-columns" aria-hidden="true"><span>币种</span><span>次数</span><span>开差峰值</span><span>基差峰值</span><span>静音</span></div>'}
 function renderAlertRoster(){
   const groups=visibleAlertGroups(),list=byId('alertSymbolList');if(!list)return;
   const top=list.scrollTop;
-  replaceHtmlKeepingExchangeLogos(list,groups.length?groups.map(alertSymbolCard).join(''):`<p class="empty-alert">${latestAlertGroups.length?'没有匹配的币种，清空搜索可查看全部。':'最近24小时暂无确认后的报警。'}</p>`);list.scrollTop=top;
+  replaceHtmlKeepingExchangeLogos(list,alertRosterColumnsMarkup()+(groups.length?groups.map(alertSymbolCard).join(''):`<p class="empty-alert">${latestAlertGroups.length?'没有匹配的币种，清空搜索可查看全部。':'最近24小时暂无确认后的报警。'}</p>`));list.scrollTop=top;
   byId('alertRosterCount').textContent=alertListQuery?`${groups.length} / ${latestAlertGroups.length} 币`:`全部 ${latestAlertGroups.length} 币`;
   byId('alertTotalSymbols').textContent=latestAlertGroups.length;
   byId('alertTotalEvents').textContent=latestAlertGroups.reduce((sum,group)=>sum+group.alert_count,0);

@@ -102,6 +102,7 @@ class AlertStreamHub:
         self.routes, self.by_key, self.books, self.marks = {}, defaultdict(set), {}, {}
         self.detector = PulseDetector()
         self.pending, self.workers, self.fresh = {}, {}, {}
+        self.evaluated_at, self.dirty = {}, set()
         self.running = False
         self.rejected = 0
         self.frame_counts = defaultdict(lambda: defaultdict(int))
@@ -121,6 +122,7 @@ class AlertStreamHub:
                 self._updates(self.detector.reset(path, now, "isolated" if path not in incoming else "data_gap"))
                 self.routes.pop(path)
                 self.fresh.pop(path, None)
+                self.dirty.discard(path)
             self.routes.update(incoming)
             self.by_key = defaultdict(set)
             for route in self.routes.values():
@@ -135,9 +137,11 @@ class AlertStreamHub:
             for key in keys:
                 self.books.pop(key, None)
                 self.marks.pop(key, None)
+                self.evaluated_at.pop(key, None)
                 affected.update(self.by_key.get(key, ()))
             for path in affected:
                 self.fresh.pop(path, None)
+                self.dirty.add(path)
                 self._updates(self.detector.reset(path, now))
 
     def ingest(self, feed, item, received=None):
@@ -188,6 +192,18 @@ class AlertStreamHub:
                     self.invalidate([key], now)
             cache[key] = {**item, "received": now}
             counts["accepted"] += 1
+            fields = ("mark", "index") if feed == "bn_mark" else ("bid", "ask")
+            changed = previous is None or any(item[name] != previous[name] for name in fields)
+            paths = self.by_key[key]
+            if changed:
+                self.dirty.update(paths)
+            elif now - self.evaluated_at.get(key, 0) < 1 and all(path in self.fresh and path not in self.dirty for path in paths):
+                # Full quotes/quantities are still validated and cached. Avoid
+                # recomputing three metrics for every quantity-only frame. A
+                # price change awaiting alignment stays dirty and cannot skip.
+                counts["unchanged_skipped"] += 1
+                return
+            self.evaluated_at[key] = now
             for path in self.by_key[key]:
                 route = self.routes[path]
                 long, short = self.books.get(route.long_key), self.books.get(route.short_key)
@@ -211,6 +227,7 @@ class AlertStreamHub:
                         self.fresh.pop(path, None)
                         continue
                 self.fresh[path] = now
+                self.dirty.discard(path)
                 # Public, aligned books are observations, NOT a bullish claim.
                 for metric, value in (("spread", context["open_spread"]), ("basis", context["basis"]), ("price", 50 * (math.log(lm) + math.log(sm)))):
                     if finite(value):
@@ -291,7 +308,10 @@ class PublicWorker:
             socket = None
             connected_at = time.monotonic()
             try:
-                socket = websocket.create_connection(ENDPOINTS[self.feed], timeout=5, enable_multithread=True)
+                # recv() still performs strict UTF-8 decoding in C. Avoid the
+                # redundant Python byte-by-byte pre-scan on high-volume feeds;
+                # TLS verification, strict JSON parsing and quote checks remain.
+                socket = websocket.create_connection(ENDPOINTS[self.feed], timeout=5, enable_multithread=True, skip_utf8_validation=True)
                 socket.settimeout(2)
                 socket.send(json.dumps(subscription(self.feed, self.symbols)))
                 self.connected = True

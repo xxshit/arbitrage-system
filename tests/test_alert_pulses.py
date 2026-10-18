@@ -204,6 +204,26 @@ class StreamHubTests(unittest.TestCase):
         self.book("bn_future", 1003, 101)
         self.assertEqual(self.hub.batch(), [])
 
+    def test_quantity_only_frames_cache_freshness_without_recomputing_metrics(self):
+        self.book("gate", 1000)
+        self.book("bn_future", 1000)
+        self.book("bn_future", 1000.1, bid_qty=2)
+        self.assertEqual(self.hub.frame_counts["bn_future"]["unchanged_skipped"], 1)
+        self.assertEqual(self.hub.books[self.route.short_key]["at"], 1000.1)
+        self.assertFalse(self.hub.batch())
+
+    def test_price_change_waiting_for_alignment_is_not_skipped_on_same_price_refresh(self):
+        self.book("gate", 1000)
+        self.book("bn_future", 1000)
+        self.book("bn_future", 1002.1, 101)  # not yet aligned
+        self.assertFalse(self.hub.batch())
+        self.assertIn(PATH, self.hub.dirty)
+        self.book("gate", 1002.11)  # same price, but now the spike is observable
+        first = self.hub.batch()[0]
+        self.assertGreater(first["peak"], .9)
+        self.book("bn_future", 1002.12, 100.1)
+        self.assertEqual(self.hub.batch()[0]["state"], "retraced")
+
     def test_zero_nan_crossed_and_empty_quantity_rejected(self):
         for values in ({"bid": 0}, {"ask": float("nan")}, {"ask": 80}, {"bid_qty": 0}):
             self.book("gate", 1000, **values)
@@ -291,6 +311,13 @@ class StreamHubTests(unittest.TestCase):
 
 
 class PublicParserTests(unittest.TestCase):
+    def test_fast_receive_still_rejects_invalid_utf8(self):
+        import websocket
+        connection = websocket.WebSocket(skip_utf8_validation=True)
+        with patch.object(connection, "recv_data", return_value=(websocket.ABNF.OPCODE_TEXT, b"\xff")):
+            with self.assertRaises(UnicodeDecodeError):
+                connection.recv()
+
     def test_only_public_subscriptions_no_auth_or_orders(self):
         for feed in ("bn_spot", "bn_future", "bn_mark", "gate", "bitget", "bybit", "okx"):
             self.assertNotRegex(json.dumps(subscription(feed, ["BTCUSDT"])).lower(), r"apikey|secret|login|order\.create|withdraw")

@@ -29,7 +29,7 @@
     const value_ranges=Object.fromEntries(['open_spread','basis'].map(field=>{const values=timeline.map(item=>item[field]);return [field,{max:Math.max(...values),min:Math.min(...values)}]}));
     const move_peaks=Object.fromEntries(Object.entries(value_ranges).map(([field,{max,min}])=>[field,Math.abs(max)>=Math.abs(min)?max:min]));
     const transfer_statuses=[wallet('Gate',{chains:[{name:'BSC',deposit_open:index===1,withdraw_open:true},{name:'ETH',deposit_open:true,withdraw_open:false}]}),wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC',chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}],reason:'快照已过期'}),wallet('Binance',{state:'unknown',chains:[],captured_at:null,reason:'尚未接入账户只读充提接口'})];
-    return {symbol,alert_count:timeline.length,latest:timeline[0],timeline,move_peaks,value_ranges,transfer_statuses};
+    return {symbol,alert_count:timeline.length,latest:timeline[0],timeline,move_peaks,value_ranges,basis_exchange:'Binance',transfer_statuses};
   });
   const plans = symbols.slice(0,2).map((symbol,index) => ({id:index+1,symbol,direction:index?'short':'long',status:'open',horizon:'short',pnl:1.8,
     leverage:1,entry_price:1.23,current_price:1.25,stop_price:1.16,take_profit_1:1.35,take_profit_2:1.42,max_hold_minutes:60,thesis:'合成样本，用于检查长说明、多腿数值和详细记录的布局。'}));

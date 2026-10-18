@@ -130,6 +130,59 @@ class AlertHistoryTests(unittest.TestCase):
         self.insert([self.event(open_spread=float("inf"), basis=float("-inf")), self.event(open_spread=3, basis=None)])
         self.assertEqual(self.get(view="summary")["events"][0]["value_ranges"], {"open_spread": {"max": 3, "min": 3}, "basis": {"max": None, "min": None}})
 
+    def test_basis_range_only_uses_binance_contract_samples_in_either_leg(self):
+        self.insert([
+            self.event(long_exchange="Gate", short_exchange="Binance", basis=1.4),
+            self.event(long_exchange="Bitget", short_exchange="Binance", basis=-2.6),
+            self.event(strategy="futures_futures", long_exchange="Binance", short_exchange="Bybit", basis=3),
+            self.event(strategy="futures_futures", long_exchange="OKX", short_exchange="Binance", basis=-4),
+            self.event(strategy="futures_futures", long_exchange="Bybit", short_exchange="OKX", basis=999, open_spread=20),
+            self.event(long_exchange="Binance", short_exchange="Bybit", basis=-999),
+            self.event(strategy="unrecognized", short_exchange="Binance", basis=888),
+        ])
+        for params in ({"view": "summary"}, {}):
+            with patch.object(module, "get_json", side_effect=AssertionError("ranges must be historical and DB-only")):
+                group = self.get(**params)["events"][0]
+            self.assertEqual(group["basis_exchange"], "Binance")
+            self.assertEqual(group["value_ranges"]["basis"], {"max": 3, "min": -4})
+            self.assertEqual(group["value_ranges"]["open_spread"], {"max": 20, "min": 0.8})
+            self.assertEqual(group["alert_count"], 7)
+
+    def test_nonbinance_legacy_zero_does_not_widen_one_sided_binance_range(self):
+        self.insert([
+            self.event(long_exchange="Gate", short_exchange="Binance", basis=2),
+            self.event(strategy="futures_futures", long_exchange="Bybit", short_exchange="OKX", basis=0),
+            self.event("NEGATIVE/USDT", short_exchange="Binance", basis=-2),
+            self.event("NEGATIVE/USDT", strategy="futures_futures", long_exchange="Bybit", short_exchange="OKX", basis=0),
+            self.event("NO-BINANCE/USDT", strategy="futures_futures", long_exchange="Bybit", short_exchange="OKX", basis=0),
+        ])
+        groups = {group["symbol"]: group for group in self.get(view="summary")["events"]}
+        self.assertEqual(groups["DEMO/USDT"]["value_ranges"]["basis"], {"max": 2, "min": 2})
+        self.assertEqual(groups["NEGATIVE/USDT"]["value_ranges"]["basis"], {"max": -2, "min": -2})
+        self.assertEqual(groups["NO-BINANCE/USDT"]["value_ranges"]["basis"], {"max": None, "min": None})
+
+    def test_legacy_spot_binance_basis_and_genuine_zero_remain_valid(self):
+        self.insert([self.event(basis=1.5), self.event(short_exchange="Binance", basis=0)])
+        self.assertEqual(self.get(view="summary")["events"][0]["value_ranges"]["basis"], {"max": 1.5, "min": 0})
+
+    def test_new_dual_spread_alerts_preserve_missing_binance_basis_as_null(self):
+        cases = [
+            ("NO-BINANCE/USDT", "Bybit", "OKX", 99, -99, None),
+            ("MISSING-SHORT/USDT", "Bybit", "Binance", 99, None, None),
+            ("MISSING-LONG/USDT", "Binance", "Bybit", None, -99, None),
+            ("REAL-ZERO/USDT", "Bybit", "Binance", 99, 0, 0),
+        ]
+        groups = [{"symbol": symbol, "rows": [{"long_exchange": long, "short_exchange": short, "long_basis": long_basis, "short_basis": short_basis, "open_spread": 0.8, "close_spread": 0.9, "short_funding_rate": 0.01}]} for symbol, long, short, long_basis, short_basis, _expected in cases]
+        with module.app.app_context(), patch.object(module, "rapid_move_alerts", side_effect=lambda key, metric, value: [(30, 0.5, 0.6)] if metric == "spread" else []), patch.object(module, "validate_dual_alert_quote", return_value=True):
+            module.evaluate_dual_alerts(groups)
+            events = {event.symbol: event for event in module.AlertEvent.query.all()}
+            self.assertEqual(len(events), len(cases))
+            for symbol, _long, _short, _long_basis, _short_basis, expected in cases:
+                with self.subTest(symbol=symbol):
+                    self.assertEqual(events[symbol].alert_type, "rapid_spread")
+                    self.assertEqual(events[symbol].basis, expected)
+                    self.assertEqual(events[symbol].open_spread, 0.8)
+
     def test_tied_timestamps_have_stable_id_order_and_page_bounds(self):
         self.insert([self.event() for _ in range(4)])
         data = self.get(view="detail", symbol="DEMO/USDT", page_size=2)

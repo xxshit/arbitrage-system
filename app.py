@@ -3165,7 +3165,8 @@ def evaluate_dual_alerts(groups):
         for row in group["rows"]:
             path = (symbol, row["long_exchange"], row["short_exchange"])
             bn_basis = row.get("long_basis") if row["long_exchange"] == "Binance" else row.get("short_basis") if row["short_exchange"] == "Binance" else None
-            alert_row = {**row, "basis": bn_basis if bn_basis is not None else 0.0, "funding_rate": row.get("short_funding_rate")}
+            # A path without a Binance contract has no Binance basis, not a zero basis.
+            alert_row = {**row, "basis": bn_basis, "funding_rate": row.get("short_funding_rate")}
             for metric_key, metric_label, value in (("spread", "开差", float(row.get("open_spread") or 0)), ("basis", "BN 基差", float(bn_basis or 0))):
                 if metric_key == "basis" and bn_basis is None:
                     continue
@@ -12470,6 +12471,19 @@ def funding_trend_arbitrage():
     return jsonify({"updated_at": snapshot["updated_at"], "items": candidates})
 
 
+def alert_binance_basis(item):
+    """Only return historical samples whose contract basis is known to be Binance's."""
+    if item.strategy == "spot_futures":
+        # Legacy spot/futures records omitted the exchange columns; this strategy
+        # has always used Binance's mark/index basis, not the spot venue's price.
+        supported = item.short_exchange in (None, "Binance")
+    elif item.strategy == "futures_futures":
+        supported = "Binance" in (item.long_exchange, item.short_exchange)
+    else:
+        supported = False
+    return item.basis if supported and item.basis is not None and math.isfinite(item.basis) else None
+
+
 @app.get("/api/alerts")
 def alerts():
     now = datetime.now()
@@ -12559,7 +12573,8 @@ def alerts():
         max_basis_item = max(basis_items, key=lambda item: abs(item.basis or 0), default=None)
         value_ranges = {}
         for field in ("open_spread", "basis"):
-            values = [getattr(item, field) for item in items if getattr(item, field) is not None and math.isfinite(getattr(item, field))]
+            samples = [alert_binance_basis(item) if field == "basis" else item.open_spread for item in items]
+            values = [value for value in samples if value is not None and math.isfinite(value)]
             value_ranges[field] = {"max": max(values, default=None), "min": min(values, default=None)}
         return {
             "symbol": symbol,
@@ -12573,6 +12588,7 @@ def alerts():
                 "basis_at": max_basis_item.created_at.strftime("%m-%d %H:%M:%S") if max_basis_item else None,
             },
             "value_ranges": value_ranges,
+            "basis_exchange": "Binance",
             "transfer_statuses": [transfer_statuses[(symbol, exchange)] for exchange in transfer_exchanges[symbol]],
             "timeline": timeline,
         }

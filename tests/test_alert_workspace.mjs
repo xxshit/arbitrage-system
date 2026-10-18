@@ -10,7 +10,7 @@ const functions=source.slice(source.indexOf('function isAlertMuted('),source.ind
 const helpers=source.slice(source.indexOf('function alertLabel('),source.indexOf('function toggleTips('));
 const transferHelpers=source.slice(source.indexOf('function transferFlagText('),source.indexOf('function spotRows('));
 const escape=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-const group=(symbol='DEMO/USDT',count=3,spread=1,basis=2)=>({symbol,alert_count:count,latest:{symbol,created_at:'10-18 10:00:00',type:'rapid_basis',strategy:'spot_futures',open_spread:0.5,basis:1},move_peaks:{open_spread:spread,basis},value_ranges:{open_spread:{max:10,min:-50},basis:{max:3,min:-2}}});
+const group=(symbol='DEMO/USDT',count=3,spread=1,basis=2)=>({symbol,alert_count:count,latest:{symbol,created_at:'10-18 10:00:00',type:'rapid_basis',strategy:'spot_futures',open_spread:0.5,basis:1},move_peaks:{open_spread:spread,basis},value_ranges:{open_spread:{max:10,min:-50},basis:{max:3,min:-2}},basis_exchange:'Binance'});
 const detail=(symbol='DEMO/USDT',page=1)=>({symbol,total:43,page,pages:2,page_size:40,items:[{id:page,symbol,type:'rapid_basis',created_at:'10-18 10:00:00',message:'Synthetic detail',open_spread:0.5,basis:1}]});
 
 function harness(fetcher=async url=>detail(new URL(url,'https://example.test').searchParams.get('symbol'))){
@@ -126,7 +126,7 @@ test('sticky roster header shares the data scroll gutter, grid and horizontal pa
 test('detail omits repeated coin header, mute and normal status while keeping metrics, timeline and pagination',async()=>{
   const h=harness();h.context.renderAlertMasterDetail([group()]);await h.context.loadSelectedAlertHistory();const markup=h.node('alertDetailPane').innerHTML;
   for(const value of ['<header','<h4','alert-latest-label','strategy-badge','alert-mute-toggle','新到旧','共 43 条'])assert.ok(!markup.includes(value),value);
-  for(const value of ['最近开差','最近基差','24H开差范围','24H基差范围','alert-timeline-scroll','10-18 10:00:00','alert-detail-pagination','aria-label="DEMO/USDT 报警明细"'])assert.ok(markup.includes(value),value);
+  for(const value of ['最近开差','最近基差','24H开差范围','24H币安基差范围','alert-timeline-scroll','10-18 10:00:00','alert-detail-pagination','aria-label="DEMO/USDT 报警明细"'])assert.ok(markup.includes(value),value);
   assert.ok(markup.includes('<div class="alert-detail-status" role="status"></div>'));assert.ok(css.includes('.alert-detail-status:empty {display:none}'));
   h.run('alertDetailState.loading=true');h.context.renderAlertDetailPane();assert.ok(!h.node('alertDetailPane').innerHTML.includes('正在读取明细…'));
 });
@@ -138,6 +138,16 @@ test('detail ranges show the full-window maximum then minimum with independently
   assert.ok(markup.includes('最高 +3.0000%，最低 -2.0000%'));
   assert.ok(!markup.includes('24H开差峰值'));assert.ok(!markup.includes('24H基差峰值'));
   assert.ok(css.includes('.alert-metric-range {display:flex;align-items:baseline;flex-wrap:wrap;'));
+});
+
+test('Binance range is explicitly labelled and never trusts an unspecified or different basis source',()=>{
+  const h=harness();h.context.renderAlertMasterDetail([group()]);let markup=h.node('alertDetailPane').innerHTML;
+  assert.ok(markup.includes('24H币安基差范围'));assert.ok(markup.includes('币安合约标记价相对币安现货指数'));
+  for(const exchange of [undefined,null,'Bybit','OKX']){
+    const coin=group();coin.basis_exchange=exchange;coin.value_ranges.basis={max:999,min:-999};h.context.renderAlertMasterDetail([coin]);markup=h.node('alertDetailPane').innerHTML;
+    assert.ok(markup.includes('24H币安基差范围 <b class="alert-metric-range neutral">—</b>'));
+    assert.ok(!markup.includes('999.0000%'));assert.ok(markup.includes('最高 +10.0000%，最低 -50.0000%'));
+  }
 });
 
 test('ranges retain all-positive, all-negative, zero and equal endpoints without inventing another sign',()=>{

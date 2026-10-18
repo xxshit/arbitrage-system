@@ -39,6 +39,18 @@ class Track:
     episode: str = ""
     anchor: Sample | None = None
     anchor_direction: int = 0
+    low: float | None = None
+    high: float | None = None
+
+    def clear_history(self):
+        self.history.clear()
+        self.low = self.high = None
+
+    def possible_change(self, value):
+        # A conservative envelope can reject an impossible threshold in O(1).
+        # Any potentially crossing tick still runs the original chronological
+        # scan and the same two-sided quote validation.
+        return max(abs(value - self.low), abs(value - self.high)) if self.history else 0
 
     def remember(self, sample, metric):
         # Idle history needs only the fields used for displacement validation.
@@ -58,8 +70,15 @@ class Track:
                 bucket[0] = sample
             if sample.value > bucket[1].value:
                 bucket[1] = sample
+        self.low = sample.value if self.low is None else min(self.low, sample.value)
+        self.high = sample.value if self.high is None else max(self.high, sample.value)
+        expired_extreme = False
         while self.history and sample.at - self.history[0][1].at > 120:
-            self.history.popleft()
+            expired = self.history.popleft()
+            expired_extreme |= any(item.value in (self.low, self.high) for item in expired)
+        if expired_extreme:
+            self.low = min(item.value for bucket in self.history for item in bucket)
+            self.high = max(item.value for bucket in self.history for item in bucket)
         self.last = sample
 
 
@@ -131,7 +150,7 @@ class PulseDetector:
                 elif at - pulse["retrace_at"] >= 30:
                     pulse["state"], pulse["ended_at"] = "settled", at
                     track.pulse, track.ordinal, track.episode = None, 0, ""
-                    track.history.clear()
+                    track.clear_history()
             else:
                 if direction * (value - pulse["peak"]) > 0:
                     pulse["peak"], pulse["peak_at"], pulse["peak_context"] = value, at, dict(context)
@@ -144,7 +163,7 @@ class PulseDetector:
                 elif at - pulse["peak_at"] >= 120:
                     pulse["state"], pulse["ended_at"] = "settled", at
                     track.pulse, track.ordinal, track.episode = None, 0, ""
-                    track.history.clear()
+                    track.clear_history()
                 elif excursion >= (.5 if metric != "price" else 2):
                     pulse["state"] = "expanded"
             if pulse["state"] != prior_state and pulse["state"] in ("retraced", "expanded"):
@@ -169,7 +188,8 @@ class PulseDetector:
             # Compare signed displacement, including crossing zero. Choose a
             # chronological extremum WITHIN the stated window, never 65s ago.
             candidates = []
-            for bucket in track.history:
+            possible_change = track.possible_change(value)
+            for bucket in track.history if possible_change >= RULES[metric][0][1] - 1e-9 else ():
                 for previous in bucket:
                     age = at - previous.at
                     if not 0 < age <= 120:
@@ -189,7 +209,7 @@ class PulseDetector:
             anchor_step = .1 if metric != "price" else .5
             if track.anchor and (at - track.anchor.at > 300 or track.anchor_direction * (value - track.anchor.value) < anchor_step * .5):
                 track.anchor = None
-            if track.anchor is None:
+            if track.anchor is None and possible_change >= anchor_step:
                 departures = [previous for bucket in track.history for previous in bucket
                               if 0 < at - previous.at <= 120 and abs(value - previous.value) >= anchor_step
                               and self.supported(metric, previous, sample, anchor_step)]
@@ -213,7 +233,7 @@ class PulseDetector:
                          ranges=ranges, version=1, notice_version=1, noticed_at=at, quality="aligned_book" if metric != "basis" else "mark_index")
             track.pulse, track.turning = pulse, None
             track.anchor = None
-            track.history.clear()
+            track.clear_history()
             updates.append(deepcopy(pulse))
         track.remember(sample, metric)
         return updates

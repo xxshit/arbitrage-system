@@ -72,6 +72,58 @@ class PulseDetectorTests(unittest.TestCase):
         self.assertEqual([(s.value, s.at) for s in track.history[0]], [(0, 1000), (.1, 1000.1)])
         self.assertEqual(len(track.history), 2)
 
+    def test_history_envelope_expires_and_resets_with_retained_extrema(self):
+        from anomaly_engine import Sample, Track
+        track = Track()
+        for at, value in ((1000, -.4), (1000.1, .7), (1001, .05), (1120.2, .06)):
+            track.remember(Sample(at, value, context(value)), "spread")
+        self.assertEqual((track.low, track.high), (.05, .06))
+        self.assertAlmostEqual(track.possible_change(.3), .25)
+        track.clear_history()
+        self.assertEqual(track.possible_change(.3), 0)
+        track.remember(Sample(1121, .2, context(.2)), "spread")
+        self.assertEqual((track.low, track.high), (.2, .2))
+
+    def test_quiet_ticks_skip_impossible_history_scans_without_missing_crossing(self):
+        with patch.object(self.engine, "supported", wraps=self.engine.supported) as supported:
+            for tick in range(600):
+                self.sample(tick * .2, (tick % 91) * .0009)
+            self.assertEqual(supported.call_count, 0)
+            pulse = self.sample(120, .5)[0]
+            self.assertEqual(pulse["trigger"], .5)
+            self.assertGreater(supported.call_count, 0)
+
+    def test_envelope_optimization_matches_unfiltered_replay(self):
+        import random
+        from anomaly_engine import Track
+        rng = random.Random(81)
+        values, value = [], 0
+        for tick in range(2200):
+            value += rng.choice((-.0002, .0001, .0003, .002))
+            if tick % 99 == 40:
+                value += .7
+            elif tick % 99 == 41:
+                value -= .6
+            elif tick % 99 == 45:
+                value += .25
+            values.append(value)
+
+        def replay():
+            engine, output = PulseDetector(), []
+            for tick, value in enumerate(values):
+                quote = context(value, long_mid=100 * math.exp(value / 100), short_mid=101 * math.exp(value / 100))
+                for metric in ("spread", "basis", "price"):
+                    output.extend(engine.observe(PATH, metric, value, 1000 + tick * .2, quote))
+            return output
+
+        # IDs don't encode detector decisions, so use the same stable test ID.
+        with patch("anomaly_engine.uuid.uuid4") as identifier:
+            identifier.return_value.hex = "replay"
+            optimized = replay()
+            with patch.object(Track, "possible_change", return_value=math.inf):
+                original = replay()
+        self.assertEqual(optimized, original)
+
     def test_restart_below_old_peak_is_new_pulse_not_deduplicated(self):
         self.sample(0, 0)
         first = self.sample(1, 1)[0]

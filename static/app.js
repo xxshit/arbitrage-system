@@ -41,6 +41,11 @@ let chatConfirmResolver=null;
 let delistedMarketSymbols=new Set();
 let delistedMarketBases=new Set();
 let delistedSymbolsLoadedAt=0;
+let delistingEventsByBase=new Map();
+let delistingMetadataRequest=null;
+let delistingClockOffset=0;
+let dailyListingState={range:'all',symbol:'',page:1,pageSize:50,total:0,pages:1};
+let dailyListingRequestVersion=0;
 let spotFuturesPage = 1;
 let spotFuturesLoading = false;
 let spotFuturesHasData = false;
@@ -186,8 +191,56 @@ function normalizedMarketSymbol(symbol){const value=String(symbol||'').toUpperCa
 function delistingAssetBases(symbol){const normalized=normalizedMarketSymbol(symbol),base=normalized.replace(/\/USDT$/,'');if(!base)return[];const stripped=base.replace(/^(1000000|10000|1000)(?=[A-Z0-9])/,'');return stripped===base?[base]:[base,stripped]}
 function isDelistedMarketSymbol(symbol){return delistingAssetBases(symbol).some(base=>delistedMarketBases.has(base))}
 function delistingSymbolClass(symbol,serverFlag=false){return serverFlag||isDelistedMarketSymbol(symbol)?'delisting-symbol':''}
-function applyDelistingWarnings(root=document){const selector='[data-market-symbol],.symbol-detail-trigger',nodes=[];if(root?.matches?.(selector))nodes.push(root);root?.querySelectorAll?.(selector).forEach(node=>nodes.push(node));nodes.forEach(node=>{const symbol=node.dataset.marketSymbol||node.textContent.trim();if(!node.dataset.marketSymbol&&symbol)node.dataset.marketSymbol=symbol;const warned=isDelistedMarketSymbol(symbol)||node.dataset.delistingAnnounced==='1';node.classList.toggle('delisting-symbol',warned);if(warned&&!node.title)node.title='该币种已有交易所发布下架公告'})}
-async function loadDelistedMarketSymbols(force=false){if(!force&&delistedSymbolsLoadedAt&&Date.now()-delistedSymbolsLoadedAt<300000)return;try{const data=await fetchRefreshJson('/api/market-metadata/delisted-symbols',5000);delistedMarketSymbols=new Set((data.symbols||[]).map(normalizedMarketSymbol));delistedMarketBases=new Set([...delistedMarketSymbols].flatMap(delistingAssetBases));delistedSymbolsLoadedAt=Date.now();applyDelistingWarnings()}catch(error){}}
+function safeListingSourceUrl(value){
+  try{const url=new URL(String(value||'')),hosts=['binance.com','bybit.com','okx.com','gate.com','gate.io','bitget.com'];return url.protocol==='https:'&&!url.username&&!url.password&&hosts.some(host=>url.hostname===host||url.hostname.endsWith('.'+host))?url.href:''}catch{return ''}
+}
+function delistingEventState(item,now=Date.now()+delistingClockOffset){
+  if(item.source_kind!=='official'||!safeListingSourceUrl(item.source_url))return {key:'detected',label:'检测到下架（非已核实公告）'};
+  const effective=Date.parse(item.effective_at_iso||'');
+  if(item.effective_time_status!=='parsed'||!Number.isFinite(effective))return {key:'unconfirmed',label:'下架时间待核实'};
+  return effective>now?{key:'scheduled',label:'即将下架'}:{key:'delisted',label:'已下架（按公告）'};
+}
+function delistingEvidenceText(item){const state=delistingEventState(item);return `${item.exchange} · ${item.market_scope||'范围见原公告'} · ${state.label}${item.effective_at&&state.key!=='detected'&&state.key!=='unconfirmed'?` · ${item.effective_at}`:''}`}
+function indexDelistingEvidence(events){
+  const byBase=new Map();
+  for(const item of events||[]){for(const symbol of [item.symbol,...(item.matched_symbols||[])]){for(const base of delistingAssetBases(symbol)){if(!byBase.has(base))byBase.set(base,new Map());byBase.get(base).set(String(item.id),item)}}}
+  delistingEventsByBase=byBase;
+}
+function delistingEvidenceFor(symbol){
+  const rows=new Map();for(const base of delistingAssetBases(symbol)){for(const [id,item] of delistingEventsByBase.get(base)||[])rows.set(id,item)}
+  // One visible warning per exchange and market scope; all original records remain searchable.
+  const latest=new Map();
+  for(const item of rows.values()){const key=`${item.exchange}|${item.market_scope}`,previous=latest.get(key);if(!previous||(item.source_kind==='official'&&previous.source_kind!=='official')||(item.source_kind===previous.source_kind&&String(item.occurred_at)>String(previous.occurred_at)))latest.set(key,item)}
+  return [...latest.values()].sort((a,b)=>delistingEventState(a).key==='scheduled'&&delistingEventState(b).key!=='scheduled'?-1:delistingEventState(b).key==='scheduled'&&delistingEventState(a).key!=='scheduled'?1:String(a.exchange).localeCompare(String(b.exchange)));
+}
+function delistingEvidenceMarkup(symbol,items){
+  if(!items.length)return `<a class="delisting-history-link" href="#daily-listings" data-listing-symbol="${escapeChatHtml(symbol)}">⚠ 下架记录${delistedSymbolsLoadedAt?'待核实':'读取中'} · 查看历史</a>`;
+  return items.map(item=>{const source=safeListingSourceUrl(item.source_url),state=delistingEventState(item),text=`⚠ ${delistingEvidenceText(item)}`,title=`${item.title||'未取得官方公告'}\n${item.occurred_at||''}\n按已入库公告判断，不代表其他交易所或市场下架。`;return `<a class="delisting-evidence-link state-${state.key}${source?'':' delisting-history-link'}" href="${source?escapeChatHtml(source):'#daily-listings'}" ${source?'target="_blank" rel="noopener noreferrer"':`data-listing-symbol="${escapeChatHtml(symbol)}"`} title="${escapeChatHtml(title)}">${escapeChatHtml(text)}${source?' ↗':' · 查看记录'}</a>`}).join('');
+}
+function applyDelistingWarnings(root=document){
+  const selector='[data-market-symbol],.symbol-detail-trigger',nodes=[];
+  if(root?.matches?.(selector))nodes.push(root);root?.querySelectorAll?.(selector).forEach(node=>nodes.push(node));
+  for(const node of nodes){
+    if(node.dataset.listingOwnEvidence==='1')continue;
+    const symbol=node.dataset.marketSymbol||node.textContent.trim();if(!node.dataset.marketSymbol&&symbol)node.dataset.marketSymbol=symbol;
+    const items=delistingEvidenceFor(symbol),warned=isDelistedMarketSymbol(symbol)||node.dataset.delistingAnnounced==='1';
+    node.classList.toggle('delisting-symbol',warned);
+    let group=node.parentElement?.classList.contains('delisting-label-group')?node.parentElement:null;
+    if(!warned){if(group)group.replaceWith(node);node.querySelector?.(':scope > .delisting-evidence')?.remove();if(node.dataset.delistingLinked==='1'){node.removeAttribute('title');delete node.dataset.delistingLinked}continue}
+    node.title=items.length?items.map(delistingEvidenceText).join('\n')+'\n按公告时间判断；点击下方交易所提示查看原公告。':'下架证据尚未读取，请点击查看历史记录。';node.dataset.delistingLinked='1';
+    if(node.tagName!=='TD'&&!group){group=document.createElement(node.tagName==='B'?'b':/^H[1-6]$/.test(node.tagName)?'div':'span');group.className='delisting-label-group';node.before(group);group.appendChild(node)}
+    const host=group||node;let evidence=host.querySelector(':scope > .delisting-evidence');
+    if(!evidence){evidence=document.createElement('span');evidence.className='delisting-evidence';host.appendChild(evidence)}
+    const markup=delistingEvidenceMarkup(symbol,items);if(evidence.dataset.signature!==markup){evidence.innerHTML=markup;evidence.dataset.signature=markup}
+  }
+}
+async function loadDelistedMarketSymbols(force=false){
+  if(delistingMetadataRequest)return delistingMetadataRequest;
+  if(!force&&delistedSymbolsLoadedAt&&Date.now()-delistedSymbolsLoadedAt<300000)return;
+  delistingMetadataRequest=(async()=>{try{const data=await fetchRefreshJson('/api/market-metadata/delisted-symbols',5000);delistedMarketSymbols=new Set((data.symbols||[]).map(normalizedMarketSymbol));delistedMarketBases=new Set([...delistedMarketSymbols].flatMap(delistingAssetBases));indexDelistingEvidence(data.events||[]);const serverTime=Date.parse(data.updated_at);if(Number.isFinite(serverTime))delistingClockOffset=serverTime-Date.now();delistedSymbolsLoadedAt=Date.now();applyDelistingWarnings()}catch(error){/* Keep the last verified evidence on transient failure. */}})();
+  try{return await delistingMetadataRequest}finally{delistingMetadataRequest=null}
+}
+document.addEventListener('click',event=>{const link=event.target.closest?.('.delisting-history-link');if(link){event.preventDefault();openListingHistory(link.dataset.listingSymbol||'')}});
 function exchangeName(exchange){const icon=exchangeIcon[exchange];return `${icon?`<img class="exchange-logo" src="${icon}" alt="${exchange}" decoding="async">`:''}${exchange}`}
 function syncRenderedNode(current,next){if(current.nodeType!==next.nodeType||current.nodeName!==next.nodeName){current.replaceWith(next.cloneNode(true));return}if(current.nodeType===Node.TEXT_NODE){if(current.nodeValue!==next.nodeValue)current.nodeValue=next.nodeValue;return}if(current.nodeType!==Node.ELEMENT_NODE)return;[...current.attributes].forEach(attribute=>{if(!next.hasAttribute(attribute.name))current.removeAttribute(attribute.name)});[...next.attributes].forEach(attribute=>{if(current.getAttribute(attribute.name)!==attribute.value)current.setAttribute(attribute.name,attribute.value)});syncRenderedChildren(current,next)}
 function syncRenderedChildren(currentParent,nextParent){let current=currentParent.firstChild;for(let next=nextParent.firstChild;next;next=next.nextSibling){if(!current){currentParent.appendChild(next.cloneNode(true));continue}const following=current.nextSibling;syncRenderedNode(current,next);current=following}while(current){const following=current.nextSibling;current.remove();current=following}}
@@ -685,8 +738,32 @@ function addBasisOpeningCells(targetId,prefix,openings){const target=byId(target
 function addBasisOpeningHeaders(){const dualTable=byId('dual-futures')?.querySelector('table'),dualHeader=dualTable?.querySelector('thead tr');if(dualHeader&&!dualTable.classList.contains('dual-redesign-table')&&!dualHeader.querySelector('.basis-opening-column'))dualHeader.insertAdjacentHTML('beforeend','<th class="basis-opening-column">基差打开</th>')}
 function applyGroupFrameClasses(targetId,prefix){const target=byId(targetId);if(!target)return;let rowsRemaining=0;[...target.querySelectorAll('tr')].forEach(row=>{row.classList.remove(`${prefix}-group-start`,`${prefix}-group-body`,`${prefix}-group-end`);const symbolCell=row.querySelector('td.symbol[rowspan]');if(symbolCell){rowsRemaining=Number(symbolCell.rowSpan)||1;row.classList.add(`${prefix}-group-start`);if(rowsRemaining===1)row.classList.add(`${prefix}-group-end`)}else if(rowsRemaining===1){row.classList.add(`${prefix}-group-end`)}else if(rowsRemaining>1){row.classList.add(`${prefix}-group-body`)}rowsRemaining=Math.max(0,rowsRemaining-1)});if(prefix!=='spot'&&!byId('dual-futures')?.querySelector('.dual-redesign-table'))addBasisOpeningCells(targetId,prefix,dualBasisOpenings);const dividerClass=`${prefix}-group-divider`,columns=prefix==='spot'?12:5;if(!target.querySelector(`.${dividerClass}`))target.querySelectorAll(`tr.${prefix}-group-end`).forEach(row=>row.insertAdjacentHTML('afterend',`<tr class="${dividerClass}" aria-hidden="true"><td colspan="${columns}"></td></tr>`))}
 function installGroupFrameObservers(){[['dualFuturesRows','dual'],['spotFuturesRows','spot']].forEach(([targetId,prefix])=>{const target=byId(targetId);if(!target)return;new MutationObserver(()=>applyGroupFrameClasses(targetId,prefix)).observe(target,{childList:true});applyGroupFrameClasses(targetId,prefix)})}
-function listingEffectiveTime(item){if(item.effective_at)return `执行时间：${item.effective_at}`;if(item.effective_time_status==='not_stated')return '执行时间：公告未注明明确时刻';if(item.effective_time_status==='retry')return '执行时间：详情读取失败，等待自动重试';return '执行时间：待解析'}
-async function loadDailyListings(){const data=await (await fetch('/api/daily-report/listings')).json(),groups={};renderAutomationStatus('dailyListings',data.automation_status);data.events.forEach(item=>(groups[item.exchange]??=[]).push(item));byId('dailyListings').innerHTML=Object.keys(groups).length?Object.entries(groups).map(([exchange,items])=>`<section class="listing-exchange"><h3>${exchange}</h3>${items.map(item=>`<article><b class="${delistingSymbolClass(item.symbol,item.type==='下架')}" data-market-symbol="${item.symbol}" data-delisting-announced="${item.type==='下架'?'1':'0'}">${item.symbol}</b><span class="listing-${item.type==='上架'?'up':'down'}">${item.type}</span><small>公告发布：${item.occurred_at} · ${listingEffectiveTime(item)}${item.title?` · ${item.source_url?`<a href="${escapeChatHtml(item.source_url)}" target="_blank" rel="noopener noreferrer">${escapeChatHtml(item.title)}</a>`:escapeChatHtml(item.title)}`:''}</small></article>`).join('')}</section>`).join(''):'<p class="empty-alert">暂无已入库的交易所公告。</p>'}
+function listingEffectiveTime(item){if(item.source_kind==='detected')return '执行时间：未核实（元数据检测不等于官方公告）';if(item.effective_at&&item.effective_time_status==='parsed')return `执行时间：${item.effective_at}`;if(item.effective_time_status==='not_stated')return '执行时间：公告未注明明确时刻';if(item.effective_time_status==='retry')return '执行时间：详情读取失败，等待自动重试';return '执行时间：待核实'}
+function listingEventMarkup(item){
+  const source=safeListingSourceUrl(item.source_url),state=item.type==='下架'?delistingEventState(item):{key:'listed',label:'上架'},title=item.title||'交易所元数据变化记录（非官方公告）';
+  return `<article data-listing-event-id="${Number(item.id)||0}"><b class="${item.type==='下架'?'delisting-symbol':''}" data-listing-own-evidence="1">${escapeChatHtml(item.symbol)}</b><span class="listing-status state-${state.key}">${escapeChatHtml(state.label)}</span><small>${escapeChatHtml(item.exchange)} · ${escapeChatHtml(item.market_scope||'范围见原公告')} · ${item.source_kind==='official'?'公告发布':'记录时间'}：${escapeChatHtml(item.occurred_at||'待核实')}<br>${escapeChatHtml(listingEffectiveTime(item))}<br>${source?`<a href="${escapeChatHtml(source)}" target="_blank" rel="noopener noreferrer">查看原公告 ↗ · ${escapeChatHtml(title)}</a>`:escapeChatHtml(title)}</small></article>`;
+}
+function syncDailyListingControls(){
+  const range=byId('listingHistoryRange'),symbol=byId('listingSymbolSearch');if(range)range.value=dailyListingState.range;if(symbol&&document.activeElement!==symbol)symbol.value=dailyListingState.symbol;
+  const label=byId('listingResultSummary'),previous=byId('listingPreviousPage'),next=byId('listingNextPage');if(label)label.textContent=`${dailyListingState.range==='all'?'全部已入库历史':dailyListingState.range==='7d'?'最近7天':'最近30天'}${dailyListingState.symbol?` · ${dailyListingState.symbol}`:''} · 共 ${dailyListingState.total} 条 · 第 ${dailyListingState.page}/${dailyListingState.pages} 页`;
+  if(previous)previous.disabled=dailyListingState.page<=1;if(next)next.disabled=dailyListingState.page>=dailyListingState.pages;
+}
+async function loadDailyListings(){
+  const target=byId('dailyListings');if(!target)return;
+  const version=++dailyListingRequestVersion,params=new URLSearchParams({range:dailyListingState.range,symbol:dailyListingState.symbol,page:String(dailyListingState.page),page_size:String(dailyListingState.pageSize)});target.setAttribute('aria-busy','true');
+  try{const data=await fetchRefreshJson(`/api/daily-report/listings?${params}`,10000);if(version!==dailyListingRequestVersion)return;
+    dailyListingState={...dailyListingState,page:Number(data.page)||1,pages:Number(data.pages)||1,total:Number(data.total??data.events?.length)||0};const groups={};for(const item of data.events||[])(groups[item.exchange]??=[]).push(item);
+    renderAutomationStatus('dailyListings',data.automation_status);target.innerHTML=Object.keys(groups).length?Object.entries(groups).map(([exchange,items])=>`<section class="listing-exchange"><h3>${escapeChatHtml(exchange)}</h3>${items.map(listingEventMarkup).join('')}</section>`).join(''):'<p class="empty-alert">当前条件没有已入库记录，可切换“全部历史”或更换币种。没有记录不等于交易所没有发布公告。</p>';syncDailyListingControls();
+    const error=byId('listingQueryError');if(error)error.textContent='';
+  }catch(error){if(version===dailyListingRequestVersion){const message=byId('listingQueryError');if(message)message.textContent=`查询失败：${error.message||'请稍后重试'}。保留上次结果。`}return false}
+  finally{if(version===dailyListingRequestVersion)target.setAttribute('aria-busy','false')}
+}
+function searchDailyListings(event){event?.preventDefault();dailyListingState={...dailyListingState,range:byId('listingHistoryRange')?.value||'all',symbol:(byId('listingSymbolSearch')?.value||'').trim().toUpperCase(),page:1};return loadDailyListings()}
+function setDailyListingPage(change){dailyListingState.page=Math.min(dailyListingState.pages,Math.max(1,dailyListingState.page+change));return loadDailyListings()}
+function openListingHistory(symbol){
+  dailyListingState={...dailyListingState,range:'all',symbol:normalizedMarketSymbol(symbol).replace('/USDT',''),page:1};syncDailyListingControls();
+  const link=document.querySelector('aside a[data-view="daily-listings"]');if(link)link.click();else loadDailyListings();
+}
 async function loadSimpleThinking(){const section=byId('thinking');if(!section)return;let target=byId('simpleThinkingList');if(!target){section.insertAdjacentHTML('beforeend','<div class="panel simple-thinking"><div id="simpleThinkingList" class="thinking-columns"></div></div>');target=byId('simpleThinkingList')}const thinkingInterval=interval=>interval?`<em class="interval-badge ${intervalClass(interval)}">${interval}H</em>`:'',thinkingLeg=(side,exchange,openInterest,volume,isSpot,interval)=>`<div class="thinking-leg ${side==='做多'?'long':'short'}"><b>${side}</b><span class="thinking-exchange">${exchangeName(exchange)}${thinkingInterval(interval)}</span><div class="thinking-metrics">${isSpot?liquidityMetric('交易量',volume):`${liquidityMetric('持仓量',openInterest)}${liquidityMetric('交易量',volume)}`}</div></div>`,thinkingFunding=item=>`<div class="thinking-funding"><span>当前 <b class="${changeClass(item.funding_current)}">${percent(item.funding_current)}</b></span><span>上期 <b class="${changeClass(item.funding_previous)}">${percent(item.funding_previous)}</b></span><span>24H <b class="${changeClass(item.funding_24h)}">${percent(item.funding_24h)}</b></span><span>3D <b class="${changeClass(item.funding_3d)}">${percent(item.funding_3d)}</b></span></div>`,data=await (await fetch('/api/arbitrage-thinking/simple')).json(),render=items=>items.map(item=>`<article><b><button class="symbol-detail-trigger" onclick="openSymbolDetail('${item.symbol}')">${item.symbol}</button></b><span class="positive">开差 ${percent(item.open_spread)} · 平差 ${percent(item.close_spread)}</span>${thinkingFunding(item)}<div class="thinking-liquidity">${thinkingLeg('做多',item.long_exchange,item.long_open_interest,item.long_volume,item.long_is_spot,item.long_interval)}${thinkingLeg('做空',item.short_exchange,item.short_open_interest,item.short_volume,item.short_is_spot,item.short_interval)}</div></article>`).join('')||'<p class="empty-alert">当前没有符合条件的币种。</p>';target.innerHTML=`<section><h3>现多期空</h3>${render(data.spot_simple)}</section><section><h3>期多期空</h3>${render(data.dual_simple)}</section>`}
 let simpleThinkingSort='open_spread',simpleThinkingDirection='desc',simpleThinkingCache=null;
 const simpleThinkingSortOptions=[['open_spread','开差'],['close_spread','平差'],['funding_current','当前资费'],['funding_previous','上期资费'],['funding_24h','24H资费'],['funding_3d','3D资费']];

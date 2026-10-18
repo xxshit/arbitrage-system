@@ -54,7 +54,7 @@ db = SQLAlchemy(app)
 
 @app.after_request
 def disable_live_view_response_cache(response):
-    if request.path in {"/api/dashboard", "/api/spot-futures", "/api/dual-futures", "/api/alerts", "/api/hedge-positions"}:
+    if request.path in {"/api/dashboard", "/api/spot-futures", "/api/dual-futures", "/api/alerts", "/api/hedge-positions", "/api/daily-report/listings", "/api/market-metadata/delisted-symbols"}:
         response.headers["Cache-Control"] = "private, no-store"
     return response
 
@@ -1722,16 +1722,82 @@ def scan_exchange_announcements():
         db.session.commit()
 
 
-def announced_delisted_symbols():
-    symbols = set()
-    for item in ListingEvent.query.filter_by(event_type="下架").all():
-        symbols.update({pair_slash(item.symbol), canonical_market_symbol(item.symbol)})
-    delisted_bases = delisting_base_keys(symbols)
-    for row in symbol_alias_rows():
-        alias_bases = delisting_base_candidates(row.canonical_base) | delisting_base_candidates(row.alias_base)
-        if alias_bases & delisted_bases:
+def listing_event_symbols(item, aliases=None):
+    """Keep warning evidence aligned with the existing verified alias/multiplier rules."""
+    aliases = symbol_alias_rows() if aliases is None else aliases
+    symbols = {pair_slash(item.symbol), canonical_market_symbol(item.symbol, rows=aliases)}
+    bases = delisting_base_keys(symbols)
+    for row in aliases:
+        if (delisting_base_candidates(row.canonical_base) | delisting_base_candidates(row.alias_base)) & bases:
             symbols.update({row.canonical_symbol, row.alias_symbol})
-    return {symbol for symbol in symbols if symbol}
+    return sorted(symbol for symbol in symbols if symbol)
+
+
+def listing_market_scope(item):
+    title = (item.title or "").lower()
+    if not item.announcement:
+        return "USDT永续合约"
+    if any(word in title for word in ("futures", "perpetual", "合约")):
+        return "合约"
+    if any(word in title for word in ("margin", "杠杆")):
+        return "杠杆"
+    if "alpha" in title:
+        return "Alpha"
+    if any(word in title for word in ("spot", "现货")):
+        return "现货"
+    return "范围见原公告"
+
+
+def safe_listing_source_url(value):
+    """Only known exchange HTTPS pages are usable as official evidence links."""
+    try:
+        parsed = urlparse(str(value or ""))
+        host = (parsed.hostname or "").lower()
+    except ValueError:
+        return None
+    hosts = ("binance.com", "bybit.com", "okx.com", "gate.com", "gate.io", "bitget.com")
+    return str(value) if parsed.scheme == "https" and not parsed.username and not parsed.password and any(host == domain or host.endswith("." + domain) for domain in hosts) else None
+
+
+def listing_event_payload(item, now=None, aliases=None):
+    # Official effective times were parsed into naive UTC+8; never compare them to the process TZ.
+    now = now or datetime.now(SHANGHAI_TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=SHANGHAI_TZ)
+    now = now.astimezone(SHANGHAI_TZ)
+    effective = item.effective_at.replace(tzinfo=SHANGHAI_TZ) if item.effective_at else None
+    source_url = safe_listing_source_url(item.source_url)
+    official = bool(item.announcement and source_url)
+    status, status_label = None, None
+    if item.event_type == "下架":
+        if not official:
+            status, status_label = "detected", "检测到下架（非已核实公告）"
+        elif effective and item.effective_time_status == "parsed":
+            status, status_label = ("scheduled", "即将下架") if effective > now else ("delisted", "已下架（按公告）")
+        else:
+            status, status_label = "unconfirmed", "下架时间待核实"
+    occurred = item.occurred_at.replace(tzinfo=SHANGHAI_TZ if item.announcement else timezone.utc).astimezone(SHANGHAI_TZ)
+    return {
+        "id": item.id, "exchange": item.exchange, "symbol": pair_slash(item.symbol),
+        "matched_symbols": listing_event_symbols(item, aliases), "type": item.event_type,
+        "title": item.title, "source_url": source_url, "announcement": bool(item.announcement),
+        "source_kind": "official" if official else "detected", "market_scope": listing_market_scope(item),
+        "occurred_at": occurred.strftime("%Y-%m-%d %H:%M UTC+8"),
+        "effective_at": effective.strftime("%Y-%m-%d %H:%M UTC+8") if effective else None,
+        "effective_at_iso": effective.isoformat() if effective else None,
+        "effective_time_status": item.effective_time_status or "pending",
+        "delisting_status": status, "status_label": status_label,
+        "details_checked_at": item.details_checked_at.replace(tzinfo=timezone.utc).astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M UTC+8") if item.details_checked_at else None,
+    }
+
+
+def announced_delisted_symbols(events=None, aliases=None):
+    events = ListingEvent.query.filter_by(event_type="下架").all() if events is None else events
+    aliases = symbol_alias_rows() if aliases is None else aliases
+    symbols = set()
+    for item in events:
+        symbols.update(listing_event_symbols(item, aliases))
+    return symbols
 
 
 def mark_announced_delistings(groups):
@@ -11736,17 +11802,58 @@ def daily_report_thoughts():
 
 @app.get("/api/daily-report/listings")
 def daily_report_listings():
-    cutoff = datetime.now() - timedelta(days=30)
-    events = ListingEvent.query.filter(ListingEvent.occurred_at >= cutoff).order_by(ListingEvent.occurred_at.desc()).limit(100).all()
-    return jsonify({"events": [{"exchange": item.exchange, "symbol": item.symbol if "/" in item.symbol else (item.symbol[:-4] + "/USDT" if item.symbol.endswith("USDT") else item.symbol), "type": item.event_type, "title": item.title, "source_url": item.source_url, "occurred_at": item.occurred_at.strftime("%Y-%m-%d %H:%M UTC+8"), "effective_at": item.effective_at.strftime("%Y-%m-%d %H:%M UTC+8") if item.effective_at else None, "effective_time_status": item.effective_time_status or "pending", "details_checked_at": item.details_checked_at.strftime("%Y-%m-%d %H:%M UTC+8") if item.details_checked_at else None} for item in events], "automation_status": automation_statuses("announcement_scan")})
+    history_range = request.args.get("range", "30d")
+    symbol = request.args.get("symbol", "").strip().upper()
+    if history_range not in {"all", "30d", "7d"} or (symbol and not re.fullmatch(r"[A-Z0-9/_-]{1,30}", symbol)):
+        return jsonify({"error": "请选择有效时间范围，币种只支持字母、数字和交易对分隔符。"}), 400
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+        page_size = min(100, max(1, int(request.args.get("page_size", "50"))))
+    except (TypeError, ValueError):
+        return jsonify({"error": "分页参数必须为整数。"}), 400
+    query = ListingEvent.query
+    now = datetime.now(SHANGHAI_TZ)
+    aliases = symbol_alias_rows()
+    if history_range != "all":
+        days = 7 if history_range == "7d" else 30
+        local_cutoff = (now - timedelta(days=days)).replace(tzinfo=None)
+        utc_cutoff = (now - timedelta(days=days)).astimezone(timezone.utc).replace(tzinfo=None)
+        query = query.filter(or_(and_(ListingEvent.announcement.is_(True), ListingEvent.occurred_at >= local_cutoff), and_(ListingEvent.announcement.is_(False), ListingEvent.occurred_at >= utc_cutoff)))
+    if symbol:
+        search = compact_pair(symbol)
+        if search.endswith(("USDT", "USDC")):
+            search = search[:-4]
+        if not search:
+            return jsonify({"error": "请输入币种代码。"}), 400
+        candidates = delisting_base_candidates(search)
+        for row in aliases:
+            if (delisting_base_candidates(row.canonical_base) | delisting_base_candidates(row.alias_base)) & candidates:
+                candidates.update({row.canonical_base, row.alias_base})
+        column = func.upper(func.replace(func.replace(func.replace(ListingEvent.symbol, "/", ""), "_", ""), "-", ""))
+        query = query.filter(or_(*(column.like("%" + compact_pair(candidate) + "%") for candidate in candidates)))
+    total = query.count()
+    pages = max(1, math.ceil(total / page_size))
+    page = min(page, pages)
+    events = query.order_by(ListingEvent.occurred_at.desc(), ListingEvent.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return jsonify({
+        "events": [listing_event_payload(item, now, aliases) for item in events],
+        "range": history_range, "symbol": symbol, "page": page, "page_size": page_size,
+        "total": total, "pages": pages, "has_more": page < pages,
+        "automation_status": automation_statuses("announcement_scan"),
+    })
 
 
 @app.get("/api/market-metadata/delisted-symbols")
 def market_delisted_symbols():
-    symbols = sorted(announced_delisted_symbols())
+    events = ListingEvent.query.filter_by(event_type="下架").order_by(ListingEvent.occurred_at.desc(), ListingEvent.id.desc()).all()
+    aliases = symbol_alias_rows()
+    now = datetime.now(SHANGHAI_TZ)
+    symbols = sorted(announced_delisted_symbols(events, aliases))
     return jsonify({
         "symbols": symbols,
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "events": [listing_event_payload(item, now, aliases) for item in events],
+        "updated_at": now.isoformat(),
+        "status_note": "按已入库公告及其执行时间判断，不代表已重新核验当前交易状态；具体交易所、市场和服务范围以原公告为准。",
     })
 
 

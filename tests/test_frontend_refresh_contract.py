@@ -61,7 +61,9 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertNotIn("setInterval(callback", source)
         self.assertIn("delay-(Date.now()-state.startedAt)", source)
         self.assertIn("!pageRefreshState(viewId).inFlight", source)
-        self.assertGreaterEqual(INDEX_HTML.count("20261018-workspace-refresh-v3"), 2)
+        # Business JS and CSS may be released independently, but both must be versioned.
+        self.assertIn("filename='style.css') }}?v=", INDEX_HTML)
+        self.assertIn("filename='app.js') }}?v=", INDEX_HTML)
 
     def test_workspace_filter_overrides_legacy_forced_daily_navigation_display(self):
         # Existing daily-nav selectors force display:flex!important; class-only

@@ -76,12 +76,27 @@
     oi_market_cap_updated_at:stamp,oi_market_cap_coverage:4,oi_market_cap_opportunities:symbols.map(symbol=>({symbol,label:'合成持仓比',ratio:0.8,total_open_interest:14000000,market_cap:17500000,market_source:'CoinMarketCap',market_cap_rank:1000,exchange_oi:{Binance:9000000,Bybit:5000000}})),
     opportunities:symbols.slice(0,3).map(symbol=>({symbol,buy_price:1.23,sell_price:1.24,buy_exchange:'Binance',sell_exchange:'Bybit',spread:0.81,estimated_profit:0.69,funding:0.025,updated_at_epoch:now(),exchange_prices:{Binance:1.23,OKX:1.235,Bybit:1.24}}))};
   fixtures['/api/chat/messages/2']=fixtures['/api/chat/messages'];
+  // Delisting cases are synthetic: past/future/unknown and more than one history page.
+  const listingSample={symbol:'DEMO/USDT',matched_symbols:['DEMO/USDT'],type:'下架',source_kind:'official',announcement:true,market_scope:'合约',occurred_at:'2026-09-04 04:00 UTC+8',title:'合成下架公告，仅供本地版式验证',effective_time_status:'parsed'};
+  const listingSamples=[
+    {...listingSample,id:1,exchange:'Bitget',source_url:'https://www.bitget.com/support/articles/preview-demo',effective_at:'2026-09-08 15:00 UTC+8',effective_at_iso:'2026-09-08T15:00:00+08:00'},
+    {...listingSample,id:2,exchange:'Gate',source_url:'https://www.gate.com/announcements/preview-demo',effective_at:'2027-10-20 15:00 UTC+8',effective_at_iso:'2027-10-20T15:00:00+08:00'},
+    {...listingSample,id:3,exchange:'Bybit',source_url:'https://announcements.bybit.com/preview-demo',effective_time_status:'not_stated'},
+    {...listingSample,id:4,symbol:'SAMPLE/USDT',matched_symbols:['SAMPLE/USDT'],exchange:'Binance',source_kind:'detected',announcement:false,market_scope:'USDT永续合约',effective_time_status:'pending'},
+  ];
+  fixtures['/api/market-metadata/delisted-symbols']={symbols:['DEMO/USDT','SAMPLE/USDT'],events:listingSamples,updated_at:new Date().toISOString()};
+  fixtures['/api/daily-report/listings']={events:[...listingSamples,...Array.from({length:57},(_,index)=>({...listingSample,id:index+5,symbol:`TEST${index}/USDT`,matched_symbols:[],exchange:'Bitget',source_url:'https://www.bitget.com/support/articles/preview-only',effective_time_status:'not_stated'}))],automation_status:[]};
   window.fetch = async (input, options={}) => {
     const method = String(options.method || 'GET').toUpperCase();
     if (method !== 'GET') return Response.json({error:'隔离预览禁止写入'}, {status:405});
-    const path = new URL(String(input), location.origin).pathname;
+    const url = new URL(String(input), location.origin),path=url.pathname;
     if (!(path in fixtures)) return Response.json({error:`未定义的合成接口 ${path}`}, {status:404});
     const payload = structuredClone(fixtures[path]);
+    if(path==='/api/daily-report/listings'){
+      const search=(url.searchParams.get('symbol')||'').replace(/[/_-]|USDT$/g,'').toUpperCase(),range=url.searchParams.get('range')||'30d',page=Number(url.searchParams.get('page'))||1,size=Number(url.searchParams.get('page_size'))||50;
+      let items=payload.events.filter(item=>!search||item.symbol.includes(search));if(range!=='all')items=items.filter(item=>item.id===4);
+      payload.total=items.length;payload.pages=Math.max(1,Math.ceil(items.length/size));payload.page=Math.min(page,payload.pages);payload.events=items.slice((payload.page-1)*size,payload.page*size);payload.range=range;
+    }
     if (payload && !Array.isArray(payload)) {
       if ('checked_at_epoch' in payload) payload.checked_at_epoch=now();
       if ('captured_at_epoch' in payload) payload.captured_at_epoch=now();

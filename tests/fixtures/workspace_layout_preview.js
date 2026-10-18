@@ -11,8 +11,8 @@
     funding_interval_hours:4,next_funding_time:'2026-10-18 12:00:00',spot_volume:18200000,futures_volume:37600000,futures_open_interest:14300000,
     open_spread:0.85,close_spread:-0.93,change_5m:0.42,change_15m:0.7,change_30m:1.2,change_1h:2.1,change_12h:4.6,change_24h:7.9,change_3d:12.6,change_7d:18.4};
   const spot = symbols.map((symbol,index) => ({symbol,rows:[{...base,long_ask:base.long_ask+index/10,transfer_status:wallet('Gate')},{...base,long_exchange:'Bitget',open_spread:0.75,transfer_status:wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC',chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}],reason:'快照已过期'})}]}));
-  const isolatedRisk={symbol:'ISOLATED/USDT',long_exchange:'Gate',short_exchange:'Binance',state:'confirmed',long_ask:.12225,short_bid:.02814,index_price:.02804,open_spread:-76.98,basis:.36,blocked_chains:['BSC 充关'],stale:false,observed_at:'10-19 00:00:00 UTC'};
-  spot.push({symbol:isolatedRisk.symbol,rows:[{...base,...isolatedRisk,transfer_status:wallet('Gate'),price_divergence:isolatedRisk}]});
+  const isolatedRisk={symbol:'ISOLATED/USDT',long_exchange:'Gate',short_exchange:'Binance',state:'confirmed',long_ask:.12225,short_bid:.02814,index_price:.02804,open_spread:-76.98,basis:.36,blocked_chains:['BSC 充关','ETH 提关'],blocked_transfers:[{exchange:'Gate',chain:'BSC',deposit_open:false,withdraw_open:true},{exchange:'Gate',chain:'ETH',deposit_open:true,withdraw_open:false}],transfer_state:'fresh',stale:false,observed_at:'10-19 00:00:00 UTC'};
+  spot.push({symbol:isolatedRisk.symbol,rows:[{...base,...isolatedRisk,transfer_status:wallet('Gate'),price_divergence:isolatedRisk},{...base,long_exchange:'Bitget',transfer_status:wallet('Bitget',{chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}]})}]});
   const dual = symbols.map(symbol => ({symbol,binance_change_5m:0.42,binance_change_15m:0.7,binance_change_30m:1.2,binance_change_1h:2.1,rows:[
     {...base,long_exchange:'Bybit',long_basis:-0.2,short_basis:0.83,long_open_interest:12000000,short_open_interest:14300000,long_volume:25000000,short_volume:37600000,
       long_funding_rate:0.01,short_funding_rate:0.025,long_funding_interval_hours:4,short_funding_interval_hours:4,long_next_funding_time:stamp,short_next_funding_time:stamp,
@@ -25,10 +25,10 @@
     long_interval:null,short_interval:4,funding_current:0.025}));
   const event = {id:1,symbol:'DEMO/USDT',strategy:'spot_futures',type:'rapid_basis',message:'合成报警：连续两次确认后的基差变化，仅用于布局和详细说明测试。',basis:1.4,open_spread:0.85,close_spread:-0.93,created_at:stamp,
     long_exchange:'Gate',short_exchange:'Binance',long_market:'现货',short_market:'合约',short_interval:4,funding_interval_hours:4,remaining_seconds:90,expires_at_epoch:now()+90};
-  const alertGroups = [...symbols,...Array.from({length:164},(_,i)=>`TESTCOIN${String(i+1).padStart(3,'0')}/USDT`)].map((symbol,index) => {
+  const alertGroups = [...symbols,isolatedRisk.symbol,...Array.from({length:164},(_,i)=>`TESTCOIN${String(i+1).padStart(3,'0')}/USDT`)].map((symbol,index) => {
     const timeline=Array.from({length:index?3:93},(_,i)=>{
-      const strategy=index===1||index===2?'spot_futures':index===3||i%2?'futures_futures':'spot_futures',isSpot=strategy==='spot_futures';
-      const long_exchange=isSpot?((index===0&&[20,22].includes(i))||(index===2&&i===2)?'Bitget':'Gate'):'Bybit',short_exchange=!isSpot&&(index===3||[3,7].includes(i))?'OKX':'Binance';
+      const strategy=symbol===isolatedRisk.symbol||index===1||index===2?'spot_futures':index===3||i%2?'futures_futures':'spot_futures',isSpot=strategy==='spot_futures';
+      const long_exchange=isSpot?(symbol===isolatedRisk.symbol||(index===0&&[20,22].includes(i))||(index===2&&i===2)?'Bitget':'Gate'):'Bybit',short_exchange=!isSpot&&(index===3||[3,7].includes(i))?'OKX':'Binance';
       return {...event,id:index*100+i+1,symbol,strategy,long_exchange,short_exchange,long_market:isSpot?'现货':'合约',long_interval:isSpot?null:4,created_at:`10-18 ${String(10-Math.floor(i/12)).padStart(2,'0')}:${String(59-i%12*5).padStart(2,'0')}:00`,open_spread:i%2?-0.8512:0.8534,basis:i%2?-1.4012:1.4034,path_id:JSON.stringify([strategy,long_exchange,short_exchange])};
     });
     if(index===0){Object.assign(timeline[91],{open_spread:10.1234,basis:2.277});Object.assign(timeline[92],{open_spread:-50.5678,basis:-7.8047})}
@@ -36,6 +36,7 @@
     const move_peaks=Object.fromEntries(Object.entries(value_ranges).map(([field,{max,min}])=>[field,Math.abs(max)>=Math.abs(min)?max:min]));
     const transfer_statuses=[wallet('Gate',{chains:[{name:'BSC',deposit_open:index===1,withdraw_open:true},{name:'ETH',deposit_open:true,withdraw_open:false}]}),wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC',chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}],reason:'快照已过期'}),wallet('Binance',{state:'unknown',chains:[],captured_at:null,reason:'尚未接入账户只读充提接口'})];
     if(index===1){transfer_statuses[0].chains.forEach(chain=>{chain.deposit_open=true;chain.withdraw_open=true});Object.assign(transfer_statuses[1],{state:'fresh',reason:''})}
+    if(symbol===isolatedRisk.symbol)Object.assign(transfer_statuses[1],{state:'fresh',reason:''});
     if(index===2)for(const [offset,count] of [[0,30],[1,21]])Object.assign(transfer_statuses[offset],{state:'fresh',reason:'',chains:Array.from({length:count},(_,i)=>({name:`SYNTHETIC-${offset}-NETWORK-${String(i+1).padStart(2,'0')}`,deposit_open:i%3===0?false:i%3===1?true:null,withdraw_open:i%2===0}))});
     transfer_statuses.push(...['Bybit','OKX'].map(exchange=>wallet(exchange,{state:'unknown',chains:[],reason:'尚未接入账户只读充提接口'})));
     timeline.forEach(item=>{item.binance_basis=item.short_exchange==='Binance'?item.basis:null;item.basis_exchange=item.binance_basis===null?null:'Binance'});

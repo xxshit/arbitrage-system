@@ -13,6 +13,7 @@ import app as module
 class PriceDivergenceTests(unittest.TestCase):
     def setUp(self):
         self.now = datetime.now().replace(microsecond=0)
+        self.key = ('GUA/USDT', 'Gate', 'Binance')
         module.app.config.update(TESTING=True)
         self.ctx = module.app.app_context()
         self.ctx.push()
@@ -51,7 +52,7 @@ class PriceDivergenceTests(unittest.TestCase):
     def confirm(self):
         for second in range(0, 301, 5):
             active = self.update(second)
-        return active[('GUA/USDT', 'Gate')]
+        return active[self.key]
 
     def event(self, exchange='Gate', strategy='spot_futures', seconds=-60):
         return module.AlertEvent(symbol='GUA/USDT', strategy=strategy, long_exchange=exchange, short_exchange='Binance',
@@ -63,6 +64,7 @@ class PriceDivergenceTests(unittest.TestCase):
         self.assertTrue(evidence['signal'])
         self.assertAlmostEqual(evidence['open_spread'], -76.981595, places=4)
         self.assertEqual(evidence['blocked_chains'], ['BSC 充关'])
+        self.assertEqual(evidence['blocked_transfers'], [{'exchange': 'Gate', 'chain': 'BSC', 'deposit_open': False, 'withdraw_open': True}])
         self.assertEqual(evidence['confirm_seconds'], 300)
 
     def test_closed_chain_alone_and_large_contract_basis_do_not_classify_depeg(self):
@@ -82,24 +84,25 @@ class PriceDivergenceTests(unittest.TestCase):
         self.assertTrue(evidence['signal'])
         self.assertEqual(evidence['confirm_seconds'], 900)
         self.assertEqual(evidence['blocked_chains'], [])
+        self.assertEqual(evidence['blocked_transfers'], [])
         modest = self.row(long_ask=.030, long_bid=.02999)
         self.assertTrue(module.spot_divergence_evidence(modest, self.transfer)['signal'])
         self.assertFalse(module.spot_divergence_evidence(modest)['signal'])
 
     def test_confirm_requires_elapsed_time_and_consecutive_samples(self):
-        first = self.update()[('GUA/USDT', 'Gate')]
+        first = self.update()[self.key]
         self.assertIsNone(first.confirmed_at)
         self.assertEqual(module.spot_divergence_payload(first, self.now)['state'], 'observing')
-        self.assertIsNone(self.update(300)[('GUA/USDT', 'Gate')].confirmed_at)
+        self.assertIsNone(self.update(300)[self.key].confirmed_at)
         for second in range(305, 601, 5):
-            item = self.update(second)[('GUA/USDT', 'Gate')]
+            item = self.update(second)[self.key]
         self.assertIsNotNone(item.confirmed_at)
 
     def test_restart_preserves_isolation_and_stale_data_cannot_release_it(self):
         item = self.confirm()
         item_id = item.id
         module.db.session.remove()
-        item = self.update(600)[('GUA/USDT', 'Gate')]
+        item = self.update(600)[self.key]
         self.assertEqual(item.id, item_id)
         self.assertIsNotNone(item.confirmed_at)
         module.update_spot_divergences([], self.now+timedelta(seconds=700))
@@ -110,9 +113,9 @@ class PriceDivergenceTests(unittest.TestCase):
         item = self.confirm()
         normal = self.row(long_ask=.0282, long_bid=.0281)
         for second in range(305, 425, 5):
-            self.assertIn(('GUA/USDT', 'Gate'), self.update(second, [normal]))
-        self.assertNotIn(('GUA/USDT', 'Gate'), self.update(425, [normal]))
-        episodes = {('GUA/USDT', 'Gate'): [item]}
+            self.assertIn(self.key, self.update(second, [normal]))
+        self.assertNotIn(self.key, self.update(425, [normal]))
+        episodes = {self.key: [item]}
         self.assertTrue(module.alert_is_divergent(self.event(), episodes))
         self.assertFalse(module.alert_is_divergent(self.event(seconds=426), episodes))
 
@@ -130,17 +133,20 @@ class PriceDivergenceTests(unittest.TestCase):
         self.assertEqual(module.AlertEvent.query.count(), 3)
 
     def test_isolated_path_emits_no_new_alerts_and_healthy_path_still_evaluates(self):
+        module.db.session.add(self.event())
+        module.db.session.commit()
         healthy = self.row(long_exchange='Bitget', long_ask=.0282, long_bid=.0281)
         group = [{'symbol': 'GUA/USDT', 'rows': [self.row(), healthy]}]
         with patch.object(module, 'rapid_move_alerts', return_value=[(30, .5, .6)]), patch.object(module, 'validate_spot_alert_quote', return_value=True):
             module.evaluate_alerts(group)
-        events = module.AlertEvent.query.all()
+        events = module.AlertEvent.query.filter(module.AlertEvent.long_exchange != 'Gate').all()
         self.assertTrue(events)
         self.assertEqual({item.long_exchange for item in events}, {'Bitget'})
+        self.assertEqual(module.AlertEvent.query.filter_by(long_exchange='Gate').count(), 1)
 
     def test_positive_divergence_is_also_isolated_and_invalid_quotes_do_not_refresh_evidence(self):
         row = self.row(long_ask=.020, long_bid=.01999)
-        item = self.update(rows=[row])[('GUA/USDT', 'Gate')]
+        item = self.update(rows=[row])[self.key]
         before = item.last_seen_at
         bad = {**row, 'index_price': None}
         self.update(20, [bad])
@@ -148,9 +154,67 @@ class PriceDivergenceTests(unittest.TestCase):
         self.assertIsNone(item.candidate_since)
 
     def test_missing_legacy_exchange_is_not_guessed_from_current_market(self):
-        item = self.update()[('GUA/USDT', 'Gate')]
+        item = self.update()[self.key]
         event = self.event()
         event.long_exchange = None
-        self.assertFalse(module.alert_is_divergent(event, {('GUA/USDT', 'Gate'): [item]}))
+        self.assertFalse(module.alert_is_divergent(event, {self.key: [item]}))
         event.message = 'Gate 现货与 Binance 合约确认后的报警'
-        self.assertTrue(module.alert_is_divergent(event, {('GUA/USDT', 'Gate'): [item]}))
+        self.assertTrue(module.alert_is_divergent(event, {self.key: [item]}))
+
+    def test_isolation_preserves_both_legs_quote_asset_and_strategy(self):
+        item = self.update()[self.key]
+        episodes = {self.key: [item]}
+        for field, value in [('long_exchange', 'Bitget'), ('short_exchange', 'Bybit'), ('symbol', 'GUA/USDC'), ('strategy', 'futures_futures')]:
+            event = self.event()
+            setattr(event, field, value)
+            self.assertFalse(module.alert_is_divergent(event, episodes), (field, value))
+        legacy = self.event()
+        legacy.short_exchange = None
+        self.assertTrue(module.alert_is_divergent(legacy, episodes))
+        legacy.short_exchange = 'Binance 合约'
+        self.assertTrue(module.alert_is_divergent(legacy, episodes))
+
+    def test_only_matching_spot_row_gets_badge_and_structured_chain_ownership(self):
+        self.update()
+        rows = [self.row(), self.row(long_exchange='Bitget'), self.row(short_exchange='Bybit')]
+        groups = [{'symbol': 'GUA/USDT', 'rows': rows}, {'symbol': 'GUA/USDC', 'rows': [self.row()]}]
+        module.enrich_transfer_networks(groups)
+        risk = rows[0]['price_divergence']
+        self.assertEqual(risk['scope'], 'path')
+        self.assertEqual(risk['strategy'], 'spot_futures')
+        self.assertEqual(json.loads(risk['path_id']), ['spot_futures', 'Gate', 'Binance'])
+        self.assertEqual(risk['affected_exchange'], 'Gate')
+        self.assertEqual(risk['blocked_transfers'][0]['exchange'], 'Gate')
+        for row in rows[1:] + groups[1]['rows']:
+            self.assertIsNone(row['price_divergence'])
+
+    def test_other_venue_extreme_does_not_suppress_healthy_path_but_same_path_still_deduplicates(self):
+        module.db.session.add(self.event())
+        module.db.session.commit()
+        healthy = self.row(long_exchange='Bitget', long_ask=.0285, long_bid=.0284)
+        for spread, expected in [(-1.4, 1), (-1.5, 1), (-1.7, 2)]:
+            module.create_alert('GUA/USDT', 'rapid_spread', '确认后的测试', {**healthy, 'open_spread': spread}, 'spot_futures', 'Bitget', 'Binance')
+            module.db.session.commit()
+            self.assertEqual(module.AlertEvent.query.filter_by(long_exchange='Bitget').count(), expected)
+        self.assertEqual(module.AlertEvent.query.filter_by(long_exchange='Gate').count(), 1)
+
+    def test_summary_extremes_active_tips_and_path_details_keep_only_healthy_paths(self):
+        self.update()
+        healthy, dual = self.event('Bitget', seconds=-3), self.event('Gate', 'futures_futures', seconds=-2)
+        healthy.open_spread, dual.open_spread = -1.4, 2.1
+        healthy.basis, dual.basis = .2, .4
+        module.db.session.add_all([self.event(seconds=-1), healthy, dual])
+        module.db.session.commit()
+        with patch.object(module, 'is_rwa_stock_pair', return_value=False):
+            summary = self.client.get('/api/alerts?view=summary').get_json()
+            self.assertEqual(summary['total_symbols'], 1)
+            self.assertEqual(summary['total_alerts'], 2)
+            group = summary['events'][0]
+            self.assertEqual(group['move_peaks']['open_spread'], 2.1)
+            self.assertEqual(group['value_ranges']['open_spread'], {'max': 2.1, 'min': -1.4})
+            self.assertEqual(len(group['paths']), 2)
+            self.assertEqual(summary['active_events'][0]['strategy'], 'futures_futures')
+            for strategy, venue, expected in [('spot_futures', 'Gate', 0), ('spot_futures', 'Bitget', 1), ('futures_futures', 'Gate', 1)]:
+                detail = self.client.get('/api/alerts', query_string={'view': 'detail', 'symbol': 'GUA/USDT', 'path': json.dumps([strategy, venue, 'Binance'])}).get_json()
+                self.assertEqual(detail['total'], expected)
+                self.assertTrue(all(event['long_exchange'] == venue and event['strategy'] == strategy for event in detail['items']))

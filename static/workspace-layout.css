@@ -549,4 +549,8 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 .divergence-register-list {max-height:180px;overflow:auto;overscroll-behavior:contain;padding:0 9px}
 .divergence-register-row {padding:5px 0;border-top:1px solid #eee0d9}
 .divergence-register-row>div {display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.divergence-register-row p {margin:3px 0;line-height:1.65;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.divergence-path {color:#405d70;overflow-wrap:anywhere}
+.divergence-register-row .divergence-register-meta {gap:4px 14px;line-height:1.65;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.divergence-transfer-note {color:#a83b2b;white-space:normal;overflow-wrap:anywhere}
+.spot-divergence-warning {display:inline-flex;flex-direction:column;align-items:flex-start;vertical-align:middle;max-width:230px;white-space:normal}
+.spot-divergence-warning .divergence-transfer-note {padding:0 3px;font-size:10px;line-height:1.5}

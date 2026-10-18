@@ -338,3 +338,8 @@ test('mobile path selectors retain a readable non-zooming font and touch height'
   assert.ok(css.includes('.alert-path-field select {font-size:16px;min-height:40px}'));
   assert.ok(css.includes('.alert-strategy-switch button {min-height:36px}'));
 });
+
+test('read errors surface the bounded escaped reason without claiming nonexistent history was retained',async()=>{
+  const h=harness(async()=>{throw new Error('<img src=x onerror=1>')});h.context.renderAlertMasterDetail([group()]);assert.equal(await h.context.loadSelectedAlertHistory(),false);
+  const markup=h.node('alertDetailPane').innerHTML;assert.ok(markup.includes('明细读取失败：&lt;img'));assert.ok(!markup.includes('<img'));assert.ok(!markup.includes('已保留上次记录'));
+});

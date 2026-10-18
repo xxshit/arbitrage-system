@@ -663,7 +663,7 @@ async function loadSelectedAlertHistory(page=alertDetailState.data?.page||1,rese
     if(data.symbol!==symbol||data.path_id!==pathId||data.strategy!==strategy||!Array.isArray(data.items)||data.items.some(item=>item.symbol!==symbol||item.path_id!==pathId||item.strategy!==strategy))throw new Error('明细币种或路径不一致');
     alertDetailState.data=data;alertDetailState.loading=false;renderAlertDetailPane();
     if(resetScroll){const scroll=byId('alertDetailPane')?.querySelector('.alert-timeline-scroll');if(scroll)scroll.scrollTop=0}return true;
-  }catch(error){if(version===alertDetailVersion&&symbol===selectedAlertSymbol){alertDetailState.loading=false;alertDetailState.error='明细读取失败，已保留上次记录，可重试。';renderAlertDetailPane()}return false}
+  }catch(error){if(version===alertDetailVersion&&symbol===selectedAlertSymbol){alertDetailState.loading=false;alertDetailState.error=`明细读取失败：${String(error?.message||'未知错误').slice(0,160)}。${alertDetailState.data?'已保留上次记录，':''}可重试。`;renderAlertDetailPane()}return false}
   finally{if(alertDetailRequest?.version===version)alertDetailRequest=null}})();
   alertDetailRequest={key,version,promise};return promise;
 }

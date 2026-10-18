@@ -1879,6 +1879,7 @@ def automation_statuses(*task_keys):
 TRANSFER_PUBLIC_SOURCES = {
     "Gate": "https://api.gateio.ws/api/v4/spot/currencies",
     "Bitget": "https://api.bitget.com/api/v2/spot/public/coins",
+    "Binance": "https://www.binance.com/bapi/capital/v1/public/capital/getNetworkCoinAll",
 }
 
 
@@ -1894,20 +1895,29 @@ def transfer_flag(value):
 
 
 def parse_transfer_networks(exchange, payload):
-    if exchange == "Bitget":
+    if exchange == "Binance":
+        if not isinstance(payload, dict) or payload.get("code") != "000000" or payload.get("success") is not True:
+            raise ValueError("Binance公开充提源未返回成功状态")
+        items = payload.get("data")
+    elif exchange == "Bitget":
         if not isinstance(payload, dict) or payload.get("code") != "00000":
             raise ValueError("Bitget充提接口未返回成功状态")
         items = payload.get("data")
-    else:
+    elif exchange == "Gate":
         items = payload
+    else:
+        raise ValueError("不支持的公开充提来源")
     if not isinstance(items, list) or not items:
         raise ValueError(f"{exchange}充提列表为空或格式错误")
     networks = {}
     for item in items:
+        if not isinstance(item, dict):
+            raise ValueError(f"{exchange}充提币种格式错误")
         base = str(item.get("currency" if exchange == "Gate" else "coin") or "").strip().upper()
         if not base or len(base) > 25 or "/" in base:
             raise ValueError(f"{exchange}充提币种代码无效")
-        chains = item.get("chains") or []
+        raw_chains = item.get("networkList" if exchange == "Binance" else "chains")
+        chains = [] if raw_chains is None else raw_chains
         if not isinstance(chains, list):
             raise ValueError(f"{exchange}充提链列表格式错误")
         parsed = []
@@ -1917,9 +1927,12 @@ def parse_transfer_networks(exchange, payload):
             if exchange == "Gate":
                 deposit_disabled, withdraw_disabled = transfer_flag(chain.get("deposit_disabled")), transfer_flag(chain.get("withdraw_disabled"))
                 deposit, withdraw = (not deposit_disabled if deposit_disabled is not None else None), (not withdraw_disabled if withdraw_disabled is not None else None)
+            elif exchange == "Binance":
+                deposit, withdraw = transfer_flag(chain.get("depositEnable")), transfer_flag(chain.get("withdrawEnable"))
             else:
                 deposit, withdraw = transfer_flag(chain.get("rechargeable")), transfer_flag(chain.get("withdrawable"))
-            parsed.append({"name": str(chain.get("name" if exchange == "Gate" else "chain") or "未知链"), "deposit_open": deposit, "withdraw_open": withdraw, "withdraw_delayed": transfer_flag(chain.get("withdraw_delayed")) if exchange == "Gate" else None})
+            name_key = {"Gate": "name", "Bitget": "chain", "Binance": "network"}[exchange]
+            parsed.append({"name": str(chain.get(name_key) or "未知链"), "deposit_open": deposit, "withdraw_open": withdraw, "withdraw_delayed": transfer_flag(chain.get("withdraw_delayed")) if exchange == "Gate" else None})
         symbol = f"{base}/USDT"
         if symbol in networks and networks[symbol] != parsed:
             raise ValueError(f"{exchange}同币种充提数据冲突")
@@ -1982,6 +1995,8 @@ def load_transfer_statuses(pairs, now=None):
         symbol, exchange = pair
         record = next((indexed[(exchange, raw)] for raw in lookups if (exchange, raw) in indexed), None)
         status = {"exchange": exchange, "symbol": symbol, "asset_symbol": record.symbol if record else None, "state": "unknown", "chains": [], "captured_at": None, "captured_at_epoch": None, "source_url": TRANSFER_PUBLIC_SOURCES.get(exchange), "reason": "未采集到该币种的充提数据" if exchange in TRANSFER_PUBLIC_SOURCES else "尚未接入该交易所的账户只读充提接口"}
+        if exchange == "Binance" and record is None:
+            status["reason"] = "币安公开充提源暂未提供该币种数据，不能据此判断通道正常或关闭"
         if record:
             captured = record.captured_at
             status.update(captured_at=captured.strftime("%m-%d %H:%M:%S UTC"), captured_at_epoch=captured.replace(tzinfo=timezone.utc).timestamp())

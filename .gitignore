@@ -1,6 +1,8 @@
 .env
 .chat_encryption.key
 .web_push_vapid_private.pem
+transfer-readonly.json
+.transfer-readonly-*
 .local_web_disabled
 cloud-backup.local.json
 cloud-access.local.json

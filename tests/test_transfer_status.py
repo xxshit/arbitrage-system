@@ -65,6 +65,51 @@ class TransferStatusTests(unittest.TestCase):
         self.assertEqual(parsed["RBIIB/USDT"][0]["withdraw_open"], False)
         self.assertIsNone(parsed["RBIIB/USDT"][1]["withdraw_open"])
 
+    def test_binance_public_networks_use_only_explicit_chain_flags(self):
+        payload = {"code": "000000", "success": True, "data": [{"coin": "DEMO", "depositAllEnable": False, "withdrawAllEnable": False, "free": "SYNTHETIC_BALANCE_MUST_DROP", "networkList": [{"network": "ETH", "depositEnable": True, "withdrawEnable": False, "busy": True}, {"network": "BSC", "depositEnable": "false", "withdrawEnable": "1"}, {"network": "OTHER"}]}]}
+        parsed = module.parse_transfer_networks("Binance", payload)
+        self.assertEqual(parsed["DEMO/USDT"][0], {"name": "ETH", "deposit_open": True, "withdraw_open": False, "withdraw_delayed": None})
+        self.assertEqual(parsed["DEMO/USDT"][1]["deposit_open"], False)
+        self.assertEqual(parsed["DEMO/USDT"][1]["withdraw_open"], True)
+        self.assertIsNone(parsed["DEMO/USDT"][2]["deposit_open"])
+        self.assertNotIn("SYNTHETIC_BALANCE_MUST_DROP", json.dumps(parsed))
+
+    def test_binance_failed_challenge_empty_or_bad_public_payload_never_marks_fresh(self):
+        for payload in ("<html>challenge</html>", {"code": "000001", "success": True, "data": [{}]}, {"code": "000000", "success": False, "data": [{}]}, {"code": "000000", "success": True, "data": []}, {"code": "000000", "success": True, "data": [{"coin": "DEMO", "networkList": False}]}):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                module.parse_transfer_networks("Binance", payload)
+
+    def test_binance_all_chains_survive_storage_and_no_key_or_private_fields_are_used(self):
+        networks = [{"network": f"CHAIN{index}", "depositEnable": index % 2 == 0, "withdrawEnable": True} for index in range(30)]
+        raw = {"code": "000000", "success": True, "data": [{"coin": "DEMO", "networkList": networks, "locked": "NEVER_PERSIST_THIS"}]}
+        with module.app.app_context():
+            module.store_transfer_networks("Binance", module.parse_transfer_networks("Binance", raw))
+            status = self.status(exchange="Binance")
+            self.assertEqual(len(status["chains"]), 30)
+            self.assertEqual(status["chains"][-1]["name"], "CHAIN29")
+            self.assertEqual(status["state"], "fresh")
+            self.assertNotIn("NEVER_PERSIST_THIS", json.dumps(status))
+            self.assertEqual(status["source_url"], "https://www.binance.com/bapi/capital/v1/public/capital/getNetworkCoinAll")
+
+    def test_missing_binance_public_coin_does_not_claim_key_is_needed_or_coin_is_closed(self):
+        with module.app.app_context():
+            status = self.status(exchange="Binance")
+            self.assertEqual(status["state"], "unknown")
+            self.assertIn("公开充提源暂未提供", status["reason"])
+            self.assertNotIn("账户只读", status["reason"])
+            self.assertEqual(status["chains"], [])
+
+    def test_public_binance_request_is_get_with_no_key_cookie_or_auth_header(self):
+        payload = {"code": "000000", "success": True, "data": [{"coin": "DEMO", "networkList": []}]}
+        with patch.object(module, "urlopen") as opened:
+            opened.return_value.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+            module.get_json(module.TRANSFER_PUBLIC_SOURCES["Binance"], timeout=8)
+        request = opened.call_args.args[0]
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.full_url, "https://www.binance.com/bapi/capital/v1/public/capital/getNetworkCoinAll")
+        names = {name.lower() for name, _ in request.header_items()}
+        self.assertFalse(names & {"authorization", "cookie", "x-mbx-apikey", "x-bapi-api-key", "ok-access-key"})
+
     def test_all_source_chains_survive_parse_storage_and_api_without_filtering_or_cap(self):
         names = [f"SYNTHETIC-NETWORK-{index:02d}" for index in range(30)]
         with module.app.app_context():
@@ -117,9 +162,23 @@ class TransferStatusTests(unittest.TestCase):
             old = self.record(captured_at=self.now - timedelta(hours=3))
             old_time = old.captured_at
             good = {"code": "00000", "data": [{"coin": "DEMO", "chains": [{"chain": "BEP20", "rechargeable": "true", "withdrawable": "true"}]}]}
-            with patch.object(module, "get_json", side_effect=[TimeoutError("source timeout"), good]), self.assertRaisesRegex(RuntimeError, "Gate.*TimeoutError"):
+            binance = {"code": "000000", "success": True, "data": [{"coin": "DEMO", "networkList": [{"network": "BSC", "depositEnable": True, "withdrawEnable": True}]}]}
+            with patch.object(module, "get_json", side_effect=[TimeoutError("source timeout"), good, binance]), self.assertRaisesRegex(RuntimeError, "Gate.*TimeoutError"):
                 module.refresh_public_transfer_networks()
             self.assertEqual(module.TransferNetworkSnapshot.query.filter_by(exchange="Gate").first().captured_at, old_time)
+            self.assertEqual(self.status(exchange="Bitget")["state"], "fresh")
+            self.assertEqual(self.status(exchange="Binance")["state"], "fresh")
+
+    def test_failed_binance_public_fetch_keeps_prior_snapshot_and_other_sources_update(self):
+        with module.app.app_context():
+            old = self.record(exchange="Binance", captured_at=self.now - timedelta(hours=3))
+            old_time = old.captured_at
+            gate = [{"currency": "DEMO", "chains": [{"name": "BSC", "deposit_disabled": False, "withdraw_disabled": False}]}]
+            bitget = {"code": "00000", "data": [{"coin": "DEMO", "chains": [{"chain": "BSC", "rechargeable": True, "withdrawable": True}]}]}
+            with patch.object(module, "get_json", side_effect=[gate, bitget, ValueError("synthetic non-JSON response")]), self.assertRaisesRegex(RuntimeError, "Binance"):
+                module.refresh_public_transfer_networks()
+            self.assertEqual(module.TransferNetworkSnapshot.query.filter_by(exchange="Binance").first().captured_at, old_time)
+            self.assertEqual(self.status(exchange="Gate")["state"], "fresh")
             self.assertEqual(self.status(exchange="Bitget")["state"], "fresh")
 
     def test_current_fresh_data_includes_explicit_utc_capture_time(self):

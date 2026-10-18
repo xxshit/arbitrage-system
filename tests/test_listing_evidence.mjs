@@ -15,9 +15,14 @@ class Element {
   remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(child=>child!==this);this.parentElement=null}
   before(child){const parent=this.parentElement;child.remove();parent.children.splice(parent.children.indexOf(this),0,child);child.parentElement=parent}
   replaceWith(child){const parent=this.parentElement,index=parent.children.indexOf(this);child.remove();parent.children.splice(index,1,child);child.parentElement=parent;this.parentElement=null}
-  matches(){return Boolean(this.dataset.marketSymbol||this.classList.contains('symbol-detail-trigger'))}
-  querySelector(){return this.children.find(child=>child.classList.contains('delisting-evidence'))||null}
-  querySelectorAll(){return this.children.flatMap(child=>[...(child.matches()?[child]:[]),...child.querySelectorAll()])}
+  matches(selector='[data-market-symbol],.symbol-detail-trigger'){return selector.split(',').some(part=>{const value=part.trim().replace(':scope > ','');return value==='[data-market-symbol]'?Boolean(this.dataset.marketSymbol):value.startsWith('.')?this.classList.contains(value.slice(1)):false})}
+  closest(selector){for(let node=this;node;node=node.parentElement)if(node.matches(selector))return node;return null}
+  contains(node){for(let current=node;current;current=current.parentElement)if(current===this)return true;return false}
+  get isConnected(){for(let node=this;node;node=node.parentElement)if(node.connectedRoot)return true;return false}
+  getBoundingClientRect(){return this.rect||{left:120,right:139,top:200,bottom:219,width:300,height:130}}
+  focus(){this.focused=true}
+  querySelector(selector){return this.children.find(child=>child.matches(selector))||null}
+  querySelectorAll(selector){return this.children.flatMap(child=>[...(child.matches(selector)?[child]:[]),...child.querySelectorAll(selector)])}
   setAttribute(key,value){this.attributes[key]=value}
   removeAttribute(key){delete this.attributes[key]}
   set innerHTML(value){this.html=value;this.writes++}
@@ -25,11 +30,14 @@ class Element {
 }
 function harness(fetcher=async()=>({events:[],total:0,pages:1,page:1})){
   const nodes=Object.fromEntries(['dailyListings','listingHistoryRange','listingSymbolSearch','listingResultSummary','listingPreviousPage','listingNextPage','listingQueryError'].map(key=>[key,new Element()]));
-  const root=new Element();
-  const context={URL,URLSearchParams,Date,console,document:{activeElement:null,createElement:tag=>new Element(tag),addEventListener(){},querySelectorAll:()=>root.querySelectorAll(),querySelector:()=>null},byId:key=>nodes[key],fetchRefreshJson:fetcher,renderAutomationStatus(){},escapeChatHtml:value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))};
+  const root=new Element('body');root.connectedRoot=true;const listeners={},timers=new Map(),frames=new Map();let id=0;
+  const listen=(key,fn)=>(listeners[key]??=[]).push(fn);
+  const context={URL,URLSearchParams,Date,console,setTimeout:fn=>{timers.set(++id,fn);return id},clearTimeout:key=>timers.delete(key),requestAnimationFrame:fn=>{frames.set(++id,fn);return id},window:{innerWidth:1280,innerHeight:900,addEventListener:(key,fn)=>listen('window:'+key,fn)},document:{body:root,activeElement:null,createElement:tag=>{const node=new Element(tag);node.style={};return node},addEventListener:listen,querySelectorAll:selector=>root.querySelectorAll(selector),querySelector:()=>null},byId:key=>nodes[key],fetchRefreshJson:fetcher,renderAutomationStatus(){},escapeChatHtml:value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]))};
   vm.createContext(context);
-  vm.runInContext("let delistedMarketSymbols=new Set(),delistedMarketBases=new Set(),delistedSymbolsLoadedAt=0,delistingEventsByBase=new Map(),delistingMetadataRequest=null,delistingClockOffset=0,dailyListingState={range:'all',symbol:'',page:1,pageSize:50,total:0,pages:1},dailyListingRequestVersion=0;\n"+evidence+'\n'+listings,context);
-  return {context,nodes,root,run:code=>vm.runInContext(code,context)};
+  vm.runInContext("let delistedMarketSymbols=new Set(),delistedMarketBases=new Set(),delistedSymbolsLoadedAt=0,delistingEventsByBase=new Map(),delistingMetadataRequest=null,delistingClockOffset=0,dailyListingState={range:'all',symbol:'',page:1,pageSize:50,total:0,pages:1},dailyListingRequestVersion=0;\n"+source.match(/^const delistingPopoverState=.*;$/m)[0]+'\n'+evidence+'\n'+listings,context);
+  const emit=(key,target,extra={})=>(listeners[key]||[]).forEach(fn=>fn({target,preventDefault(){},stopPropagation(){},...extra}));
+  const flush=map=>{const jobs=[...map.values()];map.clear();jobs.forEach(fn=>fn())};
+  return {context,nodes,root,run:code=>vm.runInContext(code,context),emit,flushTimers:()=>flush(timers),flushFrames:()=>flush(frames)};
 }
 function event(overrides={}){return {id:47,symbol:'ESPORTS/USDT',matched_symbols:['ESPORTS/USDT'],exchange:'Bitget',market_scope:'合约',type:'下架',source_kind:'official',source_url:'https://www.bitget.com/support/articles/12560603894224',title:'ESPORTS futures delisting',occurred_at:'2026-09-04 04:00 UTC+8',effective_at:'2026-09-08 15:00 UTC+8',effective_at_iso:'2026-09-08T15:00:00+08:00',effective_time_status:'parsed',...overrides}}
 
@@ -60,16 +68,22 @@ test('only newest evidence per exchange/scope is compacted and official evidence
   assert.equal(h.context.delistingEvidenceFor('ESPORTS')[0].id,48);
 });
 
-test('warnings are direct safe links with exchange, market, status and full execution time',()=>{
-  const h=harness(),markup=h.context.delistingEvidenceMarkup('ESPORTS/USDT',[event()]);
-  for(const text of ['Bitget','合约','已下架（按公告）','2026-09-08 15:00 UTC+8','https://www.bitget.com/support/articles/12560603894224','noopener noreferrer'])assert.ok(markup.includes(text),text);
-  assert.ok(!markup.includes('onclick='));
+test('collapsed warning contains only a single red-exclamation button, not visible rows',()=>{
+  const h=harness(),markup=h.context.delistingEvidenceMarkup('ESPORTS/USDT');
+  assert.equal((markup.match(/<button/g)||[]).length,1);assert.ok(markup.includes('>!</button>'));assert.ok(markup.includes('aria-expanded="false"'));
+  for(const text of ['Bitget','2026-09-08','<a','title='])assert.ok(!markup.includes(text),text);
+});
+
+test('single-coin popup keeps safe original links but suppresses shared titles and old publication metadata',()=>{
+  const h=harness();h.context.indexDelistingEvidence([event({title:'Delist 4USDT, GOATUSDT, ESPORTSUSDT futures'})]);const markup=h.context.delistingPopoverMarkup('ESPORTS/USDT');
+  for(const text of ['ESPORTS/USDT','Bitget','合约','已下架','https://www.bitget.com/support/articles/12560603894224','noopener noreferrer'])assert.ok(markup.includes(text),text);
+  for(const text of ['GOATUSDT','4USDT','2026-09-04','title=','onclick='])assert.ok(!markup.includes(text),text);
 });
 
 test('unsafe links and untrusted announcement text cannot become executable markup',()=>{
   const h=harness();
   for(const value of ['javascript:alert(1)','https://bitget.com.evil.test/x','https://www.bitget.com@evil.test/x','http://www.bitget.com/x'])assert.equal(h.context.safeListingSourceUrl(value),'');
-  const markup=h.context.delistingEvidenceMarkup('ESPORTS',[event({exchange:'<img src=x onerror=alert(1)>',title:'" onclick="alert(1)',source_url:'javascript:alert(1)'})]);
+  h.context.indexDelistingEvidence([event({exchange:'<img src=x onerror=alert(1)>',title:'" onclick="alert(1)',source_url:'javascript:alert(1)'})]);const markup=h.context.delistingPopoverMarkup('ESPORTS');
   assert.ok(!markup.includes('<img'));assert.ok(!markup.includes('href="javascript:'));assert.ok(markup.includes('&lt;img'));
 });
 
@@ -122,5 +136,60 @@ test('search resets to page one and history entry resets date limits',async()=>{
 test('history UI and mobile warning layout keep the existing market click action',()=>{
   for(const id of ['listingHistoryRange','listingSymbolSearch','listingPreviousPage','listingNextPage','listingQueryError'])assert.ok(html.includes(`id="${id}"`));
   assert.ok(source.includes('onclick="openSymbolDetail('));assert.ok(!evidence.includes('openSymbolDetail('));
-  assert.ok(css.includes('.delisting-evidence a'));assert.ok(css.includes('overflow-wrap:anywhere'));assert.ok(html.includes('全部已入库记录'));
+  assert.ok(css.includes('.delisting-warning-trigger'));assert.ok(css.includes('overflow-wrap:anywhere'));assert.ok(html.includes('全部已入库记录'));
+});
+
+function trigger(h,symbol='ESPORTS/USDT'){const node=new Element('button');node.className='delisting-warning-trigger';node.dataset.delistingSymbol=symbol;h.root.appendChild(node);return node}
+
+test('hover opens only the target asset and leaving closes it',()=>{
+  const h=harness();h.context.indexDelistingEvidence([event(),event({id:48,symbol:'OTHER/USDT',matched_symbols:['OTHER/USDT'],exchange:'Gate'})]);const button=trigger(h);
+  assert.equal(h.run('delistingPopoverState.popup'),null);h.emit('pointerover',button,{pointerType:'mouse'});
+  const popup=h.run('delistingPopoverState.popup');assert.ok(popup.innerHTML.includes('Bitget'));assert.ok(!popup.innerHTML.includes('OTHER'));assert.ok(!popup.innerHTML.includes('Gate'));
+  assert.equal(button.attributes['aria-expanded'],'true');h.emit('pointerout',button);h.flushTimers();assert.equal(h.run('delistingPopoverState.popup'),null);
+});
+
+test('upcoming popup includes exact date while a past row stays compact',()=>{
+  const h=harness();h.context.indexDelistingEvidence([event(),event({id:48,exchange:'Gate',effective_at:'2099-10-20 15:00 UTC+8',effective_at_iso:'2099-10-20T15:00:00+08:00'})]);const markup=h.context.delistingPopoverMarkup('ESPORTS');
+  assert.ok(markup.includes('2099-10-20 15:00 UTC+8 即将下架'));assert.ok(!markup.includes('2026-09-08 15:00'));
+});
+
+test('moving from the exclamation into its popup keeps announcement links usable',()=>{
+  const h=harness();h.context.indexDelistingEvidence([event()]);const button=trigger(h);h.emit('pointerover',button,{pointerType:'mouse'});const popup=h.run('delistingPopoverState.popup');
+  h.emit('pointerout',button);h.emit('pointerover',popup,{pointerType:'mouse'});h.flushTimers();assert.equal(h.run('delistingPopoverState.popup'),popup);
+});
+
+test('hovering another coin replaces the popup rather than mixing their exchanges',()=>{
+  const h=harness();h.context.indexDelistingEvidence([event(),event({id:48,symbol:'OTHER/USDT',matched_symbols:['OTHER/USDT'],exchange:'Gate'})]);const first=trigger(h),second=trigger(h,'OTHER/USDT');
+  h.emit('pointerover',first,{pointerType:'mouse'});h.emit('pointerover',second,{pointerType:'mouse'});const popup=h.run('delistingPopoverState.popup');
+  assert.ok(popup.innerHTML.includes('OTHER/USDT'));assert.ok(popup.innerHTML.includes('Gate'));assert.ok(!popup.innerHTML.includes('ESPORTS'));assert.ok(!popup.innerHTML.includes('Bitget'));
+  assert.equal(h.root.querySelectorAll('.delisting-popover').length,1);
+});
+
+test('phone tap pins the popup, second tap closes it, and hover is ignored for touch',()=>{
+  const h=harness();h.context.indexDelistingEvidence([event()]);const button=trigger(h);
+  h.emit('pointerover',button,{pointerType:'touch'});assert.equal(h.run('delistingPopoverState.popup'),null);
+  h.emit('click',button);assert.ok(h.run('delistingPopoverState.popup'));h.emit('pointerout',button);h.flushTimers();assert.ok(h.run('delistingPopoverState.popup'));
+  h.emit('click',button);assert.equal(h.run('delistingPopoverState.popup'),null);
+});
+
+test('keyboard focus opens and Escape dismisses without discarding the symbol action',()=>{
+  const h=harness();h.context.indexDelistingEvidence([event()]);const button=trigger(h);h.emit('focusin',button);assert.ok(h.run('delistingPopoverState.popup'));
+  h.emit('keydown',button,{key:'Escape'});assert.equal(h.run('delistingPopoverState.popup'),null);assert.ok(button.focused);
+});
+
+test('outside click, page navigation and document scrolling dismiss stale popups',()=>{
+  const h=harness();h.context.indexDelistingEvidence([event()]);const button=trigger(h);
+  for(const type of ['click','scroll','window:hashchange','window:resize']){h.context.showDelistingPopover(button,true);h.emit(type,h.root);assert.equal(h.run('delistingPopoverState.popup'),null,type)}
+});
+
+test('a 5-second rerender retargets an open popup without flicker or duplicate content',()=>{
+  const h=harness();h.context.indexDelistingEvidence([event()]);const first=trigger(h);h.context.showDelistingPopover(first);const popup=h.run('delistingPopoverState.popup'),writes=popup.writes;first.remove();const second=trigger(h);
+  h.context.scheduleDelistingPopoverReconcile();h.flushFrames();assert.equal(h.run('delistingPopoverState.popup'),popup);assert.equal(h.run('delistingPopoverState.trigger'),second);assert.equal(second.attributes['aria-expanded'],'true');assert.equal(popup.writes,writes);
+  second.remove();h.context.reconcileDelistingPopover();assert.equal(h.run('delistingPopoverState.popup'),null);
+});
+
+test('popup placement stays inside narrow viewports and flips above near the bottom',()=>{
+  const h=harness(),position=h.context.delistingPopoverPosition({left:310,top:730,bottom:749},{width:296,height:180},320,800);
+  assert.equal(position.left,12);assert.equal(position.top,543);
+  const top=h.context.delistingPopoverPosition({left:2,top:5,bottom:24},{width:296,height:180},320,800);assert.equal(top.left,12);assert.equal(top.top,31);
 });

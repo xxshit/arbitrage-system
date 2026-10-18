@@ -44,6 +44,7 @@ let delistedSymbolsLoadedAt=0;
 let delistingEventsByBase=new Map();
 let delistingMetadataRequest=null;
 let delistingClockOffset=0;
+const delistingPopoverState={trigger:null,popup:null,symbol:'',view:'',pinned:false,closeTimer:null,frame:null,restoringFocus:false};
 let dailyListingState={range:'all',symbol:'',page:1,pageSize:50,total:0,pages:1};
 let dailyListingRequestVersion=0;
 let spotFuturesPage = 1;
@@ -200,7 +201,10 @@ function delistingEventState(item,now=Date.now()+delistingClockOffset){
   if(item.effective_time_status!=='parsed'||!Number.isFinite(effective))return {key:'unconfirmed',label:'下架时间待核实'};
   return effective>now?{key:'scheduled',label:'即将下架'}:{key:'delisted',label:'已下架（按公告）'};
 }
-function delistingEvidenceText(item){const state=delistingEventState(item);return `${item.exchange} · ${item.market_scope||'范围见原公告'} · ${state.label}${item.effective_at&&state.key!=='detected'&&state.key!=='unconfirmed'?` · ${item.effective_at}`:''}`}
+function delistingEvidenceText(item){
+  const state=delistingEventState(item),scope=item.market_scope&&item.market_scope!=='范围见原公告'?` · ${item.market_scope}`:'',status=state.key==='delisted'?'已下架':state.key==='scheduled'?`${item.effective_at||'时间待核实'} 即将下架`:state.key==='detected'?'检测到下架，时间待核实':'下架时间待核实';
+  return `${item.exchange}${scope}：${status}`;
+}
 function indexDelistingEvidence(events){
   const byBase=new Map();
   for(const item of events||[]){for(const symbol of [item.symbol,...(item.matched_symbols||[])]){for(const base of delistingAssetBases(symbol)){if(!byBase.has(base))byBase.set(base,new Map());byBase.get(base).set(String(item.id),item)}}}
@@ -208,14 +212,54 @@ function indexDelistingEvidence(events){
 }
 function delistingEvidenceFor(symbol){
   const rows=new Map();for(const base of delistingAssetBases(symbol)){for(const [id,item] of delistingEventsByBase.get(base)||[])rows.set(id,item)}
-  // One visible warning per exchange and market scope; all original records remain searchable.
+  // One entry per exchange and market scope for this asset only; full history stays searchable.
   const latest=new Map();
   for(const item of rows.values()){const key=`${item.exchange}|${item.market_scope}`,previous=latest.get(key);if(!previous||(item.source_kind==='official'&&previous.source_kind!=='official')||(item.source_kind===previous.source_kind&&String(item.occurred_at)>String(previous.occurred_at)))latest.set(key,item)}
   return [...latest.values()].sort((a,b)=>delistingEventState(a).key==='scheduled'&&delistingEventState(b).key!=='scheduled'?-1:delistingEventState(b).key==='scheduled'&&delistingEventState(a).key!=='scheduled'?1:String(a.exchange).localeCompare(String(b.exchange)));
 }
-function delistingEvidenceMarkup(symbol,items){
-  if(!items.length)return `<a class="delisting-history-link" href="#daily-listings" data-listing-symbol="${escapeChatHtml(symbol)}">⚠ 下架记录${delistedSymbolsLoadedAt?'待核实':'读取中'} · 查看历史</a>`;
-  return items.map(item=>{const source=safeListingSourceUrl(item.source_url),state=delistingEventState(item),text=`⚠ ${delistingEvidenceText(item)}`,title=`${item.title||'未取得官方公告'}\n${item.occurred_at||''}\n按已入库公告判断，不代表其他交易所或市场下架。`;return `<a class="delisting-evidence-link state-${state.key}${source?'':' delisting-history-link'}" href="${source?escapeChatHtml(source):'#daily-listings'}" ${source?'target="_blank" rel="noopener noreferrer"':`data-listing-symbol="${escapeChatHtml(symbol)}"`} title="${escapeChatHtml(title)}">${escapeChatHtml(text)}${source?' ↗':' · 查看记录'}</a>`}).join('');
+function delistingEvidenceMarkup(symbol){
+  return `<button type="button" class="delisting-warning-trigger" data-delisting-symbol="${escapeChatHtml(symbol)}" aria-label="${escapeChatHtml(symbol)} 下架信息" aria-haspopup="dialog" aria-expanded="false">!</button>`;
+}
+function delistingPopoverMarkup(symbol){
+  const items=delistingEvidenceFor(symbol),rows=items.length?items.map(item=>{const source=safeListingSourceUrl(item.source_url),state=delistingEventState(item);return `<a class="delisting-evidence-link state-${state.key}${source?'':' delisting-history-link'}" href="${source?escapeChatHtml(source):'#daily-listings'}" ${source?'target="_blank" rel="noopener noreferrer"':`data-listing-symbol="${escapeChatHtml(symbol)}"`}>${escapeChatHtml(delistingEvidenceText(item))}${source?' ↗':''}</a>`}).join(''):`<a class="delisting-history-link" href="#daily-listings" data-listing-symbol="${escapeChatHtml(symbol)}">下架时间待核实 · 查看该币历史</a>`;
+  // Do not show multi-coin announcement titles or publication metadata in a single-coin popup.
+  return `<div class="delisting-popover-heading"><strong>${escapeChatHtml(normalizedMarketSymbol(symbol))}</strong><button type="button" class="delisting-popover-close" aria-label="关闭下架信息">×</button></div><div class="delisting-popover-rows">${rows}</div><small>北京时间 UTC+8 · 按公告</small>`;
+}
+function delistingPopoverPosition(anchor,popup,viewportWidth,viewportHeight){
+  const left=Math.max(12,Math.min(anchor.left,viewportWidth-popup.width-12)),below=anchor.bottom+7,top=below+popup.height<=viewportHeight-12?below:Math.max(12,anchor.top-popup.height-7);
+  return {left,top};
+}
+function cancelDelistingPopoverClose(){clearTimeout(delistingPopoverState.closeTimer);delistingPopoverState.closeTimer=null}
+function closeDelistingPopover(restoreFocus=false){
+  cancelDelistingPopoverClose();const state=delistingPopoverState,trigger=state.trigger;
+  trigger?.setAttribute('aria-expanded','false');trigger?.removeAttribute('aria-controls');state.popup?.remove();state.popup=null;state.trigger=null;state.symbol='';state.view='';state.pinned=false;
+  if(restoreFocus&&trigger?.isConnected){state.restoringFocus=true;trigger.focus({preventScroll:true});state.restoringFocus=false}
+}
+function positionDelistingPopover(){
+  const {trigger,popup}=delistingPopoverState;if(!trigger?.isConnected||!popup)return;
+  const position=delistingPopoverPosition(trigger.getBoundingClientRect(),popup.getBoundingClientRect(),window.innerWidth,window.innerHeight);popup.style.left=`${position.left}px`;popup.style.top=`${position.top}px`;
+}
+function showDelistingPopover(trigger,pinned=false){
+  if(!trigger)return;cancelDelistingPopoverClose();const state=delistingPopoverState,symbol=trigger.dataset.delistingSymbol||'';
+  if(state.trigger!==trigger){closeDelistingPopover();state.trigger=trigger;state.symbol=symbol;state.view=trigger.closest('.view')?.id||''}
+  state.pinned=state.pinned||pinned;
+  if(!state.popup){state.popup=document.createElement('div');state.popup.id='delistingPopover';state.popup.className='delisting-popover';state.popup.setAttribute('role','dialog');state.popup.setAttribute('aria-label',`${symbol} 下架信息`);document.body.appendChild(state.popup)}
+  const markup=delistingPopoverMarkup(symbol);if(state.popup.dataset.signature!==markup){state.popup.innerHTML=markup;state.popup.dataset.signature=markup}
+  trigger.setAttribute('aria-expanded','true');trigger.setAttribute('aria-controls','delistingPopover');positionDelistingPopover();
+}
+function scheduleDelistingPopoverClose(force=false){
+  cancelDelistingPopoverClose();if(delistingPopoverState.pinned&&!force)return;
+  delistingPopoverState.closeTimer=setTimeout(()=>closeDelistingPopover(),180);
+}
+function reconcileDelistingPopover(){
+  const state=delistingPopoverState;if(!state.popup)return;
+  if(!state.trigger?.isConnected){const replacement=[...document.querySelectorAll('.delisting-warning-trigger')].find(node=>node.dataset.delistingSymbol===state.symbol&&(node.closest('.view')?.id||'')===state.view);if(!replacement){closeDelistingPopover();return}state.trigger=replacement}
+  // Preserve the open popup while 5-second market rendering replaces its trigger.
+  showDelistingPopover(state.trigger,state.pinned);
+}
+function scheduleDelistingPopoverReconcile(){
+  if(!delistingPopoverState.popup||delistingPopoverState.frame)return;
+  delistingPopoverState.frame=requestAnimationFrame(()=>{delistingPopoverState.frame=null;reconcileDelistingPopover()});
 }
 function applyDelistingWarnings(root=document){
   const selector='[data-market-symbol],.symbol-detail-trigger',nodes=[];
@@ -223,16 +267,17 @@ function applyDelistingWarnings(root=document){
   for(const node of nodes){
     if(node.dataset.listingOwnEvidence==='1')continue;
     const symbol=node.dataset.marketSymbol||node.textContent.trim();if(!node.dataset.marketSymbol&&symbol)node.dataset.marketSymbol=symbol;
-    const items=delistingEvidenceFor(symbol),warned=isDelistedMarketSymbol(symbol)||node.dataset.delistingAnnounced==='1';
+    const warned=isDelistedMarketSymbol(symbol)||node.dataset.delistingAnnounced==='1';
     node.classList.toggle('delisting-symbol',warned);
     let group=node.parentElement?.classList.contains('delisting-label-group')?node.parentElement:null;
     if(!warned){if(group)group.replaceWith(node);node.querySelector?.(':scope > .delisting-evidence')?.remove();if(node.dataset.delistingLinked==='1'){node.removeAttribute('title');delete node.dataset.delistingLinked}continue}
-    node.title=items.length?items.map(delistingEvidenceText).join('\n')+'\n按公告时间判断；点击下方交易所提示查看原公告。':'下架证据尚未读取，请点击查看历史记录。';node.dataset.delistingLinked='1';
+    node.removeAttribute('title');node.dataset.delistingLinked='1';
     if(node.tagName!=='TD'&&!group){group=document.createElement(node.tagName==='B'?'b':/^H[1-6]$/.test(node.tagName)?'div':'span');group.className='delisting-label-group';node.before(group);group.appendChild(node)}
     const host=group||node;let evidence=host.querySelector(':scope > .delisting-evidence');
     if(!evidence){evidence=document.createElement('span');evidence.className='delisting-evidence';host.appendChild(evidence)}
-    const markup=delistingEvidenceMarkup(symbol,items);if(evidence.dataset.signature!==markup){evidence.innerHTML=markup;evidence.dataset.signature=markup}
+    const markup=delistingEvidenceMarkup(symbol);if(evidence.dataset.signature!==markup){evidence.innerHTML=markup;evidence.dataset.signature=markup}
   }
+  scheduleDelistingPopoverReconcile();
 }
 async function loadDelistedMarketSymbols(force=false){
   if(delistingMetadataRequest)return delistingMetadataRequest;
@@ -240,7 +285,20 @@ async function loadDelistedMarketSymbols(force=false){
   delistingMetadataRequest=(async()=>{try{const data=await fetchRefreshJson('/api/market-metadata/delisted-symbols',5000);delistedMarketSymbols=new Set((data.symbols||[]).map(normalizedMarketSymbol));delistedMarketBases=new Set([...delistedMarketSymbols].flatMap(delistingAssetBases));indexDelistingEvidence(data.events||[]);const serverTime=Date.parse(data.updated_at);if(Number.isFinite(serverTime))delistingClockOffset=serverTime-Date.now();delistedSymbolsLoadedAt=Date.now();applyDelistingWarnings()}catch(error){/* Keep the last verified evidence on transient failure. */}})();
   try{return await delistingMetadataRequest}finally{delistingMetadataRequest=null}
 }
-document.addEventListener('click',event=>{const link=event.target.closest?.('.delisting-history-link');if(link){event.preventDefault();openListingHistory(link.dataset.listingSymbol||'')}});
+document.addEventListener('pointerover',event=>{if(event.pointerType==='touch')return;const trigger=event.target.closest?.('.delisting-warning-trigger');if(trigger)showDelistingPopover(trigger);else if(event.target.closest?.('.delisting-popover'))cancelDelistingPopoverClose()});
+document.addEventListener('pointerout',event=>{const from=event.target.closest?.('.delisting-warning-trigger,.delisting-popover'),to=event.relatedTarget?.closest?.('.delisting-warning-trigger,.delisting-popover');if(from&&!to)scheduleDelistingPopoverClose()});
+document.addEventListener('focusin',event=>{if(delistingPopoverState.restoringFocus)return;const trigger=event.target.closest?.('.delisting-warning-trigger');if(trigger)showDelistingPopover(trigger);else if(event.target.closest?.('.delisting-popover'))cancelDelistingPopoverClose()});
+document.addEventListener('focusout',event=>{if(event.target.closest?.('.delisting-warning-trigger,.delisting-popover')&&!event.relatedTarget?.closest?.('.delisting-warning-trigger,.delisting-popover'))scheduleDelistingPopoverClose(true)});
+document.addEventListener('click',event=>{
+  const trigger=event.target.closest?.('.delisting-warning-trigger');if(trigger){event.preventDefault();event.stopPropagation();if(delistingPopoverState.trigger===trigger&&delistingPopoverState.pinned)closeDelistingPopover();else showDelistingPopover(trigger,true);return}
+  if(event.target.closest?.('.delisting-popover-close')){closeDelistingPopover(true);return}
+  const link=event.target.closest?.('.delisting-history-link');if(link){event.preventDefault();const symbol=link.dataset.listingSymbol||'';closeDelistingPopover();openListingHistory(symbol);return}
+  if(!event.target.closest?.('.delisting-popover'))closeDelistingPopover();
+});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&delistingPopoverState.popup){event.preventDefault();closeDelistingPopover(true)}else if(event.key==='ArrowDown'&&event.target.closest?.('.delisting-warning-trigger')){event.preventDefault();showDelistingPopover(event.target.closest('.delisting-warning-trigger'),true);delistingPopoverState.popup?.querySelector('.delisting-evidence-link,.delisting-history-link')?.focus()}});
+document.addEventListener('scroll',event=>{if(delistingPopoverState.popup&&!event.target.closest?.('.delisting-popover'))closeDelistingPopover()},true);
+window.addEventListener('resize',()=>closeDelistingPopover());
+window.addEventListener('hashchange',()=>closeDelistingPopover());
 function exchangeName(exchange){const icon=exchangeIcon[exchange];return `${icon?`<img class="exchange-logo" src="${icon}" alt="${exchange}" decoding="async">`:''}${exchange}`}
 function syncRenderedNode(current,next){if(current.nodeType!==next.nodeType||current.nodeName!==next.nodeName){current.replaceWith(next.cloneNode(true));return}if(current.nodeType===Node.TEXT_NODE){if(current.nodeValue!==next.nodeValue)current.nodeValue=next.nodeValue;return}if(current.nodeType!==Node.ELEMENT_NODE)return;[...current.attributes].forEach(attribute=>{if(!next.hasAttribute(attribute.name))current.removeAttribute(attribute.name)});[...next.attributes].forEach(attribute=>{if(current.getAttribute(attribute.name)!==attribute.value)current.setAttribute(attribute.name,attribute.value)});syncRenderedChildren(current,next)}
 function syncRenderedChildren(currentParent,nextParent){let current=currentParent.firstChild;for(let next=nextParent.firstChild;next;next=next.nextSibling){if(!current){currentParent.appendChild(next.cloneNode(true));continue}const following=current.nextSibling;syncRenderedNode(current,next);current=following}while(current){const following=current.nextSibling;current.remove();current=following}}

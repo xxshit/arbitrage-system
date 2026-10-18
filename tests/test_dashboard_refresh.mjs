@@ -158,3 +158,12 @@ test('tracking-only alert changes render without causing repeat sound',async()=>
   h.context.fetch=async()=>({ok:false,json:async()=>({error:'unavailable'})});
   const valid=h.context.byId('basisTracking').innerHTML;assert.equal(await h.context.loadAlerts(),false);assert.equal(h.context.byId('basisTracking').innerHTML,valid);
 });
+
+test('wallet metadata changes refresh the panel without replaying unchanged active alert sounds',async()=>{
+  const h=harness();let renders=0,sounds=0,state='unknown';
+  Object.assign(h.context,{pruneAlertMutes(){},latestActiveAlertEvents:[],isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){renders++},percent:v=>v.toFixed(1)+'%',strategyLabel:()=>'',replaceHtmlKeepingExchangeLogos:(element,html)=>{element.innerHTML=html},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});
+  h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
+  const active={symbol:'AUDIT/USDT',type:'rapid_basis',open_spread:1,basis:1,created_at:'10-18 10:00:00'};
+  h.context.fetch=async()=>({ok:true,json:async()=>({active_events:[active],events:[{symbol:active.symbol,transfer_statuses:[{exchange:'Gate',state}]}],basis_tracking:[],checked_at_epoch:100})});
+  await h.context.loadAlerts(true);state='fresh';await h.context.loadAlerts();assert.equal(renders,2);assert.equal(sounds,0);
+});

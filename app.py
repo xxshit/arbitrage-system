@@ -1876,18 +1876,63 @@ def automation_statuses(*task_keys):
     return {key: automation_payload(key) for key in task_keys}
 
 
-def as_available(value, default=False):
-    if value is None:
-        return default
-    return str(value).lower() in {"true", "1", "yes", "open", "available", "normal"}
+TRANSFER_PUBLIC_SOURCES = {
+    "Gate": "https://api.gateio.ws/api/v4/spot/currencies",
+    "Bitget": "https://api.bitget.com/api/v2/spot/public/coins",
+}
+
+
+def transfer_flag(value):
+    """Do not turn a missing/unrecognized flag into either open or closed."""
+    if isinstance(value, bool):
+        return value
+    if str(value).strip().lower() in {"true", "1"}:
+        return True
+    if str(value).strip().lower() in {"false", "0"}:
+        return False
+    return None
+
+
+def parse_transfer_networks(exchange, payload):
+    if exchange == "Bitget":
+        if not isinstance(payload, dict) or payload.get("code") != "00000":
+            raise ValueError("Bitget充提接口未返回成功状态")
+        items = payload.get("data")
+    else:
+        items = payload
+    if not isinstance(items, list) or not items:
+        raise ValueError(f"{exchange}充提列表为空或格式错误")
+    networks = {}
+    for item in items:
+        base = str(item.get("currency" if exchange == "Gate" else "coin") or "").strip().upper()
+        if not base or len(base) > 25 or "/" in base:
+            raise ValueError(f"{exchange}充提币种代码无效")
+        chains = item.get("chains") or []
+        if not isinstance(chains, list):
+            raise ValueError(f"{exchange}充提链列表格式错误")
+        parsed = []
+        for chain in chains:
+            if not isinstance(chain, dict):
+                raise ValueError(f"{exchange}充提链格式错误")
+            if exchange == "Gate":
+                deposit_disabled, withdraw_disabled = transfer_flag(chain.get("deposit_disabled")), transfer_flag(chain.get("withdraw_disabled"))
+                deposit, withdraw = (not deposit_disabled if deposit_disabled is not None else None), (not withdraw_disabled if withdraw_disabled is not None else None)
+            else:
+                deposit, withdraw = transfer_flag(chain.get("rechargeable")), transfer_flag(chain.get("withdrawable"))
+            parsed.append({"name": str(chain.get("name" if exchange == "Gate" else "chain") or "未知链"), "deposit_open": deposit, "withdraw_open": withdraw, "withdraw_delayed": transfer_flag(chain.get("withdraw_delayed")) if exchange == "Gate" else None})
+        symbol = f"{base}/USDT"
+        if symbol in networks and networks[symbol] != parsed:
+            raise ValueError(f"{exchange}同币种充提数据冲突")
+        networks[symbol] = parsed
+    return networks
 
 
 def store_transfer_networks(exchange, networks):
     if not networks:
         return
     symbols = list(networks)
-    existing = {(item.exchange, item.symbol): item for item in TransferNetworkSnapshot.query.filter(TransferNetworkSnapshot.exchange == exchange, TransferNetworkSnapshot.symbol.in_(symbols)).all()}
-    now = datetime.now()
+    existing = {(item.exchange, item.symbol.upper()): item for item in TransferNetworkSnapshot.query.filter(TransferNetworkSnapshot.exchange == exchange, func.upper(TransferNetworkSnapshot.symbol).in_(symbols)).all()}
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     for symbol, chains in networks.items():
         payload = json.dumps(chains, ensure_ascii=False)
         item = existing.get((exchange, symbol))
@@ -1899,54 +1944,73 @@ def store_transfer_networks(exchange, networks):
 
 
 def refresh_public_transfer_networks():
-    """Public chain availability for Gate and Bitget; Binance requires a signed account API."""
-    try:
-        gate_payload = get_json("https://api.gateio.ws/api/v4/spot/currencies", timeout=8)
-        gate_networks = {}
-        for item in gate_payload:
-            base = str(item.get("currency", "")).split("_", 1)[0]
-            chains = item.get("chains") or []
-            if not base or not chains:
-                continue
-            gate_networks[f"{base}/USDT"] = [{
-                "name": chain.get("name") or chain.get("chain") or "Unknown",
-                "deposit_open": not bool(chain.get("deposit_disabled", item.get("deposit_disabled", False))),
-                "withdraw_open": not bool(chain.get("withdraw_disabled", item.get("withdraw_disabled", False))),
-            } for chain in chains]
-        store_transfer_networks("Gate", gate_networks)
-    except Exception:
-        db.session.rollback()
-    try:
-        bitget_payload = get_json("https://api.bitget.com/api/v2/spot/public/coins", timeout=8)
-        bitget_networks = {}
-        for item in bitget_payload.get("data", []):
-            base = item.get("coin") or item.get("coinName")
-            if not base:
-                continue
-            chains = item.get("chains") or item.get("chainList") or []
-            bitget_networks[f"{base}/USDT"] = [{
-                "name": chain.get("chain") or chain.get("chainName") or "Unknown",
-                "deposit_open": as_available(chain.get("rechargeable", chain.get("depositable"))),
-                "withdraw_open": as_available(chain.get("withdrawable")),
-            } for chain in chains]
-        store_transfer_networks("Bitget", bitget_networks)
-    except Exception:
-        db.session.rollback()
+    """Independent public snapshots; never report a swallowed partial failure as success."""
+    errors = []
+    for exchange, url in TRANSFER_PUBLIC_SOURCES.items():
+        try:
+            networks = parse_transfer_networks(exchange, get_json(url, timeout=8))
+            store_transfer_networks(exchange, networks)
+        except Exception as exc:
+            db.session.rollback()
+            errors.append(f"{exchange}: {type(exc).__name__}: {str(exc)[:180]}")
+    if errors:
+        raise RuntimeError("充提同步失败；" + "；".join(errors))
+
+
+def transfer_symbol_candidates(symbol, exchange, aliases):
+    # Wallets are asset-scoped; multiplier/rename mapping requires a verified alias.
+    wallet_pair = re.sub(r"/USDC$", "/USDT", str(symbol).upper())
+    canonical = canonical_market_symbol(wallet_pair, "Binance", "contract", rows=aliases)
+    return [pair_slash(raw) for raw, _ in market_alias_candidates(canonical, exchange, "spot", rows=aliases)]
+
+
+def load_transfer_statuses(pairs, now=None):
+    """Batch-read current wallet metadata, never fetch upstream from a page request."""
+    pairs = set(pairs)
+    if not pairs:
+        return {}
+    aliases = symbol_alias_rows()
+    candidates = {pair: transfer_symbol_candidates(pair[0], pair[1], aliases) for pair in pairs}
+    symbols = {symbol for values in candidates.values() for symbol in values}
+    exchanges = {exchange for _, exchange in pairs}
+    records = TransferNetworkSnapshot.query.filter(func.upper(TransferNetworkSnapshot.symbol).in_(symbols), TransferNetworkSnapshot.exchange.in_(exchanges)).all()
+    indexed = {(record.exchange, record.symbol.upper()): record for record in records}
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    max_age = max(300, 2 * runtime_interval("transfer_network_sync", TRANSFER_NETWORK_SYNC_SECONDS))
+    result = {}
+    for pair, lookups in candidates.items():
+        symbol, exchange = pair
+        record = next((indexed[(exchange, raw)] for raw in lookups if (exchange, raw) in indexed), None)
+        status = {"exchange": exchange, "symbol": symbol, "asset_symbol": record.symbol if record else None, "state": "unknown", "chains": [], "captured_at": None, "captured_at_epoch": None, "source_url": TRANSFER_PUBLIC_SOURCES.get(exchange), "reason": "未采集到该币种的充提数据" if exchange in TRANSFER_PUBLIC_SOURCES else "尚未接入该交易所的账户只读充提接口"}
+        if record:
+            captured = record.captured_at
+            status.update(captured_at=captured.strftime("%m-%d %H:%M:%S UTC"), captured_at_epoch=captured.replace(tzinfo=timezone.utc).timestamp())
+            try:
+                raw_chains = json.loads(record.chains_json)
+                if not isinstance(raw_chains, list) or not all(isinstance(chain, dict) for chain in raw_chains):
+                    raise ValueError("invalid chain list")
+                status["chains"] = [{"name": str(chain.get("name") or "未知链"), "deposit_open": transfer_flag(chain.get("deposit_open")), "withdraw_open": transfer_flag(chain.get("withdraw_open")), "withdraw_delayed": transfer_flag(chain.get("withdraw_delayed"))} for chain in raw_chains]
+                age = (now - captured).total_seconds()
+                if age > max_age or age < -60:
+                    status.update(state="stale", reason="快照已过期或时钟异常，当前状态未知")
+                elif status["chains"]:
+                    status.update(state="fresh", reason="")
+                else:
+                    status["reason"] = "来源未提供该币种的链状态"
+            except (ValueError, TypeError):
+                status["reason"] = "链状态数据格式异常，当前状态未知"
+        result[pair] = status
+    return result
 
 
 def enrich_transfer_networks(groups):
-    pairs = [group["symbol"] for group in groups]
-    records = TransferNetworkSnapshot.query.filter(TransferNetworkSnapshot.symbol.in_(pairs)).all()
-    indexed = {(item.exchange, item.symbol): json.loads(item.chains_json or "[]") for item in records}
+    statuses = load_transfer_statuses((group["symbol"], row["long_exchange"]) for group in groups for row in group["rows"])
     for group in groups:
         for row in group["rows"]:
-            exchange = row["long_exchange"]
-            if exchange == "Binance":
-                row["transfer_networks"] = []
-                row["transfer_status_source"] = "需要只读账户 API"
-            else:
-                row["transfer_networks"] = indexed.get((exchange, group["symbol"]), [])
-                row["transfer_status_source"] = "公开接口"
+            status = statuses[(group["symbol"], row["long_exchange"])]
+            row["transfer_status"] = status
+            row["transfer_networks"] = status["chains"] if status["state"] == "fresh" else []
+            row["transfer_status_source"] = "公开接口" if status["state"] == "fresh" else status["reason"]
 
 
 def is_rwa_stock_pair(symbol):
@@ -6815,7 +6879,6 @@ def spot_futures():
         enrich_funding_statistics(snapshot["symbols"])
         enrich_price_changes(snapshot["symbols"])
         enrich_basis_openings(snapshot["symbols"], "spot_futures")
-        enrich_transfer_networks(snapshot["symbols"])
         SPOT_VIEW_CACHE = {"key": snapshot_key, "symbols": snapshot["symbols"]}
     mark_announced_delistings(SPOT_VIEW_CACHE["symbols"])
     symbols = [group for group in SPOT_VIEW_CACHE["symbols"] if not is_rwa_stock_pair(group["symbol"])]
@@ -6853,6 +6916,7 @@ def spot_futures():
     page = min(page, pages)
     start = (page - 1) * page_size
     page_symbols = symbols[start:start + page_size]
+    enrich_transfer_networks(page_symbols)
     payload = {**snapshot, "page": page, "pages": pages, "page_size": page_size, "total_symbols": total, "binance_spot_only": binance_spot_only, "binance_alpha_only": binance_alpha_only, "binance_alpha_catalog_updated_at": alpha_catalog_updated_at, "binance_alpha_catalog_stale": alpha_catalog_stale, "funding_interval": funding_interval, "symbol_query": symbol_query, "sort_by": sort_by, "sort_direction": sort_direction, "symbols": page_symbols}
     return jsonify(payload)
 
@@ -12477,6 +12541,15 @@ def alerts():
         page = min(page, pages)
         return jsonify({"symbol": symbol, "items": [event_payload(item) for item in all_events[(page - 1) * page_size:page * page_size]], "total": total, "page": page, "pages": pages, "page_size": page_size, "window_hours": 24, "checked_at_epoch": time.time()})
 
+    transfer_exchanges = {}
+    for symbol, items in grouped_events.items():
+        exchanges = set()
+        for item in items:
+            context = alert_context(item)
+            exchanges.update((context["long_exchange"], context["short_exchange"]))
+        transfer_exchanges[symbol] = sorted(exchanges)
+    transfer_statuses = load_transfer_statuses((symbol, exchange) for symbol, exchanges in transfer_exchanges.items() for exchange in exchanges)
+
     def alert_group_payload(symbol, items):
         timeline = [event_payload(item) for item in items[:20]] if view == "legacy" else []
         latest = event_payload(items[0])
@@ -12500,6 +12573,7 @@ def alerts():
                 "basis_at": max_basis_item.created_at.strftime("%m-%d %H:%M:%S") if max_basis_item else None,
             },
             "value_ranges": value_ranges,
+            "transfer_statuses": [transfer_statuses[(symbol, exchange)] for exchange in transfer_exchanges[symbol]],
             "timeline": timeline,
         }
 

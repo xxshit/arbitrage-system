@@ -1,4 +1,5 @@
 import os
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -151,6 +152,20 @@ class AlertHistoryTests(unittest.TestCase):
         data = self.get(view="summary")
         self.assertEqual([item["symbol"] for item in data["active_events"]], ["LIVE/USDT"])
         self.assertEqual(data["active_events"][0]["remaining_seconds"], 0)
+
+    def test_summary_has_current_wallet_status_for_all_distinct_path_exchanges(self):
+        self.insert([self.event(message="Gate 确认后的报警"), self.event(message="Bitget 确认后的报警"), self.event(strategy="futures_futures", long_exchange="Bybit", short_exchange="Binance")])
+        with module.app.app_context():
+            module.db.session.add(module.TransferNetworkSnapshot(exchange="Gate", symbol="DEMO/USDT", chains_json=json.dumps([{"name": "BSC", "deposit_open": False, "withdraw_open": True}]), captured_at=self.now))
+            module.db.session.commit()
+        with patch.object(module, "get_json", side_effect=AssertionError("summary must be DB-only")):
+            group = self.get(view="summary")["events"][0]
+        statuses = {item["exchange"]: item for item in group["transfer_statuses"]}
+        self.assertEqual(set(statuses), {"Gate", "Bitget", "Bybit", "Binance"})
+        self.assertEqual(statuses["Gate"]["state"], "fresh")
+        self.assertIs(statuses["Gate"]["chains"][0]["deposit_open"], False)
+        self.assertEqual(statuses["Binance"]["state"], "unknown")
+        self.assertNotIn("transfer_statuses", self.get(view="detail", symbol="DEMO/USDT")["items"][0])
 
     def test_reads_require_login_are_uncached_and_do_not_write_or_fetch_upstream(self):
         self.insert([self.event()])

@@ -4,12 +4,13 @@
   delete window.PushManager;
   const now = () => Date.now() / 1000;
   const stamp = '2026-10-18 10:30:00';
+  const wallet=(exchange,overrides={})=>({exchange,state:'fresh',chains:[{name:'BSC',deposit_open:false,withdraw_open:true}],captured_at:'10-18 10:30:00 UTC',captured_at_epoch:now(),reason:'',source_url:'https://api.gateio.ws/api/v4/spot/currencies',...overrides});
   const symbols = ['DEMO/USDT','SAMPLE/USDT','LONGTOKEN/USDT','SMALL/USDT'];
   const base = {long_exchange:'Gate',short_exchange:'Binance',long_ask:1.23456789,long_bid:1.2344,short_ask:1.246,short_bid:1.245,
     basis:0.83,funding_rate:0.025,funding_previous:0.021,funding_24h:0.14,funding_3d:0.42,funding_7d:0.98,funding_30d:3.8,
     funding_interval_hours:4,next_funding_time:'2026-10-18 12:00:00',spot_volume:18200000,futures_volume:37600000,futures_open_interest:14300000,
     open_spread:0.85,close_spread:-0.93,change_5m:0.42,change_15m:0.7,change_30m:1.2,change_1h:2.1,change_12h:4.6,change_24h:7.9,change_3d:12.6,change_7d:18.4};
-  const spot = symbols.map((symbol,index) => ({symbol,rows:[{...base,long_ask:base.long_ask+index/10},{...base,long_exchange:'Bitget',open_spread:0.75}]}));
+  const spot = symbols.map((symbol,index) => ({symbol,rows:[{...base,long_ask:base.long_ask+index/10,transfer_status:wallet('Gate')},{...base,long_exchange:'Bitget',open_spread:0.75,transfer_status:wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC',chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}],reason:'快照已过期'})}]}));
   const dual = symbols.map(symbol => ({symbol,binance_change_5m:0.42,binance_change_15m:0.7,binance_change_30m:1.2,binance_change_1h:2.1,rows:[
     {...base,long_exchange:'Bybit',long_basis:-0.2,short_basis:0.83,long_open_interest:12000000,short_open_interest:14300000,long_volume:25000000,short_volume:37600000,
       long_funding_rate:0.01,short_funding_rate:0.025,long_funding_interval_hours:4,short_funding_interval_hours:4,long_next_funding_time:stamp,short_next_funding_time:stamp,
@@ -27,7 +28,8 @@
     if(index===0){Object.assign(timeline[91],{open_spread:10.1234,basis:2.277});Object.assign(timeline[92],{open_spread:-50.5678,basis:-7.8047})}
     const value_ranges=Object.fromEntries(['open_spread','basis'].map(field=>{const values=timeline.map(item=>item[field]);return [field,{max:Math.max(...values),min:Math.min(...values)}]}));
     const move_peaks=Object.fromEntries(Object.entries(value_ranges).map(([field,{max,min}])=>[field,Math.abs(max)>=Math.abs(min)?max:min]));
-    return {symbol,alert_count:timeline.length,latest:timeline[0],timeline,move_peaks,value_ranges};
+    const transfer_statuses=[wallet('Gate',{chains:[{name:'BSC',deposit_open:index===1,withdraw_open:true},{name:'ETH',deposit_open:true,withdraw_open:false}]}),wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC',chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}],reason:'快照已过期'}),wallet('Binance',{state:'unknown',chains:[],captured_at:null,reason:'尚未接入账户只读充提接口'})];
+    return {symbol,alert_count:timeline.length,latest:timeline[0],timeline,move_peaks,value_ranges,transfer_statuses};
   });
   const plans = symbols.slice(0,2).map((symbol,index) => ({id:index+1,symbol,direction:index?'short':'long',status:'open',horizon:'short',pnl:1.8,
     leverage:1,entry_price:1.23,current_price:1.25,stop_price:1.16,take_profit_1:1.35,take_profit_2:1.42,max_hold_minutes:60,thesis:'合成样本，用于检查长说明、多腿数值和详细记录的布局。'}));

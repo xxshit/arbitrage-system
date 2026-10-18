@@ -8,6 +8,7 @@ const html=readFileSync(new URL('../templates/index.html',import.meta.url),'utf8
 const css=readFileSync(new URL('../static/workspace-layout.css',import.meta.url),'utf8');
 const functions=source.slice(source.indexOf('function isAlertMuted('),source.indexOf('function renderTipsItems('));
 const helpers=source.slice(source.indexOf('function alertLabel('),source.indexOf('function toggleTips('));
+const transferHelpers=source.slice(source.indexOf('function transferFlagText('),source.indexOf('function spotRows('));
 const escape=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const group=(symbol='DEMO/USDT',count=3,spread=1,basis=2)=>({symbol,alert_count:count,latest:{symbol,created_at:'10-18 10:00:00',type:'rapid_basis',strategy:'spot_futures',open_spread:0.5,basis:1},move_peaks:{open_spread:spread,basis},value_ranges:{open_spread:{max:10,min:-50},basis:{max:3,min:-2}}});
 const detail=(symbol='DEMO/USDT',page=1)=>({symbol,total:43,page,pages:2,page_size:40,items:[{id:page,symbol,type:'rapid_basis',created_at:'10-18 10:00:00',message:'Synthetic detail',open_spread:0.5,basis:1}]});
@@ -18,7 +19,7 @@ function harness(fetcher=async url=>detail(new URL(url,'https://example.test').s
   const context={URLSearchParams,console,window:{innerWidth:1280},byId:node,escapeChatHtml:escape,delistingSymbolClass:()=>'',changeClass:value=>value<0?'negative':'positive',percent:value=>(value>=0?'+':'')+Number(value).toFixed(4)+'%',intervalClass:()=>'',exchangeName:escape,fetchRefreshJson:fetcher,renderTipsItems(){},
     replaceHtmlKeepingExchangeLogos:(target,markup)=>{if(target.innerHTML!==markup)target.innerHTML=markup}};
   vm.createContext(context);
-  vm.runInContext("let mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+helpers+'\n'+functions,context);
+  vm.runInContext("let mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+transferHelpers+'\n'+helpers+'\n'+functions,context);
   return {context,node,scroll,run:code=>vm.runInContext(code,context)};
 }
 
@@ -155,4 +156,53 @@ test('a refreshed summary updates ranges without clearing the selected history p
   const updated=group();updated.value_ranges.open_spread={max:2,min:-5};h.context.renderAlertMasterDetail([updated]);
   assert.ok(h.node('alertDetailPane').innerHTML.includes('最高 +2.0000%，最低 -5.0000%'));assert.ok(!h.node('alertDetailPane').innerHTML.includes('最高 +10.0000%，最低 -50.0000%'));
   assert.equal(h.run('selectedAlertSymbol'),'DEMO/USDT');assert.equal(h.run('alertDetailState.data.page'),2);assert.equal(h.scroll.scrollTop,210);
+});
+
+const wallet=(exchange='Gate',overrides={})=>({exchange,state:'fresh',chains:[{name:'BSC',deposit_open:false,withdraw_open:true}],captured_at:'10-18 11:30:00 UTC',reason:'',...overrides});
+
+test('wallet panel groups exchanges once per coin rather than repeating statuses on every historical event',async()=>{
+  const h=harness(),coin=group();coin.transfer_statuses=[wallet(),wallet('Binance',{state:'unknown',chains:[],reason:'尚未接入该交易所的账户只读充提接口'})];h.context.renderAlertMasterDetail([coin]);await h.context.loadSelectedAlertHistory();
+  const markup=h.node('alertDetailPane').innerHTML;assert.equal((markup.match(/class="alert-transfer-panel/g)||[]).length,1);
+  for(const text of ['当前充提','受限，价差需复核','Gate','BSC','充关','提开','Binance','充提未知 · 未接入','非历史报警时状态','11:30 UTC'])assert.ok(markup.includes(text),text);
+  assert.ok(!markup.includes('详细说明'));assert.ok(!h.context.alertTimelineNode(detail().items[0]).includes('transfer-network-chip'));
+});
+
+test('per-chain labels never collapse partial closures into a claim that every chain is closed',()=>{
+  const h=harness(),markup=h.context.transferStatusMarkup(wallet('Gate',{chains:[{name:'ETH',deposit_open:true,withdraw_open:false},{name:'BSC',deposit_open:false,withdraw_open:true}]}));
+  assert.ok(markup.includes('ETH'));assert.ok(markup.includes('BSC'));assert.equal((markup.match(/transfer-open/g)||[]).length,2);assert.equal((markup.match(/transfer-closed/g)||[]).length,2);
+  assert.ok(markup.includes('充开'));assert.ok(markup.includes('提关'));assert.ok(markup.includes('充关'));assert.ok(markup.includes('提开'));
+});
+
+test('stale snapshots show current unknowns and explicitly label last capture, never current open/closed colors',()=>{
+  const h=harness(),status=wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC'}),markup=h.context.transferStatusMarkup(status);
+  assert.ok(markup.includes('快照过期'));assert.ok(markup.includes('08-04 02:51:25 UTC'));assert.ok(markup.includes('充未知'));assert.ok(markup.includes('提未知'));
+  assert.ok(!markup.includes('class="transfer-open"'));assert.ok(!markup.includes('class="transfer-closed"'));assert.equal(h.context.transferHasRestriction(status),false);
+});
+
+test('missing, null or string-valued flags are unknown rather than false closures or green open states',()=>{
+  const h=harness(),markup=h.context.transferStatusMarkup(wallet('Gate',{chains:[{name:'ETH',deposit_open:null,withdraw_open:'false'}]}));
+  assert.equal((markup.match(/transfer-unknown/g)||[]).length,2);assert.equal(h.context.transferHasRestriction(wallet('Gate',{chains:[{name:'ETH'}]})),false);
+  assert.ok(h.context.transferStatusMarkup(null).includes('充提未知'));assert.ok(h.context.spotTransferStatus({transfer_networks:[{deposit_open:true,withdraw_open:true}]}).includes('充提未知'));
+});
+
+test('withdrawal delay remains visible even if the explicit withdrawal switch is open',()=>{
+  const h=harness(),status=wallet('Gate',{chains:[{name:'ETH',deposit_open:true,withdraw_open:true,withdraw_delayed:true}]}),markup=h.context.transferStatusMarkup(status);
+  assert.ok(markup.includes('transfer-delayed'));assert.ok(markup.includes('提延迟'));assert.equal(h.context.transferHasRestriction(status),true);
+});
+
+test('untrusted exchange, chain, reason and timestamp text cannot inject HTML or attributes',()=>{
+  const h=harness(),coin=group();coin.transfer_statuses=[wallet('<img onerror=1>',{state:'unknown',chains:[{name:'"><svg onload=1>',deposit_open:null}],reason:'"><img onerror=1>',captured_at:'"><script>alert(1)</script>'})];
+  const markup=h.context.alertTransferPanel(coin);assert.ok(!markup.includes('<img'));assert.ok(!markup.includes('<svg'));assert.ok(!markup.includes('<script>'));assert.ok(markup.includes('&lt;img'));assert.ok(markup.includes('&lt;svg'));
+});
+
+test('spot transfer summary has accessible per-chain details and marks stale data as unknown',()=>{
+  const h=harness(),markup=h.context.spotTransferStatus({transfer_status:wallet()});
+  for(const value of ['transfer-alert','充0/1 · 提1/1 · 有受限','tabindex="0"','onfocus=','onkeydown=','data-transfer-status='])assert.ok(markup.includes(value),value);
+  const stale=h.context.spotTransferStatus({transfer_status:wallet('Bitget',{state:'stale'})});assert.ok(stale.includes('pending'));assert.ok(stale.includes('充提过期 · 未知'));assert.ok(!stale.includes('充0/1'));
+});
+
+test('wallet-only updates replace the current status without clearing history selection or scroll',async()=>{
+  const h=harness(async()=>detail('DEMO/USDT',2)),coin=group();coin.transfer_statuses=[wallet()];h.context.renderAlertMasterDetail([coin]);await h.context.loadSelectedAlertHistory(2);h.scroll.scrollTop=210;
+  const updated=group();updated.transfer_statuses=[wallet('Gate',{chains:[{name:'BSC',deposit_open:true,withdraw_open:true}]})];h.context.renderAlertMasterDetail([updated]);
+  assert.ok(!h.node('alertDetailPane').innerHTML.includes('受限，价差需复核'));assert.equal(h.run('selectedAlertSymbol'),'DEMO/USDT');assert.equal(h.run('alertDetailState.data.page'),2);assert.equal(h.scroll.scrollTop,210);
 });

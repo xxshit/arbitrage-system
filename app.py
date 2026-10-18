@@ -11804,8 +11804,8 @@ def daily_report_thoughts():
 def daily_report_listings():
     history_range = request.args.get("range", "30d")
     symbol = request.args.get("symbol", "").strip().upper()
-    if history_range not in {"all", "30d", "7d"} or (symbol and not re.fullmatch(r"[A-Z0-9/_-]{1,30}", symbol)):
-        return jsonify({"error": "请选择有效时间范围，币种只支持字母、数字和交易对分隔符。"}), 400
+    if history_range not in {"all", "30d", "7d"} or (symbol and not re.fullmatch(r"[\w/-]{1,30}", symbol)):
+        return jsonify({"error": "请选择有效时间范围，币种只支持文字、数字和交易对分隔符。"}), 400
     try:
         page = max(1, int(request.args.get("page", "1")))
         page_size = min(100, max(1, int(request.args.get("page_size", "50"))))

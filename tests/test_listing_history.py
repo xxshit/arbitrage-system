@@ -67,6 +67,13 @@ class ListingHistoryTests(unittest.TestCase):
             with self.subTest(symbol=symbol):
                 self.assertEqual(self.get(range="all", symbol=symbol)["total"], 3)
 
+    def test_search_supports_existing_unicode_token_symbols(self):
+        with module.app.app_context():
+            module.db.session.add(self.event("哈基米/USDT", "Bitget"))
+            module.db.session.commit()
+        for symbol in ("哈基米", "哈基米/USDT", "哈基米usdt"):
+            self.assertEqual(self.get(range="all", symbol=symbol)["total"], 1)
+
     def test_history_is_paginated_without_a_hidden_100_record_limit(self):
         with module.app.app_context():
             module.db.session.add_all(self.event(f"COIN{index}/USDT", "Bitget") for index in range(126))

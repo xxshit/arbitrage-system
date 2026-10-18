@@ -8,6 +8,7 @@ os.environ['DATABASE_URL'] = 'sqlite://'
 os.environ.setdefault('SECRET_KEY', 'divergence-test')
 os.environ.setdefault('CHAT_ENCRYPTION_KEY', 'AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=')
 import app as module
+from anomaly_streams import AlertStreamHub
 
 
 class PriceDivergenceTests(unittest.TestCase):
@@ -136,9 +137,16 @@ class PriceDivergenceTests(unittest.TestCase):
         module.db.session.add(self.event())
         module.db.session.commit()
         healthy = self.row(long_exchange='Bitget', long_ask=.0282, long_bid=.0281)
+        healthy['alert_stream_route'] = dict(long_key=('bitget','GUAUSDT'), short_key=('bn_future','GUAUSDT'))
         group = [{'symbol': 'GUA/USDT', 'rows': [self.row(), healthy]}]
-        with patch.object(module, 'rapid_move_alerts', return_value=[(30, .5, .6)]), patch.object(module, 'validate_spot_alert_quote', return_value=True):
+        hub = AlertStreamHub()
+        with patch.object(module, 'ALERT_STREAM_HUB', hub):
             module.evaluate_alerts(group)
+        self.assertEqual({path[2] for path in hub.routes}, {'Bitget'})
+        for at, mid in ((1000, 100), (1001, 101)):
+            for feed, price in (('bitget', 100), ('bn_future', mid)):
+                hub.ingest(feed, dict(symbol='GUAUSDT', at=at, bid=price-.001, ask=price+.001, bid_qty=1, ask_qty=1), at+.001 if feed=='bn_future' else at)
+        module.persist_alert_pulses(hub.batch())
         events = module.AlertEvent.query.filter(module.AlertEvent.long_exchange != 'Gate').all()
         self.assertTrue(events)
         self.assertEqual({item.long_exchange for item in events}, {'Bitget'})

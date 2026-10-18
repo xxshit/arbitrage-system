@@ -28,6 +28,39 @@ function harness(fetcher=async url=>{const params=new URL(url,'https://example.t
   return {context,node,scroll,transferScroll,run:code=>vm.runInContext(code,context)};
 }
 
+test('pulse trace retains peak after retracement and identifies a restart below the old high',()=>{
+  const h=harness(),pulse={id:'sample',ordinal:2,metric:'spread',state:'retraced',baseline:.03,baseline_at:0,peak:1.02,peak_at:10,current:.11,current_at:15,retrace_at:15};
+  const item={type:'rapid_spread',pulse,created_at:'10-19 00:00:00',open_spread:.3,binance_basis:0,basis_exchange:'Binance'};
+  const markup=h.context.alertTimelineNode(item);
+  for(const expected of ['已回落','第2次','+0.03%','+1.02%','+0.11%','5.0秒回落'])assert.ok(markup.includes(expected),expected);
+  assert.ok(!markup.includes('详细说明'));assert.ok(!markup.includes('主力正在'));
+});
+
+test('gap and ended pulse never present their last quote as a live current value',()=>{
+  const h=harness(),pulse={metric:'basis',state:'data_gap',baseline:0,baseline_at:0,peak:1,peak_at:1,current:.2,current_at:2};
+  assert.ok(h.context.alertPulseTrace({pulse}).includes('末次 +0.20%'));
+  assert.ok(h.context.alertPulseLabel({pulse}).includes('数据中断'));
+});
+
+test('restart and negative pulses use unambiguous labels',()=>{
+  const h=harness();
+  assert.ok(h.context.alertPulseLabel({pulse:{metric:'spread',state:'watch',ordinal:2}}).includes('再次启动'));
+  const pulse={metric:'spread',state:'retraced',direction:-1,baseline:0,baseline_at:0,peak:-1,peak_at:1,current:-.1,retrace_at:2};
+  assert.ok(h.context.alertPulseLabel({pulse}).includes('已反弹'));
+  assert.ok(h.context.alertPulseTrace({pulse}).includes('低点 -1.00%'));
+  assert.ok(h.context.alertPulseTrace({pulse}).includes('1.0秒反弹'));
+});
+
+test('price trace converts log prices into relative moves instead of showing a log-price as percent',()=>{
+  const h=harness(),pulse={metric:'price',baseline:100*Math.log(100),baseline_at:0,peak:100*Math.log(102),peak_at:1,current:100*Math.log(101)};
+  const markup=h.context.alertPulseTrace({pulse});assert.ok(markup.includes('+2.00%'));assert.ok(markup.includes('+1.00%'));
+});
+
+test('pulse labels do not interpolate untrusted backend strings',()=>{
+  const h=harness(),markup=h.context.alertPulseLabel({pulse:{metric:'<script>',state:'<img>',ordinal:'<img>'}});
+  assert.ok(!markup.includes('<'));assert.ok(markup.includes('已记录'));
+});
+
 test('compact coin rows contain name, count, mute and signed peaks but no timestamps or large metadata cards',()=>{
   const h=harness(),markup=h.context.alertSymbolCard(group());
   for(const value of ['DEMO/USDT','alert-symbol-count','alert-symbol-peak','静音','+1.00%','+2.00%'])assert.ok(markup.includes(value),value);

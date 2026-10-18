@@ -15,6 +15,7 @@ function harness(){
     setTimeout(fn,delay){const id=++nextId;timers.set(id,{fn,at:now+delay});return id},
     clearTimeout(id){timers.delete(id)},setInterval(){return 0},clearInterval(){},
     activeViewId:()=>context.active,active:'dashboard',authState:{is_admin:false},
+    renderAlertStreamStatus(){},
     document:{querySelectorAll:()=>[]},
     byId(id){if(!elements.has(id))elements.set(id,{textContent:''});return elements.get(id)},
     fetch:async()=>({ok:true,json:async()=>({items:[]})}),
@@ -145,6 +146,20 @@ for(const [name,start,end,lock,hasData,rowId] of [
   const pending=h.context[name]();assert.equal(h.context[lock],true);await h.advance(10000);assert.equal(await pending,false);
   assert.equal(h.context[lock],false);assert.equal(h.context.byId(rowId).innerHTML,'last good rows');
   const retry=h.context[name]();assert.equal(requests,2);await h.advance(10000);await retry;assert.equal(h.context[lock],false);
+});
+
+test('pulse current-value updates stay quiet, retracement and lower restart each notify once',async()=>{
+  const h=harness();let sounds=0;
+  Object.assign(h.context,{pruneAlertMutes(){},isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){},replaceHtmlKeepingExchangeLogos(){},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});
+  h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
+  let active=[];h.context.fetch=async()=>({ok:true,json:async()=>({active_events:active,events:[],basis_tracking:[],checked_at_epoch:100})});
+  await h.context.loadAlerts();
+  const event={id:10,symbol:'DEMO/USDT',type:'rapid_spread',open_spread:.8,basis:0,pulse:{notice_version:1,current:.8}};
+  active=[event];await h.context.loadAlerts();assert.equal(sounds,1);
+  active=[{...event,pulse:{notice_version:1,current:1.2}}];await h.context.loadAlerts();assert.equal(sounds,1);
+  active=[{...event,pulse:{notice_version:2,current:.1,state:'retraced'}}];await h.context.loadAlerts();assert.equal(sounds,2);
+  await h.context.loadAlerts();assert.equal(sounds,2);
+  active=[{...event,id:11,open_spread:.4,pulse:{notice_version:1,current:.4}}];await h.context.loadAlerts();assert.equal(sounds,3);
 });
 
 test('tracking-only alert changes render without causing repeat sound',async()=>{

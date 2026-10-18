@@ -248,6 +248,9 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 .layout-view#alerts .alert-overview h2 {font-size:15px;margin:0;color:var(--desk-ink)}
 .layout-view#alerts .alert-overview b {color:var(--desk-ink);font-variant-numeric:tabular-nums}
 .layout-view#alerts .alert-overview small {margin-left:auto;font-size:10px}
+.layout-view#alerts .alert-stream-warning {color:#a66322}
+.layout-view#alerts .alert-timeline-node .alert-pulse-trace {grid-column:1/-1;display:flex;flex-wrap:wrap;gap:2px 12px;margin:0;color:#617774;font-size:10px;font-weight:400;line-height:1.4;font-variant-numeric:tabular-nums}
+.layout-view#alerts .alert-pulse-trace > span {color:#83918a}
 .layout-view#alerts .alert-timeline-panel {padding:8px;background:transparent;box-shadow:none}
 .layout-view#alerts .alert-master-detail {grid-template-columns:minmax(345px,390px) minmax(0,1fr)!important;gap:10px;background:transparent;border:0;align-items:stretch;height:max(380px,calc(100dvh - 130px));min-height:0;overflow:visible!important}
 .layout-view#alerts .alert-roster {display:flex;flex-direction:column;min-width:0;min-height:0;border:1px solid var(--desk-line);border-radius:8px;overflow:hidden;background:#fbfdf8}

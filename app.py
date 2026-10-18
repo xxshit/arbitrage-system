@@ -36,6 +36,7 @@ from sqlalchemy import and_, case, func, inspect, or_, text, tuple_
 from sqlalchemy.orm import deferred
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
+from anomaly_streams import AlertStreamHub, Route
 
 load_dotenv()
 
@@ -50,6 +51,7 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes", "on"}
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
+ALERT_STREAM_HUB = AlertStreamHub()
 
 
 @app.after_request
@@ -272,6 +274,14 @@ class AlertEvent(db.Model):
     basis = db.Column(db.Float)
     funding_rate = db.Column(db.Float)
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+
+
+class AlertPulse(db.Model):
+    """One row per immutable pulse identity; state/peak survive a retracement."""
+    id = db.Column(db.String(32), primary_key=True)
+    alert_event_id = db.Column(db.Integer, db.ForeignKey("alert_event.id"), nullable=False, unique=True)
+    evidence_json = db.Column(db.Text, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
 
 
 class SpotDivergence(db.Model):
@@ -972,13 +982,6 @@ DUAL_FUNDING_STATISTICS_CACHE = {"ts": 0.0, "key": frozenset(), "data": {}}
 DUAL_FUNDING_STATISTICS_LOCK = threading.Lock()
 LAST_PRICE_HISTORY_BUCKET = None
 BASIS_CANDIDATES = {}
-PUMP_CANDIDATES = {}
-QUOTE_VALIDATION_CACHE = {}
-DUAL_ALERT_CANDIDATES = {}
-DUAL_ALERT_VALUES = {}
-RAPID_MOVE_HISTORY = {}
-RAPID_MOVE_CANDIDATES = {}
-RAPID_MOVE_ALERT_WINDOWS = {}
 OKX_FUNDING_CACHE = {}
 OKX_FUNDING_CURSOR = 0
 BINANCE_OPEN_INTEREST_CACHE = {}
@@ -1099,8 +1102,8 @@ RUNTIME_RULE_DEFAULTS = [
     {"rule_key": "price_history_backfill", "category": "历史数据", "label": "价格历史自检补充", "schedule_type": "interval", "value": "120", "unit": "秒", "min_value": 60, "max_value": 3600, "description": "检查价格历史是否缺口并补充，用于涨跌幅与趋势图。"},
     {"rule_key": "index_component_sync", "category": "静态资料", "label": "指数成分同步", "schedule_type": "interval", "value": "300", "unit": "秒", "min_value": 300, "max_value": 86400, "description": "补充缺失的合约指数成分；已有且未变化的数据从 MySQL 读取。"},
     {"rule_key": "transfer_network_sync", "category": "静态资料", "label": "充提网络同步", "schedule_type": "interval", "value": "900", "unit": "秒", "min_value": 300, "max_value": 86400, "description": "更新现货交易所充提链路状态，关闭充提时醒目标记。"},
-    {"rule_key": "alarm_threshold", "category": "报警规则", "label": "绝对值阈值报警", "schedule_type": "policy", "value": "1% / 扩大0.2%", "unit": "规则", "editable": False, "description": "开差或 Binance 基差绝对值从 1% 打开；确认非插针后，每扩大 0.2% 再报警。"},
-    {"rule_key": "rapid_move_threshold", "category": "报警规则", "label": "30秒速变报警", "schedule_type": "policy", "value": "30秒 / 0.5%", "unit": "规则", "editable": False, "description": "30秒内开差或基差绝对值明显扩大；同一30分钟窗口必须继续扩大才允许续报。"},
+    {"rule_key": "alarm_threshold", "category": "报警规则", "label": "基差追踪记录", "schedule_type": "policy", "value": "1% / 扩大0.2%", "unit": "规则", "editable": False, "description": "仅用于基差追踪及扩张日志，不再以绝对水平额外生成报警；报警使用独立实时异动规则。"},
+    {"rule_key": "rapid_move_threshold", "category": "报警规则", "label": "实时异动报警", "schedule_type": "policy", "value": "15秒0.20 / 30秒0.30 / 120秒0.50", "unit": "百分点", "editable": False, "description": "有效对齐报价首次越线即记录；保留瞬时极值与回落，回落后再变动0.20个百分点独立记录，不要求超过旧峰值。小偏离冻结起点、300秒内累计0.50个百分点也记录。双端价格另用1%/1.5%/3%对数变化阈值。只在网页提醒，不新增Lark。"},
     {"rule_key": "funding_retention", "category": "数据保留", "label": "资费历史保留", "schedule_type": "retention", "value": "30", "unit": "天", "editable": False, "description": "最近一个月资金费率留库，超过一个月自动清理。"},
     {"rule_key": "price_retention", "category": "数据保留", "label": "价格快照保留", "schedule_type": "retention", "value": "8", "unit": "天", "editable": False, "description": "涨跌幅计算所需的 Binance 价格快照滚动保留 8 天。"},
     {"rule_key": "chat_retention", "category": "数据保留", "label": "协作记录保留", "schedule_type": "retention", "value": str(CHAT_RETENTION_DAYS), "unit": "天", "editable": False, "description": f"文字消息、图片消息和私有图片文件仅保留最近 {CHAT_RETENTION_DAYS} 天，过期后自动物理清理。"},
@@ -2983,73 +2986,6 @@ def create_alert(symbol, alert_type, message, row, strategy="spot_futures", long
     db.session.add(AlertEvent(symbol=symbol, strategy=strategy, long_exchange=long_exchange, short_exchange=short_exchange, alert_type=alert_type, message=message, open_spread=row["open_spread"], close_spread=row["close_spread"], basis=row["basis"], funding_rate=row["funding_rate"]))
 
 
-def rapid_move_alerts(key, metric, value):
-    """Return confirmed 30s absolute-expansion triggers with a 30-minute widening window."""
-    now = time.time()
-    history = [(at, observed) for at, observed in RAPID_MOVE_HISTORY.get((key, metric), []) if now - at <= 65]
-    history.append((now, value))
-    RAPID_MOVE_HISTORY[(key, metric)] = history
-    triggered = []
-    seconds = 30
-    baseline = next((observed for at, observed in history if now - at >= seconds - 5), None)
-    expanded = abs(value) - abs(baseline) if baseline is not None else 0.0
-    for threshold in ((1.0,) if expanded >= 1.0 else (0.5,)):
-        candidate_key = (key, metric, seconds, threshold)
-        active = baseline is not None and expanded >= threshold
-        RAPID_MOVE_CANDIDATES[candidate_key] = RAPID_MOVE_CANDIDATES.get(candidate_key, 0) + 1 if active else 0
-        # Rapid moves are useful only when the abnormal value survives multiple
-        # refreshes. Two samples can still be a bad quote that disappears before
-        # the user can trade it, so rapid alerts require three consecutive active
-        # observations after the 30s baseline check.
-        if active and RAPID_MOVE_CANDIDATES[candidate_key] >= 3:
-            window_key = (key, metric)
-            window = RAPID_MOVE_ALERT_WINDOWS.get(window_key)
-            current_abs = abs(value)
-            expired = not window or now - window["started_at"] >= 30 * 60
-            widened = bool(window and current_abs >= window["max_abs"] + 0.2)
-            if expired or widened:
-                RAPID_MOVE_ALERT_WINDOWS[window_key] = {"started_at": now, "max_abs": current_abs}
-                triggered.append((seconds, threshold, expanded))
-    return triggered
-
-
-def dual_spread_quote_supported(row):
-    open_spread = float(row.get("open_spread") or 0)
-    if abs(open_spread) < 0.5:
-        return True
-    long_basis = row.get("long_basis")
-    short_basis = row.get("short_basis")
-    if long_basis is None or short_basis is None:
-        return abs(open_spread) >= 1.5
-    long_basis = float(long_basis or 0)
-    short_basis = float(short_basis or 0)
-    basis_gap = short_basis - long_basis
-    basis_support = abs(long_basis) >= 0.35 or abs(short_basis) >= 0.35 or abs(basis_gap) >= 0.25
-    long_funding = float(row.get("long_funding_rate") or 0)
-    short_funding = float(row.get("short_funding_rate") or 0)
-    funding_support = abs(long_funding - short_funding) >= 0.02 or any(abs(abs(value) - 0.005) > 0.003 for value in (long_funding, short_funding))
-    if abs(open_spread - basis_gap) <= 0.35:
-        return True
-    if basis_support and abs(open_spread - basis_gap) <= 0.8:
-        return True
-    # If both contract bases are flat and funding is just low-insurance level,
-    # a sudden large top-of-book spread is more likely a bad quote than a tradable
-    # futures/futures arbitrage signal.
-    return basis_support or funding_support
-
-
-def validate_dual_alert_quote(row, alert_type):
-    if "spread" in alert_type and not dual_spread_quote_supported(row):
-        return False
-    if "basis" in alert_type:
-        bn_basis = row.get("basis")
-        if bn_basis is None:
-            return False
-        if abs(float(bn_basis or 0)) < 0.5:
-            return False
-    return True
-
-
 def create_basis_open_alert(symbol, row, strategy, message):
     if strategy == "spot_futures":
         create_alert(symbol, "basis_threshold", message, row, strategy, row.get("long_exchange"), "Binance")
@@ -3098,54 +3034,6 @@ def track_basis(symbol, row, active_by_symbol, active_by_key, strategy="spot_fut
         expanded = True
     if expanded and emit_alert:
         create_basis_open_alert(symbol, row, strategy, f"basis expanded to {active.last_recorded_level:.1f} percent level")
-
-
-def confirmed_spot_book(exchange, symbol):
-    try:
-        if exchange == "Gate":
-            payload = get_json("https://api.gateio.ws/api/v4/spot/order_book?" + urlencode({"currency_pair": f"{symbol[:-4]}_USDT", "limit": 1}), timeout=0.25)
-            asks, bids = payload.get("asks", []), payload.get("bids", [])
-            return valid_book(asks[0][0] if asks else None, bids[0][0] if bids else None)
-        if exchange == "Bitget":
-            payload = get_json("https://api.bitget.com/api/v2/spot/market/orderbook?" + urlencode({"symbol": symbol, "limit": 1}), timeout=0.25)
-            book = payload.get("data", {})
-            asks, bids = book.get("asks", []), book.get("bids", [])
-            return valid_book(asks[0][0] if asks else None, bids[0][0] if bids else None)
-        payload = get_json("https://api.binance.com/api/v3/depth?" + urlencode({"symbol": symbol, "limit": 5}), timeout=0.25)
-        asks, bids = payload.get("asks", []), payload.get("bids", [])
-        return valid_book(asks[0][0] if asks else None, bids[0][0] if bids else None)
-    except Exception:
-        return None
-
-
-def validate_spot_alert_quote(symbol, row, alert_type):
-    """报警前以单币种一档订单簿复核，过滤聚合 ticker 的错误价、延迟价与插针。"""
-    cache_key = (symbol, row["long_exchange"], alert_type)
-    cached = QUOTE_VALIDATION_CACHE.get(cache_key)
-    if cached and time.time() - cached[0] < (5 if cached[1] else 120):
-        return cached[1]
-    spot_book = confirmed_spot_book(row["long_exchange"], symbol.replace("/", ""))
-    try:
-        future = get_json("https://fapi.binance.com/fapi/v1/ticker/bookTicker?" + urlencode({"symbol": symbol.replace("/", "")}), timeout=0.25)
-        futures_book = valid_book(future.get("askPrice"), future.get("bidPrice"))
-    except Exception:
-        futures_book = None
-    if not spot_book or not futures_book:
-        QUOTE_VALIDATION_CACHE[cache_key] = (time.time(), False)
-        return False
-    open_spread = (futures_book["bid"] - spot_book["ask"]) / spot_book["ask"] * 100
-    close_spread = (futures_book["ask"] - spot_book["bid"]) / spot_book["bid"] * 100
-    observed_close = row.get("close_spread")
-    # 复核报价必须与快照同向、同量级；超过 0.4% 的偏离按失真报价处理。
-    if abs(open_spread - row["open_spread"]) > 0.4 or (observed_close is not None and abs(close_spread - observed_close) > 0.4):
-        QUOTE_VALIDATION_CACHE[cache_key] = (time.time(), False)
-        return False
-    if abs(open_spread - close_spread) >= 0.6:
-        QUOTE_VALIDATION_CACHE[cache_key] = (time.time(), False)
-        return False
-    result = True if alert_type.startswith("rapid_") else (open_spread > 1 if alert_type == "futures_pump" else open_spread < -1)
-    QUOTE_VALIDATION_CACHE[cache_key] = (time.time(), result)
-    return result
 
 
 def spot_divergence_key(symbol, long_exchange, short_exchange="Binance"):
@@ -3266,6 +3154,79 @@ def alert_is_divergent(item, episodes):
     return False
 
 
+def register_alert_routes(groups, strategy, isolated=()):
+    routes = []
+    transfers = load_transfer_statuses((group["symbol"], row["long_exchange"]) for group in groups for row in group["rows"]) if strategy == "spot_futures" else {}
+    for group in groups:
+        symbol = group["symbol"]
+        if is_rwa_stock_pair(symbol):
+            continue
+        for row in group["rows"]:
+            if strategy == "spot_futures" and spot_divergence_key(symbol, row["long_exchange"], row.get("short_exchange")) in isolated:
+                continue
+            spec = row.get("alert_stream_route")
+            if spec:
+                spec = dict(spec)
+                transfer = transfers.get((symbol, row["long_exchange"]), {})
+                if transfer.get("state") == "fresh" and any(chain.get("deposit_open") is False or chain.get("withdraw_open") is False for chain in transfer.get("chains", [])):
+                    spec["divergence_threshold"] = 5
+                routes.append(Route((strategy, symbol, row["long_exchange"], "Binance" if strategy == "spot_futures" else row["short_exchange"]), **spec))
+    ALERT_STREAM_HUB.register(strategy, routes)
+
+
+def persist_alert_pulses(batch):
+    """Idempotent retry by pulse ID, never by the previous half-hour maximum."""
+    records = {item.id: item for item in AlertPulse.query.filter(AlertPulse.id.in_([pulse["id"] for pulse in batch])).all()}
+    for pulse in batch:
+        record = records.get(pulse["id"])
+        if record is None:
+            strategy, symbol, long_exchange, short_exchange = pulse["path"]
+            context = pulse["trigger_context"]
+            metric = {"spread": "开差", "basis": "币安基差", "price": "双端价格"}[pulse["metric"]]
+            event = AlertEvent(symbol=symbol, strategy=strategy, long_exchange=long_exchange, short_exchange=short_exchange,
+                               alert_type="rapid_" + pulse["metric"],
+                               message=f"{long_exchange} → {short_exchange}：{metric}异动，第{pulse['ordinal']}次冲击（公开行情，不代表收益保证）",
+                               open_spread=context.get("open_spread"), close_spread=context.get("close_spread"),
+                               basis=context.get("basis"), funding_rate=context.get("funding_rate"),
+                               created_at=datetime.fromtimestamp(pulse["triggered_at"], timezone.utc).replace(tzinfo=None))
+            db.session.add(event)
+            db.session.flush()
+            record = AlertPulse(id=pulse["id"], alert_event_id=event.id, evidence_json="{}")
+            db.session.add(record)
+            records[pulse["id"]] = record
+        previous = json.loads(record.evidence_json)
+        if pulse["version"] >= previous.get("version", 0):
+            record.evidence_json = json.dumps(pulse, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            record.updated_at = datetime.now()
+    db.session.commit()
+
+
+def background_alert_pulses():
+    ALERT_STREAM_HUB.running = True
+    reconciled, last_warning, retry_delay = 0, 0, .5
+    while True:
+        try:
+            if time.monotonic() - reconciled >= 30:
+                ALERT_STREAM_HUB.reconcile()
+                reconciled = time.monotonic()
+            batch = ALERT_STREAM_HUB.batch()
+            if batch:
+                with app.app_context():
+                    try:
+                        persist_alert_pulses(batch)
+                    finally:
+                        db.session.remove()
+                ALERT_STREAM_HUB.acknowledge(batch)
+            retry_delay = .5
+        except Exception:
+            ALERT_STREAM_HUB.persistence_error = True
+            if time.monotonic() - last_warning >= 30:
+                app.logger.warning("Alert pulse persistence/reconciliation failed; pending observations retained")
+                last_warning = time.monotonic()
+            retry_delay = min(5, retry_delay * 2)
+        time.sleep(retry_delay)
+
+
 def evaluate_alerts(groups):
     isolated = update_spot_divergences(groups)
     active_trackings = BasisTracking.query.filter_by(resolved_at=None).all()
@@ -3274,52 +3235,16 @@ def evaluate_alerts(groups):
     for group in groups:
         symbol = group["symbol"]
         rows = [row for row in group["rows"] if spot_divergence_key(symbol, row["long_exchange"], row.get("short_exchange")) not in isolated]
-        for excluded in group["rows"]:
-            if spot_divergence_key(symbol, excluded["long_exchange"], excluded.get("short_exchange")) in isolated:
-                key = ("spot_futures", *spot_divergence_key(symbol, excluded["long_exchange"], excluded.get("short_exchange")))
-                for cache in (RAPID_MOVE_HISTORY, RAPID_MOVE_CANDIDATES, RAPID_MOVE_ALERT_WINDOWS):
-                    for cache_key in list(cache):
-                        if cache_key[0] == key:
-                            cache.pop(cache_key, None)
         if rows:
-            track_basis(symbol, rows[0], active_by_symbol, active_by_key)
+            track_basis(symbol, rows[0], active_by_symbol, active_by_key, emit_alert=False)
         else:
             BASIS_CANDIDATES.pop(("spot_futures", symbol), None)
-        for row in rows:
-            path_key = ("spot_futures", symbol, row["long_exchange"], "Binance")
-            for metric, value in (("开差", float(row.get("open_spread") or 0)), ("基差", float(row.get("basis") or 0))):
-                for seconds, threshold, expanded in rapid_move_alerts(path_key, metric, value):
-                    alert_type = f"rapid_{'spread' if metric == '开差' else 'basis'}"
-                    if validate_spot_alert_quote(symbol, row, alert_type):
-                        create_alert(symbol, alert_type, f"{row['long_exchange']} 现货与 Binance 合约：{seconds} 秒内{metric}绝对值扩大 {expanded:.3f}%（阈值 {threshold:.1f}%）", row, "spot_futures", row["long_exchange"], "Binance")
-        futures_rows = [row for row in rows if row["open_spread"] > 1 and abs(row["open_spread"] - row["close_spread"]) < 0.6]
-        spot_rows = [row for row in rows if row["open_spread"] < -1 and abs(row["open_spread"] - row["close_spread"]) < 0.6]
-        active_pump_key = None
-        if futures_rows:
-            row = max(futures_rows, key=lambda item: item["open_spread"])
-            active_pump_key = (symbol, "futures_pump", row["long_exchange"])
-        elif spot_rows:
-            row = min(spot_rows, key=lambda item: item["open_spread"])
-            active_pump_key = (symbol, "spot_pump", row["long_exchange"])
-
-        # 合约/现货拉升与基差异动一样需要连续两次采样确认：交易所路径、方向或阈值任一项失效即重置，单次插针不会写入报警。
-        for candidate_key in list(PUMP_CANDIDATES):
-            if candidate_key[0] == symbol and candidate_key != active_pump_key:
-                PUMP_CANDIDATES.pop(candidate_key, None)
-        if active_pump_key:
-            PUMP_CANDIDATES[active_pump_key] = PUMP_CANDIDATES.get(active_pump_key, 0) + 1
-            if PUMP_CANDIDATES[active_pump_key] >= 2:
-                alert_type, exchange = active_pump_key[1], active_pump_key[2]
-                label = "合约拉升" if alert_type == "futures_pump" else "现货拉升"
-                if validate_spot_alert_quote(symbol, row, alert_type):
-                    create_alert(symbol, alert_type, f"{exchange} 现货与 Binance 合约出现确认后的{label}", row, "spot_futures", row["long_exchange"], "Binance")
-                else:
-                    PUMP_CANDIDATES.pop(active_pump_key, None)
+    register_alert_routes(groups, "spot_futures", isolated)
     db.session.commit()
 
 
 def evaluate_dual_alerts(groups):
-    """期多期空报警：连续两次确认，之后仅在绝对值扩大 0.2% 时覆盖同币种报警。"""
+    """Keep basis tracking; realtime path-local pulses own alert creation."""
     active_trackings = BasisTracking.query.filter_by(resolved_at=None).all()
     active_by_symbol = {(item.strategy or "spot_futures", item.symbol): item for item in active_trackings}
     active_by_key = {(item.strategy or "spot_futures", item.symbol, item.direction): item for item in active_trackings}
@@ -3329,43 +3254,8 @@ def evaluate_dual_alerts(groups):
         if bn_row:
             bn_basis = bn_row.get("long_basis") if bn_row["long_exchange"] == "Binance" else bn_row.get("short_basis")
             if bn_basis is not None:
-                track_basis(symbol, {**bn_row, "basis": bn_basis, "funding_rate": bn_row.get("short_funding_rate")}, active_by_symbol, active_by_key, "futures_futures")
-        active_keys = set()
-        for row in group["rows"]:
-            path = (symbol, row["long_exchange"], row["short_exchange"])
-            bn_basis = row.get("long_basis") if row["long_exchange"] == "Binance" else row.get("short_basis") if row["short_exchange"] == "Binance" else None
-            # A path without a Binance contract has no Binance basis, not a zero basis.
-            alert_row = {**row, "basis": bn_basis, "funding_rate": row.get("short_funding_rate")}
-            for metric_key, metric_label, value in (("spread", "开差", float(row.get("open_spread") or 0)), ("basis", "BN 基差", float(bn_basis or 0))):
-                if metric_key == "basis" and bn_basis is None:
-                    continue
-                alert_type = f"rapid_{metric_key}"
-                for seconds, threshold, expanded in rapid_move_alerts(("futures_futures", *path), metric_key, value):
-                    if validate_dual_alert_quote(alert_row, alert_type):
-                        create_alert(symbol, alert_type, f"{row['long_exchange']} 合约与 {row['short_exchange']} 合约：{seconds} 秒内{metric_label}绝对值扩大 {expanded:.3f}%（阈值 {threshold:.1f}%）", alert_row, "futures_futures", row["long_exchange"], row["short_exchange"])
-            checks = []
-            if abs(float(row.get("open_spread") or 0)) >= 1:
-                checks.append(("dual_spread_threshold", "开差"))
-            if bn_basis is not None and abs(float(bn_basis)) >= 1:
-                checks.append(("dual_basis_threshold", "Binance 基差"))
-            for alert_type, label in checks:
-                key = (*path, alert_type)
-                active_keys.add(key)
-                observed = float(bn_basis if alert_type == "dual_basis_threshold" else row.get("open_spread") or 0)
-                previous = DUAL_ALERT_VALUES.get(key)
-                DUAL_ALERT_VALUES[key] = observed
-                DUAL_ALERT_CANDIDATES[key] = DUAL_ALERT_CANDIDATES.get(key, 0) + 1
-                # A single bad quote must never create a futures/futures alert.
-                # The same path and threshold need to survive three consecutive snapshots.
-                stable = previous is not None and previous * observed > 0 and abs(previous - observed) <= 0.6
-                if DUAL_ALERT_CANDIDATES[key] < 3 or not stable:
-                    continue
-                message = f"{row['long_exchange']} 合约与 {row['short_exchange']} 合约出现确认后的{label}异动"
-                if validate_dual_alert_quote(alert_row, alert_type):
-                    create_alert(symbol, alert_type, message, alert_row, "futures_futures", row["long_exchange"], row["short_exchange"])
-        for key in [item for item in DUAL_ALERT_CANDIDATES if item[0] == symbol and item not in active_keys]:
-            DUAL_ALERT_CANDIDATES.pop(key, None)
-            DUAL_ALERT_VALUES.pop(key, None)
+                track_basis(symbol, {**bn_row, "basis": bn_basis, "funding_rate": bn_row.get("short_funding_rate")}, active_by_symbol, active_by_key, "futures_futures", emit_alert=False)
+    register_alert_routes(groups, "futures_futures")
     db.session.commit()
 
 
@@ -3533,6 +3423,10 @@ def spot_futures_snapshot():
             contract_basis = (float(funding_item["markPrice"]) - float(funding_item["indexPrice"])) / float(funding_item["indexPrice"]) * 100
             oi_contracts = BINANCE_OPEN_INTEREST_CACHE.get(symbol, {}).get("contracts")
             rows.append({"long_exchange": exchange, "long_ask": book["ask"], "long_bid": book["bid"], "short_exchange": "Binance 合约", "short_bid": futures_book["bid"], "short_ask": futures_book["ask"], "basis": contract_basis, "funding_rate": float(funding_item["lastFundingRate"]) * 100, "funding_interval_hours": intervals.get(symbol, 8), "next_funding_time": datetime.fromtimestamp(int(funding_item["nextFundingTime"]) / 1000, tz=timezone.utc).astimezone().strftime("%m-%d %H:%M"), "spot_volume": spot_volumes[exchange].get(raw_spot_symbol), "futures_volume": futures_volumes.get(symbol), "futures_open_interest": oi_contracts * float(funding_item.get("markPrice", 0) or 0) if oi_contracts is not None else None, "open_spread": open_spread, "close_spread": close_spread})
+            feed = {"Binance": "bn_spot", "Gate": "gate", "Bitget": "bitget"}[exchange]
+            stream_symbol = raw_spot_symbol[:-4] + "_USDT" if exchange == "Gate" else raw_spot_symbol
+            rows[-1]["alert_stream_route"] = dict(long_key=(feed, stream_symbol), short_key=("bn_future", symbol),
+                                                  long_factor=price_factor, short_factor=1, mark_key=("bn_mark", symbol))
         if rows:
             for row in rows:
                 row.update(mark_price=float(funding_item["markPrice"]), index_price=float(funding_item["indexPrice"]))
@@ -3687,6 +3581,13 @@ def dual_futures_snapshot():
                 "open_spread": (short_contract["bid"] - long_contract["ask"]) / long_contract["ask"] * 100,
                 "close_spread": (short_contract["ask"] - long_contract["bid"]) / long_contract["bid"] * 100,
             })
+            def stream_key(exchange, contract):
+                return ({"Binance": "bn_future", "Bybit": "bybit", "OKX": "okx"}[exchange],
+                        contract.get("okx_inst_id") if exchange == "OKX" else contract["source_symbol"])
+            bn_contract = long_contract if long_exchange == "Binance" else short_contract if short_exchange == "Binance" else None
+            rows[-1]["alert_stream_route"] = dict(long_key=stream_key(long_exchange, long_contract), short_key=stream_key(short_exchange, short_contract),
+                                                  long_factor=1 / long_contract["alias_multiplier"], short_factor=1 / short_contract["alias_multiplier"],
+                                                  mark_key=("bn_mark", bn_contract["source_symbol"]) if bn_contract else None)
         if rows:
             groups.append({"symbol": pair_slash(symbol), "rows": rows})
     enrich_next_funding_net(groups)
@@ -12642,8 +12543,7 @@ def funding_trend_arbitrage():
     return jsonify({"updated_at": snapshot["updated_at"], "items": candidates})
 
 
-def alert_binance_basis(item):
-    """Only return historical samples whose contract basis is known to be Binance's."""
+def alert_has_binance_basis_source(item):
     if item.strategy == "spot_futures":
         # Legacy spot/futures records omitted the exchange columns; this strategy
         # has always used Binance's mark/index basis, not the spot venue's price.
@@ -12652,7 +12552,12 @@ def alert_binance_basis(item):
         supported = "Binance" in (item.long_exchange, item.short_exchange)
     else:
         supported = False
-    return item.basis if supported and item.basis is not None and math.isfinite(item.basis) else None
+    return supported
+
+
+def alert_binance_basis(item):
+    """Only return historical samples whose contract basis is known to be Binance's."""
+    return item.basis if alert_has_binance_basis_source(item) and item.basis is not None and math.isfinite(item.basis) else None
 
 
 @app.get("/api/alerts")
@@ -12660,6 +12565,8 @@ def alerts():
     now = datetime.now()
     window_start = now - timedelta(hours=24)
     view = request.args.get("view", "legacy")
+    if view == "health":
+        return jsonify(ALERT_STREAM_HUB.status())
     if view not in {"legacy", "summary", "detail"}:
         return jsonify({"error": "无效的报警查询类型"}), 400
     query = AlertEvent.query.filter(AlertEvent.created_at >= window_start, AlertEvent.created_at <= now)
@@ -12696,11 +12603,17 @@ def alerts():
         by_path.setdefault(spot_divergence_key(episode.symbol, episode.long_exchange, episode.short_exchange), []).append(episode)
     isolated = [item for item in episodes if item.resolved_at is None]
     all_events = [item for item in query.order_by(AlertEvent.created_at.desc(), AlertEvent.id.desc()).all() if not is_rwa_stock_pair(item.symbol) and not alert_is_divergent(item, by_path)]
+    pulse_rows = AlertPulse.query.join(AlertEvent, AlertPulse.alert_event_id == AlertEvent.id).filter(AlertEvent.created_at >= window_start, AlertEvent.created_at <= now)
+    if view == "detail":
+        pulse_rows = pulse_rows.filter(AlertEvent.symbol == symbol)
+    pulses = {item.alert_event_id: json.loads(item.evidence_json) for item in pulse_rows.all()}
     grouped_events = {}
     for item in all_events:
         grouped_events.setdefault(item.symbol, []).append(item)
-    latest_events = [items[0] for items in grouped_events.values()]
-    active_events = [item for item in latest_events if (now - item.created_at).total_seconds() <= 120]
+    def notice_epoch(item):
+        return pulses.get(item.id, {}).get("noticed_at", item.created_at.replace(tzinfo=timezone.utc).timestamp())
+    latest_events = [max(items, key=notice_epoch) for items in grouped_events.values()]
+    active_events = [item for item in latest_events if 0 <= now.replace(tzinfo=timezone.utc).timestamp() - notice_epoch(item) <= 120]
     tracking = [item for item in BasisTracking.query.filter_by(resolved_at=None).order_by(BasisTracking.max_abs_basis.desc()).limit(50).all() if not is_rwa_stock_pair(item.symbol)] if view != "detail" else []
     if isolated and tracking:
         isolated_keys = {spot_divergence_key(item.symbol, item.long_exchange, item.short_exchange) for item in isolated}
@@ -12758,12 +12671,22 @@ def alerts():
         for field in ("open_spread", "basis"):
             samples = [alert_binance_basis(item) if field == "basis" else item.open_spread for item in items]
             values = [value for value in samples if value is not None and math.isfinite(value)]
+            for item in items:
+                if field == "basis" and not alert_has_binance_basis_source(item):
+                    continue
+                bounds = pulses.get(item.id, {}).get("ranges", {}).get(field, {})
+                values.extend(value for value in (bounds.get("min"), bounds.get("max")) if isinstance(value, (int, float)) and math.isfinite(value))
             ranges[field] = {"max": max(values, default=None), "min": min(values, default=None)}
         return ranges
 
     def event_payload(item):
         basis = alert_binance_basis(item)
-        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int(120 - (now - item.created_at).total_seconds())), **alert_context(item)}
+        pulse = pulses.get(item.id)
+        if pulse and not pulse.get("ended_at") and time.time() - pulse["current_at"] > 10:
+            pulse = {**pulse, "state": "data_gap"}
+        if pulse:
+            pulse = {key: value for key, value in pulse.items() if key in {"id", "episode", "ordinal", "metric", "direction", "baseline", "baseline_at", "triggered_at", "peak", "peak_at", "current", "current_at", "state", "retrace_at", "ended_at", "quality", "notice_version"}}
+        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "pulse": pulse, "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int(120 - (now.replace(tzinfo=timezone.utc).timestamp() - notice_epoch(item)))), **alert_context(item)}
 
     if view == "detail":
         filtered = [item for item in all_events if (not selected_strategy or alert_context(item)["strategy"] == selected_strategy) and (selected_path is None or path_key(item) == selected_path)]
@@ -12788,6 +12711,11 @@ def alerts():
         basis_items = [item for item in items if item.basis is not None]
         max_spread_item = max(spread_items, key=lambda item: abs(item.open_spread or 0), default=None)
         max_basis_item = max(basis_items, key=lambda item: abs(item.basis or 0), default=None)
+        ranges = value_ranges(items)
+        def absolute_peak(field, fallback):
+            bounds = ranges[field]
+            values = [value for value in (bounds["min"], bounds["max"]) if value is not None]
+            return max(values, key=abs) if values else fallback
         path_items = {}
         for item in items:
             path_items.setdefault(path_id(path_key(item)), []).append(item)
@@ -12801,9 +12729,9 @@ def alerts():
             "first_at": items[-1].created_at.strftime("%m-%d %H:%M:%S"),
             "alert_count": len(items),
             "move_peaks": {
-                "open_spread": max_spread_item.open_spread if max_spread_item else None,
+                "open_spread": absolute_peak("open_spread", max_spread_item.open_spread if max_spread_item else None),
                 "open_spread_at": max_spread_item.created_at.strftime("%m-%d %H:%M:%S") if max_spread_item else None,
-                "basis": max_basis_item.basis if max_basis_item else None,
+                "basis": absolute_peak("basis", max_basis_item.basis if max_basis_item else None),
                 "basis_at": max_basis_item.created_at.strftime("%m-%d %H:%M:%S") if max_basis_item else None,
             },
             "value_ranges": value_ranges(items),
@@ -12815,6 +12743,7 @@ def alerts():
 
     return jsonify({
         "checked_at_epoch": time.time(),
+        "realtime": ALERT_STREAM_HUB.status(),
         "window_hours": 24,
         "total_symbols": len(grouped_events),
         "total_alerts": len(all_events),
@@ -14672,6 +14601,7 @@ def start_background_workers():
     if BACKGROUND_WORKERS_STARTED:
         return
     BACKGROUND_WORKERS_STARTED = True
+    threading.Thread(target=background_alert_pulses, daemon=True, name="alert-pulse-writer").start()
     for name, refresh, seconds, rule_key, requires_metadata in (
         ("quotes", refresh_dashboard_opportunities, MARKET_REFRESH_SECONDS, "spot_market_refresh", False),
         ("major-analysis", fetch_major_market_overview, MAJOR_MARKET_CACHE_SECONDS, None, False),

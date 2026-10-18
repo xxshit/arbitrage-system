@@ -9,6 +9,7 @@ os.environ.setdefault("SECRET_KEY", "alert-history-test")
 os.environ.setdefault("CHAT_ENCRYPTION_KEY", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
 
 import app as module
+from anomaly_engine import PulseDetector
 
 
 class AlertHistoryTests(unittest.TestCase):
@@ -172,9 +173,14 @@ class AlertHistoryTests(unittest.TestCase):
             ("MISSING-LONG/USDT", "Binance", "Bybit", None, -99, None),
             ("REAL-ZERO/USDT", "Bybit", "Binance", 99, 0, 0),
         ]
-        groups = [{"symbol": symbol, "rows": [{"long_exchange": long, "short_exchange": short, "long_basis": long_basis, "short_basis": short_basis, "open_spread": 0.8, "close_spread": 0.9, "short_funding_rate": 0.01}]} for symbol, long, short, long_basis, short_basis, _expected in cases]
-        with module.app.app_context(), patch.object(module, "rapid_move_alerts", side_effect=lambda key, metric, value: [(30, 0.5, 0.6)] if metric == "spread" else []), patch.object(module, "validate_dual_alert_quote", return_value=True):
-            module.evaluate_dual_alerts(groups)
+        with module.app.app_context():
+            engine = PulseDetector()
+            for symbol, long, short, _long_basis, _short_basis, expected in cases:
+                path = ("futures_futures", symbol, long, short)
+                context = {"open_spread": 0, "close_spread": .1, "mid_spread": .05, "basis": expected, "funding_rate": .01}
+                epoch = self.now.replace(tzinfo=timezone.utc).timestamp()
+                engine.observe(path, "spread", 0, epoch-2, context)
+                module.persist_alert_pulses(engine.observe(path, "spread", .8, epoch-1, {**context, "open_spread": .8, "close_spread": .9, "mid_spread": .85}))
             events = {event.symbol: event for event in module.AlertEvent.query.all()}
             self.assertEqual(len(events), len(cases))
             for symbol, _long, _short, _long_basis, _short_basis, expected in cases:
@@ -182,6 +188,29 @@ class AlertHistoryTests(unittest.TestCase):
                     self.assertEqual(events[symbol].alert_type, "rapid_spread")
                     self.assertEqual(events[symbol].basis, expected)
                     self.assertEqual(events[symbol].open_spread, 0.8)
+
+    def test_pulse_peak_and_retrace_survive_summary_detail_and_retry(self):
+        engine = PulseDetector()
+        updates = {}
+        path = ("spot_futures", "DEMO/USDT", "Gate", "Binance")
+        for i, value in enumerate((0, .3, 1.02, .1, .4)):
+            context = {"open_spread": value, "close_spread": value+.02, "mid_spread": value+.01, "basis": -.32, "funding_rate": None}
+            for pulse in engine.observe(path, "spread", value, self.now.replace(tzinfo=timezone.utc).timestamp()-10+i, context):
+                updates[pulse["id"]] = pulse
+        with module.app.app_context():
+            module.persist_alert_pulses(list(updates.values()))
+            module.persist_alert_pulses(list(updates.values()))
+        data = self.get(view="summary")
+        coin = data["events"][0]
+        self.assertEqual(coin["alert_count"], 2)
+        self.assertEqual(coin["move_peaks"]["open_spread"], 1.02)
+        self.assertEqual(coin["paths"][0]["value_ranges"]["open_spread"], {"max": 1.02, "min": .1})
+        self.assertEqual(data["active_events"][0]["pulse"]["ordinal"], 2)
+        detail = self.get(view="detail", symbol="DEMO/USDT")["items"]
+        self.assertEqual(detail[1]["pulse"]["state"], "retraced")
+        self.assertEqual(detail[1]["pulse"]["peak"], 1.02)
+        self.assertEqual(detail[0]["pulse"]["baseline"], .1)
+        self.assertNotIn("trigger_context", detail[0]["pulse"])
 
     def test_tied_timestamps_have_stable_id_order_and_page_bounds(self):
         self.insert([self.event() for _ in range(4)])

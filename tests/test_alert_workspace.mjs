@@ -120,3 +120,11 @@ test('sticky roster header shares the data scroll gutter, grid and horizontal pa
   assert.ok(css.includes('.alert-roster-columns {position:sticky;top:0;z-index:3;'));
   assert.ok(css.includes('.alert-symbol-option > .alert-mute-toggle {justify-self:stretch;width:100%'));
 });
+
+test('detail omits repeated coin header, mute and normal status while keeping metrics, timeline and pagination',async()=>{
+  const h=harness();h.context.renderAlertMasterDetail([group()]);await h.context.loadSelectedAlertHistory();const markup=h.node('alertDetailPane').innerHTML;
+  for(const value of ['<header','<h4','alert-latest-label','strategy-badge','alert-mute-toggle','新到旧','共 43 条'])assert.ok(!markup.includes(value),value);
+  for(const value of ['最近开差','最近基差','24H开差峰值','24H基差峰值','alert-timeline-scroll','10-18 10:00:00','alert-detail-pagination','aria-label="DEMO/USDT 报警明细"'])assert.ok(markup.includes(value),value);
+  assert.ok(markup.includes('<div class="alert-detail-status" role="status"></div>'));assert.ok(css.includes('.alert-detail-status:empty {display:none}'));
+  h.run('alertDetailState.loading=true');h.context.renderAlertDetailPane();assert.ok(!h.node('alertDetailPane').innerHTML.includes('正在读取明细…'));
+});

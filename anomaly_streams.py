@@ -18,7 +18,7 @@ from anomaly_engine import PulseDetector, finite
 
 ENDPOINTS = {
     "bn_spot": "wss://stream.binance.com:9443/ws",
-    "bn_future": "wss://fstream.binance.com/ws",
+    "bn_future": "wss://fstream.binance.com/public/ws",
     "bn_mark": "wss://fstream.binance.com/market/ws",
     "gate": "wss://api.gateio.ws/ws/v4/",
     "bitget": "wss://ws.bitget.com/v3/ws/public",
@@ -29,7 +29,10 @@ ENDPOINTS = {
 
 def subscription(feed, symbols):
     if feed.startswith("bn_"):
-        suffix = "@markPrice@1s" if feed == "bn_mark" else "@bookTicker"
+        # Unbounded futures bookTicker quantity updates saturate the current
+        # host's network under full-market load. Top-five snapshots bound the
+        # cadence without turning incremental depth deltas into fake BBOs.
+        suffix = {"bn_mark": "@markPrice@1s", "bn_future": "@depth5@500ms"}.get(feed, "@bookTicker")
         return {"method": "SUBSCRIBE", "params": [s.lower() + suffix for s in symbols], "id": 1}
     if feed == "gate":
         return {"time": int(time.time()), "channel": "spot.book_ticker", "event": "subscribe", "payload": list(symbols)}
@@ -63,6 +66,10 @@ def parse_frame(feed, message, received):
             if feed == "bn_mark" and data.get("e") == "markPriceUpdate":
                 output.append(dict(symbol=data["s"], mark=float(data["p"]), index=float(data["i"]),
                                    funding=float(data["r"]) * 100, at=float(data["E"]) / 1000))
+            elif feed == "bn_future" and data.get("e") == "depthUpdate":
+                # This socket subscribes ONLY to depth5 snapshots, not @depth
+                # diff streams. Every message replaces the complete top five.
+                book(data["s"], data["b"][0][0], data["a"][0][0], data["b"][0][1], data["a"][0][1], data["E"], data["u"])
             elif "b" in data and "a" in data:
                 book(data["s"], data["b"], data["a"], data["B"], data["A"], data.get("E"), data.get("u"))
         elif feed == "gate" and data.get("event") == "update" and data.get("channel") == "spot.book_ticker":

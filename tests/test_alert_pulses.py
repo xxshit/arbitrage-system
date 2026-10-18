@@ -326,6 +326,24 @@ class PublicParserTests(unittest.TestCase):
         item = parse_frame("bn_spot", {"s": "BTCUSDT", "u": 5, "b": "100", "a": "101", "B": "1", "A": "2"}, 1000)[0]
         self.assertEqual((item["at"], item["timestamp_source"]), (1000, "receipt"))
 
+    def test_binance_futures_bounded_full_snapshot_subscription(self):
+        from anomaly_streams import ENDPOINTS
+        self.assertEqual(ENDPOINTS["bn_future"], "wss://fstream.binance.com/public/ws")
+        self.assertEqual(subscription("bn_future", ["BTCUSDT"])["params"], ["btcusdt@depth5@500ms"])
+        self.assertEqual(subscription("bn_spot", ["BTCUSDT"])["params"], ["btcusdt@bookTicker"])
+        self.assertEqual(subscription("bn_mark", ["BTCUSDT"])["params"], ["btcusdt@markPrice@1s"])
+
+    def test_binance_futures_partial_depth_uses_best_full_levels(self):
+        data = dict(e="depthUpdate", E=1000000, s="BTCUSDT", u=8,
+                    b=[["100", "2"], ["99", "3"]], a=[["101", "4"], ["102", "5"]])
+        item = parse_frame("bn_future", data, 1000)[0]
+        self.assertEqual((item["bid"], item["ask"], item["bid_qty"], item["ask_qty"]), (100, 101, 2, 4))
+        self.assertEqual((item["at"], item["sequence"], item["timestamp_source"]), (1000, 8, "exchange"))
+        self.assertEqual(parse_frame("bn_future", {**data, "b": []}, 1000), [])
+        self.assertEqual(parse_frame("bn_future", {**data, "a": []}, 1000), [])
+        # Futures depth arrays must never be accepted by the spot bookTicker parser.
+        self.assertEqual(parse_frame("bn_spot", data, 1000), [])
+
     def test_gate_exact_timestamp_and_volume(self):
         data = {"event": "update", "channel": "spot.book_ticker", "result": {"s": "BTC_USDT", "u": 2, "t": 1000000, "b": "100", "a": "101", "B": "2", "A": "1"}}
         self.assertEqual(parse_frame("gate", data, 1000)[0]["at"], 1000)

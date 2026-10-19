@@ -194,20 +194,20 @@ test('tracking-only alert changes render without causing repeat sound',async()=>
   const valid=h.context.byId('basisTracking').innerHTML;assert.equal(await h.context.loadAlerts(),false);assert.equal(h.context.byId('basisTracking').innerHTML,valid);
 });
 
-test('one round sounds once per meaningful phase despite path switches and temporary absence',async()=>{
+test('one server admission sounds once across phases and temporary absence, next breakout can ring',async()=>{
   const h=harness();let sounds=0;
   Object.assign(h.context,{pruneAlertMutes(){},isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){},replaceHtmlKeepingExchangeLogos(){},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});
   h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
   let active=[];h.context.fetch=async()=>({ok:true,json:async()=>({active_events:active,events:[],basis_tracking:[],checked_at_epoch:100})});
   await h.context.loadAlerts();
-  const event={id:1,symbol:'DEMO/USDT',audible:true,notice_key:'pulse:1:start',pulse:{state:'watch',notice_version:1}};
+  const event={id:1,symbol:'DEMO/USDT',audible:true,notice_key:'range:1:1',reminder:{eligible:true},pulse:{state:'watch',notice_version:1}};
   active=[event];await h.context.loadAlerts();assert.equal(sounds,1);
   active=[{...event,id:2}];await h.context.loadAlerts();assert.equal(sounds,1);
   active=[];await h.context.loadAlerts();active=[event];await h.context.loadAlerts();assert.equal(sounds,1);
-  active=[{...event,notice_key:'pulse:1:retraced',pulse:{state:'retraced'}}];await h.context.loadAlerts();assert.equal(sounds,2);
-  active=[{...event,id:3,notice_key:'pulse:1:restart:retraced',pulse:{state:'retraced',ordinal:2}}];await h.context.loadAlerts();assert.equal(sounds,3);
-  active=[{...active[0],id:4,pulse:{state:'retraced',ordinal:3}}];await h.context.loadAlerts();assert.equal(sounds,3);
-  active=[{...event,id:5,notice_key:'pulse:5:start'}];await h.context.loadAlerts();assert.equal(sounds,4);
+  active=[{...event,pulse:{state:'retraced'}}];await h.context.loadAlerts();assert.equal(sounds,1);
+  active=[{...event,id:3,notice_key:'should-not-ring',reminder:{eligible:false},pulse:{state:'watch',ordinal:2}}];await h.context.loadAlerts();assert.equal(sounds,1);assert.equal(h.context.latestActiveAlertEvents.length,0);
+  active=[{...event,notice_key:'range:1:2',pulse:{state:'expanded'}}];await h.context.loadAlerts();assert.equal(sounds,2);
+  active=[{...event,id:5,notice_key:'range:5:1'}];await h.context.loadAlerts();assert.equal(sounds,3);
 });
 
 test('data gap, isolated and settled pulses cannot ring while a genuine new round can',async()=>{

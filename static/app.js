@@ -655,7 +655,7 @@ function alertPulseLabel(item){
   const pulse=item.pulse;if(!pulse)return alertLabel(item.type);
   const status={watch:pulse.ordinal>1?'再次启动':'提前关注',expanded:'扩大中',retraced:pulse.direction===-1?'已反弹':'已回落',settled:'已结束',data_gap:'数据中断',isolated:'路径隔离'};
   const metric={spread:'开差',basis:'基差',price:'双端价格'};
-  return `${metric[pulse.metric]||'盘口'}异动 · ${status[pulse.state]||'已记录'}${pulse.ordinal>1?` · 第${Number(pulse.ordinal)||1}次`:''}`;
+  return `${metric[pulse.metric]||'盘口'}异动 · ${status[pulse.state]||'已记录'}${item.reminder?.record_only?' · 仅记录':pulse.ordinal>1?` · 第${Number(pulse.ordinal)||1}次`:''}`;
 }
 function alertPulseKey(item){return JSON.stringify([item.id??null,item.pulse?.id??null,item.pulse?.metric,item.pulse?.baseline_at])}
 function alertPulseViewState(root,preserve=true){
@@ -735,7 +735,7 @@ function alertDetailCard(group,expandedPulses=new Set()){
 }
 function alertSymbolCard(group){
   const symbol=escapeChatHtml(group.symbol),peaks=group.move_peaks||{};
-  return `<article class="alert-symbol-option ${group.symbol===selectedAlertSymbol?'active':''} ${alertClass(group.latest.type)} ${isAlertMuted(group.symbol)?'muted-alert':''}" data-alert-symbol="${symbol}"><div class="alert-symbol-cell"><button type="button" class="alert-coin-select ${delistingSymbolClass(group.symbol)}" data-market-symbol="${symbol}" onclick="selectAlertSymbol(${alertActionSymbol(group.symbol)})" aria-label="${symbol}，${group.alert_count}轮异动，查看详情" aria-pressed="${group.symbol===selectedAlertSymbol}">${symbol}</button></div><span class="alert-symbol-count" title="按异动轮次计数；同轮回落、再启动及30秒内的多路径同步信号不重复累加，明细保留各路径记录">${group.alert_count}</span><span class="alert-symbol-peak ${changeClass(peaks.open_spread)}">${alertCompactMetric(peaks.open_spread)}</span><span class="alert-symbol-peak ${changeClass(peaks.basis)}">${alertCompactMetric(peaks.basis)}</span>${alertMuteButton(group.symbol)}</article>`;
+  return `<article class="alert-symbol-option ${group.symbol===selectedAlertSymbol?'active':''} ${alertClass(group.latest.type)} ${isAlertMuted(group.symbol)?'muted-alert':''}" data-alert-symbol="${symbol}"><div class="alert-symbol-cell"><button type="button" class="alert-coin-select ${delistingSymbolClass(group.symbol)}" data-market-symbol="${symbol}" onclick="selectAlertSymbol(${alertActionSymbol(group.symbol)})" aria-label="${symbol}，${group.alert_count}次提醒，查看详情" aria-pressed="${group.symbol===selectedAlertSymbol}">${symbol}</button></div><span class="alert-symbol-count" title="24小时首次异动及明显突破次数；按策略、路径和指标独立去重，同区间仅记录。声音仍需通过当前候选核验。">${group.alert_count}</span><span class="alert-symbol-peak ${changeClass(peaks.open_spread)}">${alertCompactMetric(peaks.open_spread)}</span><span class="alert-symbol-peak ${changeClass(peaks.basis)}">${alertCompactMetric(peaks.basis)}</span>${alertMuteButton(group.symbol)}</article>`;
 }
 function visibleAlertGroups(groups=latestAlertGroups){
   const query=alertListQuery.toUpperCase().replace(/[\s/_-]/g,'');
@@ -745,7 +745,7 @@ function visibleAlertGroups(groups=latestAlertGroups){
     return alertScope==='candidate'?(b.attention?.net_edge??0)-(a.attention?.net_edge??0):0;
   });
 }
-function alertRosterColumnsMarkup(){return '<div class="alert-roster-columns" aria-hidden="true"><span>币种</span><span>轮次</span><span>开差峰值</span><span>基差峰值</span><span>静音</span></div>'}
+function alertRosterColumnsMarkup(){return '<div class="alert-roster-columns" aria-hidden="true"><span>币种</span><span>提醒</span><span>开差峰值</span><span>基差峰值</span><span>静音</span></div>'}
 function renderAlertRoster(){
   const groups=visibleAlertGroups(),list=byId('alertSymbolList');if(!list)return;
   const top=list.scrollTop;
@@ -804,7 +804,7 @@ function renderTipsItems(activeEvents){const target=byId('tipsItems');if(!target
 async function loadAlerts(force=false){
   const version=++alertSummaryVersion,requestedNotional=alertNotional;
   try{
-    const data=await fetchRefreshJson(`/api/alerts?view=summary&notional=${requestedNotional}`),activeEvents=data.active_events||[],groups=data.events||[],tracking=data.basis_tracking||[];
+    const data=await fetchRefreshJson(`/api/alerts?view=summary&notional=${requestedNotional}`),activeEvents=(data.active_events||[]).filter(item=>!item.reminder||item.reminder.eligible===true),groups=data.events||[],tracking=data.basis_tracking||[];
     if(version!==alertSummaryVersion||requestedNotional!==alertNotional)return false;
     renderAlertStreamStatus(data.realtime);
     pruneAlertMutes(groups,activeEvents);latestActiveAlertEvents=activeEvents;

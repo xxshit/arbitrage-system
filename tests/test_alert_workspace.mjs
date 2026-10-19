@@ -56,6 +56,14 @@ test('restart and negative pulses use unambiguous labels',()=>{
   assert.ok(h.context.alertPulseTrace({pulse}).includes('1.0秒反弹'));
 });
 
+test('range repeats are marked record-only without implying a new reminder count',()=>{
+  const h=harness(),item={pulse:{metric:'spread',state:'watch',ordinal:30},reminder:{record_only:true}};
+  const label=h.context.alertPulseLabel(item);
+  assert.ok(label.includes('仅记录'));assert.ok(!label.includes('第30次'));
+  assert.ok(h.context.alertRosterColumnsMarkup().includes('<span>提醒</span>'));
+  assert.ok(html.includes('20261019-alert-range-reminder-v1'));
+});
+
 test('price trace converts log prices into relative moves instead of showing a log-price as percent',()=>{
   const h=harness(),pulse={metric:'price',baseline:100*Math.log(100),baseline_at:0,peak:100*Math.log(102),peak_at:1,current:100*Math.log(101)};
   const markup=h.context.alertPulseTrace({pulse});assert.ok(markup.includes('+2.00%'));assert.ok(markup.includes('+1.00%'));

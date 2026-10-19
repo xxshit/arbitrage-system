@@ -25,6 +25,8 @@ class AlertHistoryTests(unittest.TestCase):
 
         self.clock = patch.object(module, "datetime", Clock)
         self.clock.start()
+        self.epoch_clock = patch.object(module.time, "time", return_value=self.now.replace(tzinfo=timezone.utc).timestamp())
+        self.epoch_clock.start()
         self.rwa = patch.object(module, "is_rwa_stock_pair", return_value=False)
         self.rwa.start()
         with module.app.app_context():
@@ -44,6 +46,7 @@ class AlertHistoryTests(unittest.TestCase):
             module.db.session.remove()
             module.db.drop_all()
         self.clock.stop()
+        self.epoch_clock.stop()
         self.rwa.stop()
 
     def event(self, symbol="DEMO/USDT", **values):
@@ -209,7 +212,8 @@ class AlertHistoryTests(unittest.TestCase):
         self.assertEqual(data["active_events"], [])  # no baseline/size evidence: history only
         detail = self.get(view="detail", symbol="DEMO/USDT")["items"]
         self.assertEqual(detail[0]["pulse"]["ordinal"], 2)
-        self.assertTrue(detail[0]["notice_key"].endswith(":restart:start:record"))
+        self.assertIsNone(detail[0]["notice_key"])
+        self.assertTrue(detail[0]["reminder"]["record_only"])
         self.assertEqual(detail[1]["pulse"]["state"], "retraced")
         self.assertEqual(detail[1]["pulse"]["peak"], 1.02)
         self.assertNotEqual(detail[0]["notice_key"], detail[1]["notice_key"])
@@ -244,7 +248,7 @@ class AlertHistoryTests(unittest.TestCase):
             self.assertEqual(module.AlertPulse.query.count(), 2)
             self.assertEqual(module.AlertEvent.query.count(), 2)
 
-    def test_synchronous_path_copies_count_once_without_combining_ranges(self):
+    def test_synchronous_paths_have_independent_reminder_admission_and_ranges(self):
         from tests.test_alert_quality import historical_pulse
         epoch = self.now.replace(tzinfo=timezone.utc).timestamp()-10
         pulses = [historical_pulse(trigger=.6, peak=.7, identifier="gate"), historical_pulse(trigger=1.1, peak=1.3, identifier="bitget")]
@@ -256,11 +260,11 @@ class AlertHistoryTests(unittest.TestCase):
             module.persist_alert_pulses(pulses)
         summary = self.get(view="summary")
         group = summary["events"][0]
-        self.assertEqual((summary["total_alerts"], group["alert_count"], group["observation_count"]), (1, 1, 2))
+        self.assertEqual((summary["total_alerts"], group["alert_count"], group["observation_count"]), (2, 2, 2))
         paths = {item["long_exchange"]: item for item in group["paths"]}
         self.assertEqual(paths["Gate"]["value_ranges"]["open_spread"]["max"], .7)
         self.assertEqual(paths["Bitget"]["value_ranges"]["open_spread"]["max"], 1.3)
-        self.assertEqual(paths["Gate"]["latest"]["notice_key"], paths["Bitget"]["latest"]["notice_key"])
+        self.assertNotEqual(paths["Gate"]["latest"]["notice_key"], paths["Bitget"]["latest"]["notice_key"])
         self.assertEqual(self.get(view="detail", symbol="DEMO/USDT")["total"], 2)
 
     def test_unicode_coin_and_invalid_parameters(self):
@@ -448,6 +452,91 @@ class AlertHistoryTests(unittest.TestCase):
         with patch.object(module, "get_json", side_effect=AssertionError("no upstream")), patch.object(module.db.session, "commit", side_effect=AssertionError("no writes")):
             self.assertEqual(self.get(**params)["total"], 1)
         self.assertIn("no-store", self.client.get("/api/alerts", query_string=params).headers["Cache-Control"])
+
+    def test_repeating_pulses_are_all_recorded_but_do_not_inflate_reminder_counts(self):
+        from tests.test_alert_reminders import motion
+        epoch = self.now.replace(tzinfo=timezone.utc).timestamp()
+        pulses = [motion(.5, 1, epoch-3600, "initial")]
+        pulses += [motion(.5, 1, epoch-3000+i*50, f"repeat-{i}") for i in range(30)]
+        with module.app.app_context():
+            module.persist_alert_pulses(pulses)
+            module.db.session.remove()  # a new session must load the persisted state
+            module.persist_alert_pulses([motion(.5, 1.05, epoch-50, "minor")])
+            module.persist_alert_pulses([motion(.5, 1.2, epoch-5, "breakout")])
+            self.assertEqual(module.AlertPulse.query.count(), 33)
+            self.assertEqual(module.AlertReminderState.query.count(), 1)
+        summary = self.get(view="summary")
+        self.assertEqual((summary["total_alerts"], summary["total_observations"]), (2, 33))
+        items = self.get(view="detail", symbol="QUALITY/USDT")["items"]
+        self.assertEqual(sum(item["reminder"]["record_only"] for item in items), 31)
+        self.assertEqual(summary["events"][0]["value_ranges"]["open_spread"]["max"], 1.2)
+
+    def test_same_pulse_breakthrough_and_retry_atomically_keep_checkpoint_and_evidence(self):
+        from tests.test_alert_reminders import motion
+        epoch = self.now.replace(tzinfo=timezone.utc).timestamp()
+        first = motion(0, 1, epoch-10)
+        second = {**first, "peak": 1.2, "peak_at": epoch-5, "version": first["version"]+1}
+        with module.app.app_context():
+            module.persist_alert_pulses([first])
+            module.persist_alert_pulses([second])
+            module.persist_alert_pulses([second, first])
+            record = module.db.session.get(module.AlertPulse, first["id"])
+            saved = json.loads(record.evidence_json)
+            self.assertEqual(saved["peak"], 1.2)
+            self.assertEqual(len(saved["reminder"]["notices"]), 2)
+            third = {**second, "peak": 1.5, "peak_at": epoch-1, "version": second["version"]+1}
+            with patch.object(module.db.session, "commit", side_effect=RuntimeError("failed commit")):
+                with self.assertRaises(RuntimeError):
+                    module.persist_alert_pulses([third])
+            module.db.session.rollback()
+            module.persist_alert_pulses([third])
+            saved = json.loads(module.db.session.get(module.AlertPulse, first["id"]).evidence_json)
+            self.assertEqual(len(saved["reminder"]["notices"]), 3)
+        self.assertEqual(self.get(view="summary")["total_alerts"], 3)
+
+    def test_migration_is_silent_idempotent_and_preserves_every_raw_field(self):
+        from tests.test_alert_reminders import motion
+        epoch = self.now.replace(tzinfo=timezone.utc).timestamp()
+        originals = [motion(0, 1, epoch-500, "old-first"), motion(.5, 1, epoch-5, "old-repeat")]
+        with module.app.app_context():
+            for pulse in originals:
+                event = self.event("QUALITY/USDT", created_at=datetime.fromtimestamp(pulse["triggered_at"], timezone.utc).replace(tzinfo=None))
+                module.db.session.add(event)
+                module.db.session.flush()
+                module.db.session.add(module.AlertPulse(id=pulse["id"], alert_event_id=event.id, evidence_json=json.dumps(pulse)))
+            module.db.session.commit()
+            with patch.object(module.db.session, "commit", side_effect=RuntimeError("migration interrupted")):
+                with self.assertRaises(RuntimeError):
+                    module.initialize_alert_reminders()
+            module.db.session.rollback()
+            self.assertEqual(module.AlertReminderState.query.count(), 0)
+            self.assertEqual(module.initialize_alert_reminders(), 2)
+            self.assertEqual(module.initialize_alert_reminders(), 0)
+            for original in originals:
+                saved = json.loads(module.db.session.get(module.AlertPulse, original["id"]).evidence_json)
+                saved.pop("reminder")
+                self.assertEqual(saved, json.loads(json.dumps(original)))
+            module.persist_alert_pulses([motion(.5, 1, epoch-2, "after-deploy")])
+        data = self.get(view="summary")
+        self.assertEqual((data["total_alerts"], data["total_observations"]), (1, 3))
+        self.assertEqual(data["active_events"], [])
+
+    def test_screened_repeat_stays_visible_as_data_but_never_becomes_a_new_tip(self):
+        from tests.test_alert_screening import quotes, PATH, reference
+        from tests.test_alert_reminders import motion
+        epoch = self.now.replace(tzinfo=timezone.utc).timestamp()
+        old = motion(0, 1.5, epoch-600, "old", path=PATH)
+        repeated = motion(0, 1.5, epoch-3, "repeated", path=PATH)
+        repeated["screen_reference"] = {**reference(), "to_at": epoch-20, "from_at": epoch-100}
+        with module.app.app_context():
+            module.persist_alert_pulses([old, repeated])
+        live = quotes(quantity=20, long_at=epoch, short_at=epoch, metadata_at=epoch)
+        with patch.object(module.ALERT_STREAM_HUB, "screening_quotes", return_value={PATH: live}):
+            data = self.get(view="summary")
+        self.assertEqual(data["events"][0]["attention"]["tier"], "candidate")
+        self.assertEqual(data["active_events"], [])
+        self.assertEqual(data["total_alerts"], 1)
+        self.assertFalse(data["events"][0]["latest"]["audible"])
 
 
 if __name__ == "__main__":

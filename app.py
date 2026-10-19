@@ -39,6 +39,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from anomaly_streams import AlertStreamHub, Route
 from anomaly_engine import alert_round_ids, pulse_is_actionable
+from alert_reminders import admit_pulse, current_notice, reminder_count, reminder_state_id
 from alert_screening import DEFAULT_NOTIONAL, okx_contract_unit, pulse_has_watch_peak, screen_pulse
 from asset_catalog import NON_CRYPTO_BOOTSTRAP, bootstrap_category, compact_symbol, instrument_category
 from equity_spot import EXTRA_URLS as EQUITY_SPOT_URLS, METADATA_TTLS as EQUITY_SPOT_TTLS, build_snapshot as build_equity_spot_snapshot
@@ -303,6 +304,12 @@ class AlertPulse(db.Model):
     alert_event_id = db.Column(db.Integer, db.ForeignKey("alert_event.id"), nullable=False, unique=True)
     evidence_json = db.Column(db.Text, nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+
+
+class AlertReminderState(db.Model):
+    """Persistent range checkpoints; no account, position, or execution data."""
+    id = db.Column(db.String(64), primary_key=True)
+    state_json = db.Column(db.Text, nullable=False)
 
 
 class SpotDivergence(db.Model):
@@ -3290,10 +3297,60 @@ def register_alert_routes(groups, strategy, isolated=()):
     ALERT_STREAM_HUB.register(strategy, routes)
 
 
+def store_pulse_reminder(pulse, previous, states, *, seeded=False):
+    key = reminder_state_id(pulse)
+    record = states.get(key)
+    if record is None:
+        record = AlertReminderState(id=key, state_json="{}")
+        db.session.add(record)
+        states[key] = record
+    state, metadata = admit_pulse(json.loads(record.state_json), pulse, previous, seeded=seeded)
+    record.state_json = json.dumps(state, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    return {**pulse, "reminder": metadata}
+
+
+def initialize_alert_reminders():
+    """One atomic, silent migration of recent raw evidence before stream startup.
+
+    Replay final observed peaks in peak-time order (not event creation order).
+    This is conservative historical admission, not an invented tick backtest.
+    Keep every original field; add only reminder metadata. Page reads never write.
+    """
+    marker = "range-policy-1-initialized"
+    if db.session.get(AlertReminderState, marker):
+        return 0
+    cutoff = datetime.now() - timedelta(hours=24)
+    identities = [row[0] for row in db.session.query(AlertPulse.id).join(AlertEvent, AlertPulse.alert_event_id == AlertEvent.id)
+                  .filter(AlertEvent.created_at >= cutoff, AlertEvent.created_at <= datetime.now())
+                  .order_by(func.json_extract(AlertPulse.evidence_json, "$.peak_at"), AlertPulse.id).all()]
+    isolated = {}
+    for episode in SpotDivergence.query.filter(or_(SpotDivergence.resolved_at.is_(None), SpotDivergence.resolved_at >= cutoff)).all():
+        isolated.setdefault(spot_divergence_key(episode.symbol, episode.long_exchange, episode.short_exchange), []).append(episode)
+    states = {row.id: row for row in AlertReminderState.query.all()}
+    for offset in range(0, len(identities), 200):
+        records = {row.id: (row, event) for row, event in db.session.query(AlertPulse, AlertEvent).join(AlertEvent, AlertPulse.alert_event_id == AlertEvent.id).filter(AlertPulse.id.in_(identities[offset:offset+200])).all()}
+        for key in identities[offset:offset+200]:
+            record, event = records[key]
+            pulse = json.loads(record.evidence_json)
+            if "reminder" in pulse:
+                continue
+            if is_rwa_stock_pair(event.symbol) or alert_is_divergent(event, isolated):
+                pulse = {**pulse, "reminder": {"policy": 1, "notices": []}}
+            else:
+                pulse = store_pulse_reminder(pulse, None, states, seeded=True)
+            record.evidence_json = json.dumps(pulse, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        db.session.flush()
+    db.session.add(AlertReminderState(id=marker, state_json="{}"))
+    db.session.commit()
+    return len(identities)
+
+
 def persist_alert_pulses(batch):
     """Idempotent retry by pulse ID, never by the previous half-hour maximum."""
-    records = {item.id: item for item in AlertPulse.query.filter(AlertPulse.id.in_([pulse["id"] for pulse in batch])).all()}
-    for pulse in batch:
+    records = {item.id: item for item in AlertPulse.query.filter(AlertPulse.id.in_([pulse["id"] for pulse in batch])).order_by(AlertPulse.id).with_for_update().all()}
+    keys = {reminder_state_id(pulse) for pulse in batch}
+    states = {row.id: row for row in AlertReminderState.query.filter(AlertReminderState.id.in_(keys)).order_by(AlertReminderState.id).with_for_update().all()}
+    for pulse in sorted(batch, key=lambda item: (item["peak_at"], item["triggered_at"], item["id"])):
         record = records.get(pulse["id"])
         if record is None:
             strategy, symbol, long_exchange, short_exchange = pulse["path"]
@@ -3311,17 +3368,25 @@ def persist_alert_pulses(batch):
             db.session.add(record)
             records[pulse["id"]] = record
         previous = json.loads(record.evidence_json)
-        if pulse["version"] >= previous.get("version", 0):
-            record.evidence_json = json.dumps(pulse, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        if pulse["version"] > previous.get("version", 0):
+            saved = store_pulse_reminder(pulse, previous, states)
+            record.evidence_json = json.dumps(saved, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
             record.updated_at = datetime.now()
     db.session.commit()
 
 
 def background_alert_pulses():
-    ALERT_STREAM_HUB.running = True
-    reconciled, last_warning, retry_delay = 0, 0, .5
+    reconciled, last_warning, retry_delay, initialized = 0, 0, .5, False
     while True:
         try:
+            if not initialized:
+                with app.app_context():
+                    try:
+                        initialize_alert_reminders()
+                    finally:
+                        db.session.remove()
+                initialized = True
+                ALERT_STREAM_HUB.running = True
             if time.monotonic() - reconciled >= 30:
                 ALERT_STREAM_HUB.reconcile()
                 reconciled = time.monotonic()
@@ -12836,7 +12901,7 @@ def alert_pulse_read_payload(evidence, *, qualified_only=False):
     """Retain only UI/range fields after one parse; full evidence stays in DB."""
     fields = ("id", "episode", "ordinal", "metric", "direction", "baseline", "baseline_at",
               "triggered_at", "peak", "peak_at", "current", "current_at", "state",
-              "retrace_at", "ended_at", "quality", "notice_version", "noticed_at", "ranges", "path", "screen_reference")
+              "retrace_at", "ended_at", "quality", "notice_version", "noticed_at", "ranges", "path", "screen_reference", "reminder")
     parsed = json.loads(evidence)
     if qualified_only and not pulse_is_actionable(parsed):
         return None
@@ -12912,8 +12977,14 @@ def alerts():
     for item in all_events:
         grouped_events.setdefault(item.symbol, []).append(item)
     def notice_epoch(item):
-        return pulses.get(item.id, {}).get("noticed_at", item.created_at.replace(tzinfo=timezone.utc).timestamp())
+        pulse = pulses.get(item.id) or {}
+        tickets = pulse.get("reminder", {}).get("notices", [])
+        return tickets[-1]["at"] if tickets else pulse.get("noticed_at", item.created_at.replace(tzinfo=timezone.utc).timestamp())
     screening_now = time.time()
+    def count_reminders(items):
+        # Legacy non-pulse history keeps its old count; migrated and new pulses
+        # count only first/breakthrough admissions, never repeat observations.
+        return sum(reminder_count(pulses[item.id], screening_now) for item in items if pulses.get(item.id) and "reminder" in pulses[item.id]) + len({round_ids[item.id] for item in items if not pulses.get(item.id) or "reminder" not in pulses[item.id]})
     paths = {tuple(pulse["path"]) for pulse in pulses.values() if pulse and pulse.get("path")}
     live_quotes = ALERT_STREAM_HUB.screening_quotes(paths, screening_now)
     attention = {item.id: screen_pulse(pulses[item.id], live_quotes.get(tuple(pulses[item.id].get("path", []))), screening_now, notional)
@@ -12927,8 +12998,10 @@ def alerts():
         active = []
         for item in items:
             assessment, pulse = attention[item.id], pulses.get(item.id)
+            if not current_notice(pulse, screening_now):
+                continue
             age = screening_now-notice_epoch(item)
-            if assessment["live"] and (assessment["tier"] == "candidate" or 0 <= age <= 120):
+            if assessment["live"] and 0 <= age <= 120:
                 active.append(item)
             elif pulse and pulse.get("state") == "retraced" and not pulse.get("ended_at") and 0 <= age <= 30 and pulse_has_watch_peak(pulse):
                 # A whole spike can happen between two page polls. Retain one
@@ -13005,26 +13078,15 @@ def alerts():
     def event_payload(item):
         basis = alert_binance_basis(item)
         pulse = pulses.get(item.id)
+        ticket = current_notice(pulse, screening_now)
+        reminder = (pulse or {}).get("reminder")
         if pulse and not pulse.get("ended_at") and time.time() - pulse["current_at"] > 10:
             pulse = {**pulse, "state": "data_gap"}
         if pulse:
             pulse = {key: value for key, value in pulse.items() if key in {"id", "episode", "ordinal", "metric", "direction", "baseline", "baseline_at", "triggered_at", "peak", "peak_at", "current", "current_at", "state", "retrace_at", "ended_at", "quality", "notice_version"}}
-        notice_key = None
-        if pulse:
-            phase = "start"
-            if pulse.get("state") in ("expanded", "retraced"):
-                phase = pulse["state"]
-            if phase == "expanded":
-                phase += ":" + str(int(abs(pulse["peak"] - pulse["baseline"]) // (3 if pulse["metric"] == "price" else 1)))
-            if pulse.get("ordinal", 1) > 1:
-                phase = "restart:" + phase
-            notice_key = f"{round_ids[item.id]}:{phase}"
+        notice_key = ticket["key"] if ticket else None
         assessment = attention[item.id]
-        # Candidate promotion is a different notice from early observation;
-        # falling out and back in at the same stage must not ring repeatedly.
-        if notice_key:
-            notice_key += ":" + assessment["tier"]
-        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "pulse": pulse, "round_id": round_ids[item.id], "notice_key": notice_key, "attention": assessment, "audible": assessment["tier"] == "candidate" and assessment["live"], "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int((30 if assessment.get("transient") else 120) - (screening_now - notice_epoch(item)))), **alert_context(item)}
+        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "pulse": pulse, "round_id": round_ids[item.id], "notice_key": notice_key, "reminder": {"eligible": bool(ticket), "count": reminder_count({"reminder": reminder}, screening_now), "record_only": not bool(reminder["notices"])} if reminder is not None else None, "attention": assessment, "audible": bool(ticket) and assessment["tier"] == "candidate" and assessment["live"], "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int((30 if assessment.get("transient") else 120) - (screening_now - notice_epoch(item)))), **alert_context(item)}
 
     if view == "detail":
         filtered = [item for item in all_events if (not selected_strategy or alert_context(item)["strategy"] == selected_strategy) and (selected_path is None or path_key(item) == selected_path)]
@@ -13060,13 +13122,13 @@ def alerts():
         paths = []
         for key, samples in path_items.items():
             context = alert_context(samples[0])
-            paths.append({"id": key, **context, "attention": attention[max(samples, key=priority).id], "alert_count": len({round_ids[item.id] for item in samples}), "observation_count": len(samples), "latest": event_payload(samples[0]), "value_ranges": value_ranges(samples), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
+            paths.append({"id": key, **context, "attention": attention[max(samples, key=priority).id], "alert_count": count_reminders(samples), "observation_count": len(samples), "latest": event_payload(samples[0]), "value_ranges": value_ranges(samples), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
         return {
             "symbol": symbol,
             "attention": attention[max(items, key=priority).id],
             "latest": latest,
             "first_at": items[-1].created_at.strftime("%m-%d %H:%M:%S"),
-            "alert_count": len({round_ids[item.id] for item in items}),
+            "alert_count": count_reminders(items),
             "observation_count": len(items),
             "move_peaks": {
                 "open_spread": absolute_peak("open_spread", max_spread_item.open_spread if max_spread_item else None),
@@ -13087,7 +13149,7 @@ def alerts():
         "window_hours": 24,
         "screening": {"notional": notional, "min_net_edge": .30, "version": 3},
         "total_symbols": len(grouped_events),
-        "total_alerts": len(set(round_ids.values())),
+        "total_alerts": count_reminders(all_events),
         "total_observations": len(all_events),
         "isolated_paths": [spot_divergence_payload(item, now) for item in sorted(isolated, key=lambda item: (item.symbol, item.long_exchange))],
         "events": [alert_group_payload(symbol, items) for symbol, items in grouped_events.items()],

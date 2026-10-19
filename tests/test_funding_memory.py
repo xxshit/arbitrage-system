@@ -112,7 +112,9 @@ class FundingMemoryTests(unittest.TestCase):
         event.listen(module.db.engine, "before_cursor_execute", queried)
         tracemalloc.start()
         try:
-            output = module.dual_funding_statistics(groups)
+            for _ in range(4):
+                module.DUAL_FUNDING_STATISTICS_CACHE["ts"] = 0
+                output = module.dual_funding_statistics(groups)
             _, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()
@@ -120,7 +122,7 @@ class FundingMemoryTests(unittest.TestCase):
             for model in models:
                 event.remove(model, "load", loaded)
         self.assertEqual(len(output), 320)
-        self.assertEqual(len(statements), 4)  # constant query count, not per path
+        self.assertEqual(len(statements), 4*4)  # four cold refreshes, not per path
         self.assertTrue(all("GROUP BY" in statement for statement in statements))
         self.assertLess(peak, 6*1024*1024)  # 144,000 histories, only 240 summaries
 

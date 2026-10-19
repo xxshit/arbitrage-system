@@ -7289,8 +7289,46 @@ def sort_spot_groups(groups, sort_by, direction):
     return sorted(ordered, key=lambda group: numeric_key(group["rows"][0].get(sort_by) if group["rows"] else None))
 
 
+def requested_observed_symbols():
+    """Bounded read-only quote lookup for a page whose browsing order is pinned."""
+    raw = request.args.get("observed_symbols")
+    if raw is None:
+        return None
+    if len(raw) > 4096:
+        raise ValueError("浏览币种参数过长")
+    try:
+        values = json.loads(raw)
+    except (ValueError, TypeError):
+        raise ValueError("浏览币种参数格式无效") from None
+    if not isinstance(values, list) or len(values) > 30 or any(
+        not isinstance(value, str) or not value or len(value) > 80
+        or any(ord(char) < 32 for char in value) for value in values
+    ):
+        raise ValueError("每次最多读取30个浏览币种")
+    return list(dict.fromkeys(values))
+
+
+def observed_market_groups(groups, requested):
+    # Resolve only against this request's filtered universe, never bypass filters.
+    by_symbol = {group["symbol"]: group for group in groups}
+    return [by_symbol[symbol] for symbol in requested if symbol in by_symbol]
+
+
+def market_rank_identities(groups):
+    # Pinned clients need only current rank identities plus full watched quotes.
+    # Do not double the transfer of funding/index/chain details every five seconds.
+    return [{"symbol": group["symbol"], "rows": [
+        {key: row[key] for key in ("long_exchange", "short_exchange") if key in row}
+        for row in group["rows"]
+    ]} for group in groups]
+
+
 @app.get("/api/spot-futures")
 def spot_futures():
+    try:
+        observed = requested_observed_symbols()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     page = max(request.args.get("page", 1, type=int), 1)
     page_size = 30
     binance_spot_only = request.args.get("binance_spot_only") == "1"
@@ -7345,8 +7383,12 @@ def spot_futures():
     page = min(page, pages)
     start = (page - 1) * page_size
     page_symbols = symbols[start:start + page_size]
-    enrich_transfer_networks(page_symbols)
+    observed_groups = observed_market_groups(symbols, observed) if observed is not None else []
+    enrich_transfer_networks(observed_groups if observed is not None else page_symbols)
     payload = {**snapshot, "page": page, "pages": pages, "page_size": page_size, "total_symbols": total, "binance_spot_only": binance_spot_only, "binance_alpha_only": binance_alpha_only, "binance_alpha_catalog_updated_at": alpha_catalog_updated_at, "binance_alpha_catalog_stale": alpha_catalog_stale, "funding_interval": funding_interval, "symbol_query": symbol_query, "sort_by": sort_by, "sort_direction": sort_direction, "symbols": page_symbols}
+    if observed is not None:
+        payload["symbols"] = market_rank_identities(page_symbols)
+        payload["observed_symbols"] = observed_groups
     return jsonify(payload)
 
 
@@ -7513,6 +7555,10 @@ def hedge_positions_api():
 
 @app.get("/api/dual-futures")
 def dual_futures():
+    try:
+        observed = requested_observed_symbols()
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     page = max(request.args.get("page", 1, type=int), 1)
     page_size = 30
     raw_symbol_query = "".join(request.args.get("symbol", "").upper().split())
@@ -7573,7 +7619,11 @@ def dual_futures():
     pages = max((total + page_size - 1) // page_size, 1)
     page = min(page, pages)
     start = (page - 1) * page_size
-    return jsonify({**snapshot, "page": page, "pages": pages, "page_size": page_size, "total_symbols": total, "symbol_query": symbol_query, "sort_by": sort_by, "sort_direction": sort_direction, "include_bybit_okx": include_bybit_okx, "symbols": symbols[start:start + page_size]})
+    payload = {**snapshot, "page": page, "pages": pages, "page_size": page_size, "total_symbols": total, "symbol_query": symbol_query, "sort_by": sort_by, "sort_direction": sort_direction, "include_bybit_okx": include_bybit_okx, "symbols": symbols[start:start + page_size]}
+    if observed is not None:
+        payload["symbols"] = market_rank_identities(symbols[start:start + page_size])
+        payload["observed_symbols"] = observed_market_groups(symbols, observed)
+    return jsonify(payload)
 
 
 @app.get("/api/symbol-suggestions")

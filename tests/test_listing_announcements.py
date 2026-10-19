@@ -79,8 +79,11 @@ class ListingAnnouncementTests(unittest.TestCase):
         script = (root / "static" / "app.js").read_text(encoding="utf-8")
         styles = (root / "static" / "style.css").read_text(encoding="utf-8")
         self.assertIn("/api/market-metadata/delisted-symbols", script)
-        self.assertIn("replaceHtmlKeepingExchangeLogos(byId('spotFuturesRows')", script)
-        self.assertIn("replaceHtmlKeepingExchangeLogos(byId('dualFuturesRows')", script)
+        self.assertIn("renderMarketGroups('spot',groups,", script)
+        self.assertIn("renderMarketGroups('dual',groups,", script)
+        renderer = script.split("function renderMarketGroups(", 1)[1].split("// End stable browsing helpers.", 1)[0]
+        self.assertIn("scope==='spot'?'spotFuturesRows':'dualFuturesRows'", renderer)
+        self.assertIn("replaceHtmlKeepingExchangeLogos(byId(targetId)", renderer)
         self.assertIn("data-market-symbol", script)
         self.assertIn("data-delisting-announced", script)
         self.assertIn("delistingAssetBases", script)

@@ -27,6 +27,13 @@ const route=(long,index)=>({long_exchange:long,short_exchange:'Binance',open_spr
 const groups=[['ONE',['Bybit']],['TWO',['Bybit','OKX']],['THREE',['Bybit','OKX','Gate']]].map(([symbol,venues])=>({
   symbol:symbol+'/USDT',...Object.fromEntries(periods.map((p,index)=>['binance_change_'+p,index+.25])),rows:venues.map(route)}));
 
+test('missing pinned dual route retains venue identities without fake zero quotes or funding caps',()=>{
+  const html=harness().dualRowsCompact([{symbol:'A/USDT',rows:[{long_exchange:'Bybit',short_exchange:'Binance',_unavailable:true}]}]);
+  assert.ok(html.includes('EXCHANGE:Bybit'));assert.ok(html.includes('EXCHANGE:Binance'));assert.ok(html.includes('暂无行情'));
+  assert.ok(!html.includes('0.0000%'));assert.ok(!html.includes('2%'));assert.ok(!html.includes('0.000000'));
+  assert.equal((html.match(/<td\b/g)||[]).length,5);
+});
+
 test('compact dual keeps five aligned columns for one, two and three paths',()=>{
   const markup=harness().dualRowsCompact(groups),rows=[...markup.matchAll(/<tr[^>]*>(.*?)<\/tr>/g)].map(match=>match[1]);
   const active=Array(5).fill(null);let routeIndex=0;

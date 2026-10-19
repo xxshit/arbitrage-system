@@ -16,7 +16,7 @@ function harness(){
     clearTimeout(id){timers.delete(id)},setInterval(){return 0},clearInterval(){},
     activeViewId:()=>context.active,active:'dashboard',authState:{is_admin:false},
     renderAlertStreamStatus(){},alertNoticeMemory:new Map(),alertNotional:1000,alertSummaryVersion:0,latestAlertGroups:[],clearAlertCurrent(){},
-    document:{querySelectorAll:()=>[]},
+    document:{querySelectorAll:()=>[]},applyGroupFrameClasses(){},
     byId(id){if(!elements.has(id))elements.set(id,{textContent:''});return elements.get(id)},
     fetch:async()=>({ok:true,json:async()=>({items:[]})}),
   };
@@ -27,6 +27,7 @@ function harness(){
   }
   context.loadDelistedMarketSymbols=async()=>{};
   vm.createContext(context);vm.runInContext(tracking+networkHelper+source.slice(source.indexOf('function divergenceLabel('),source.indexOf('function spotTransferStatus(')),context);
+  vm.runInContext(source.slice(source.indexOf('class MarketBrowseOrder'),source.indexOf('// End stable browsing helpers.')),context);
   vm.runInContext('renderPageRefreshIndicator=()=>{};',context);
   const flush=async()=>{for(let i=0;i<15;i++)await Promise.resolve()};
   return {context,timers,flush,now:()=>now,run:code=>vm.runInContext(code,context),async advance(ms){
@@ -247,6 +248,97 @@ test('spot current request failure retains previous rows without automatic retry
   h.requests[0].reject(new Error('network failed'));assert.equal(await first,false);await h.advance(0);
   assert.equal(h.context.byId('spotFuturesRows').innerHTML,'previous rows');assert.equal(h.requests.length,1);
   assert.equal(h.run('pageRefreshState("spot-futures").failed'),true);
+});
+
+function browseHarness(scope){
+  const h=spotLoaderHarness(),dual=scope==='dual';
+  if(dual){
+    Object.assign(h.context,{active:'dual-futures',dualFuturesPage:1,dualFuturesLoading:false,dualFuturesHasData:true,
+      dualFuturesSearch:'',dualSort:{key:'open_spread',direction:'desc'},dualIncludeBybitOkx:false,
+      dualSortLabels:{open_spread:'开差'},updateDualSortHeaders(){},showDualRefreshCountdown(){},dualRowsCompact:groups=>groups.map(group=>group.symbol).join(',')});
+    h.run(source.slice(source.indexOf('async function loadDualFutures('),source.indexOf('function addDualLiquidityHeader(')));
+  }
+  const name=dual?'loadDualFutures':'loadSpotFutures',state=()=>h.run(`marketBrowseStates.${scope}`);
+  const group=(symbol,price,venues=dual?['Bybit','OKX']:['Gate','Bitget'])=>({symbol,rows:venues.map((venue,i)=>({long_exchange:venue,short_exchange:'Binance',open_spread:price+i,close_spread:price-i}))});
+  const data=(groups,observed)=>({...h.payload('unused'),symbols:groups,total_symbols:60,pages:2,...(observed?{observed_symbols:observed}:{})});
+  const resolve=async(payload)=>{h.requests.at(-1).resolve(payload);await h.flush()};
+  h.run('installPageRefreshTracking()');
+  return {...h,scope,state,group,data,resolve,load:()=>h.context[name](),lock:()=>h.context.lockMarketBrowse(scope),resort:()=>h.context.resortMarket(scope)};
+}
+
+for(const scope of ['spot','dual']){
+  test(`${scope}: browsing pins coin membership and paths while off-page quotes and risk metadata update`,async()=>{
+    const h=browseHarness(scope),{group,data}=h;
+    h.load();await h.resolve(data([group('A',1),group('B',2)]));h.lock();
+    const freshA=group('A',91);freshA.rows.reverse();freshA.rows[0].price_divergence={state:'confirmed'};freshA.rows.push({long_exchange:'New venue',short_exchange:'Binance',open_spread:500});
+    h.load();assert.deepEqual(JSON.parse(new URL(h.requests.at(-1).url,'http://test').searchParams.get('observed_symbols')),['A','B']);
+    await h.resolve(data([group('C',100),group('D',101)],[group('B',92),freshA]));
+    assert.equal(h.renders.at(-1),'A,B');assert.equal(h.state().displayed[0].rows[0].open_spread,91);
+    assert.equal(h.state().displayed[0].rows[1].price_divergence.state,'confirmed');assert.equal(h.state().displayed[0].rows.length,2);
+    assert.equal(h.state().changed,true);assert.equal(h.state().locked,true);
+    if(scope==='spot')assert.equal(h.run('spotOpportunityByKey.get("A|Gate").row.open_spread'),91);
+  });
+  test(`${scope}: starting to browse during an in-flight ranking refresh rejects it and fetches watched coins`,async()=>{
+    const h=browseHarness(scope);h.load();await h.resolve(h.data([h.group('A',1)]));
+    const pending=h.load();h.lock();await h.resolve(h.data([h.group('B',2)]));assert.equal(await pending,false);
+    assert.equal(h.renders.at(-1),'A');await h.advance(0);assert.equal(h.requests.length,3);
+    assert.ok(h.requests.at(-1).url.includes('observed_symbols='));await h.resolve(h.data([h.group('B',2)],[h.group('A',3)]));
+    assert.equal(h.state().displayed[0].rows[0].open_spread,3);
+  });
+  test(`${scope}: re-sort discards a pending pinned response, applies latest ranking once and stays fixed`,async()=>{
+    const h=browseHarness(scope);h.load();await h.resolve(h.data([h.group('A',1)]));h.lock();
+    h.load();h.resort();await h.resolve(h.data([h.group('B',2)],[h.group('A',3)]));await h.advance(0);
+    assert.ok(!h.requests.at(-1).url.includes('observed_symbols='));await h.resolve(h.data([h.group('B',4)]));
+    assert.equal(h.renders.at(-1),'B');assert.equal(h.state().locked,true);assert.equal(h.state().changed,false);
+    await h.advance(0);assert.equal(h.requests.length,3);
+  });
+  test(`${scope}: missing paths are placeholders, not cached numbers; recovery reuses original slot`,async()=>{
+    const h=browseHarness(scope);h.load();await h.resolve(h.data([h.group('A',1),h.group('B',2)]));h.lock();
+    const partial=h.group('A',9);partial.rows.pop();h.load();await h.resolve(h.data([partial],[partial]));
+    const shown=h.state().displayed;assert.equal(shown[0].rows[1]._unavailable,true);assert.equal(shown[0].rows[1].open_spread,undefined);
+    assert.equal(shown[1].rows[0]._unavailable,true);assert.equal(h.state().missing,3);
+    if(scope==='spot'){assert.equal(h.run('spotOpportunityByKey.has("A|Bitget")'),false);assert.equal(h.run('spotOpportunityByKey.has("B|Gate")'),false)}
+    h.load();await h.resolve(h.data([h.group('B',6)],[h.group('B',6),h.group('A',7)]));
+    assert.equal(h.renders.at(-1),'A,B');assert.equal(h.state().displayed[1].rows[0].open_spread,6);assert.equal(h.state().missing,0);
+  });
+  test(`${scope}: failure or a missing watched payload cannot mark old quotes fresh`,async()=>{
+    const h=browseHarness(scope);h.load();await h.resolve(h.data([h.group('A',1)]));h.lock();
+    const pending=h.load();await h.resolve(h.data([h.group('B',2)]));assert.equal(await pending,false);
+    assert.equal(h.renders.at(-1),'A');assert.equal(h.state().displayed[0].rows[0].open_spread,1);
+    await h.advance(0);assert.equal(h.requests.length,2);
+  });
+  test(`${scope}: explicit context changes clear lock and old ABA responses cannot render`,async()=>{
+    const h=browseHarness(scope);h.load();await h.resolve(h.data([h.group('A',1)]));h.lock();
+    h.load();h.context.resetMarketBrowse(scope);h.context.resetMarketBrowse(scope);
+    await h.resolve(h.data([h.group('B',2)],[h.group('A',3)]));await h.advance(0);
+    assert.ok(!h.requests.at(-1).url.includes('observed_symbols='));await h.resolve(h.data([h.group('C',4)]));
+    assert.equal(h.renders.at(-1),'C');assert.equal(h.state().locked,false);
+    const pageVar=scope==='spot'?'spotFuturesPage':'dualFuturesPage';h.context[pageVar]=2;h.load();
+    const page=h.data([h.group('D',5)]);page.page=2;await h.resolve(page);h.lock();assert.equal(h.state().page,2);
+  });
+  test(`${scope}: locked real loader continues five-second cadence and does not unlock while idle`,async()=>{
+    const h=browseHarness(scope);h.load();await h.resolve(h.data([h.group('A',1)]));h.lock();
+    // Start only this live view; unrelated profiles remain inert.
+    const fetch=h.context.fetch;h.context.fetch=(url,...args)=>url==='/api/runtime-rules'?Promise.resolve({ok:true,json:async()=>({items:[]})}):fetch(url,...args);
+    await h.context.startConfiguredPageTimers();
+    for(let step=1;step<=3;step++){
+      await h.advance(5000);assert.ok(h.requests.at(-1).url.includes('observed_symbols='));
+      await h.resolve(h.data([h.group('B',step)],[h.group('A',step+10)]));
+      assert.equal(h.state().displayed[0].rows[0].open_spread,step+10);assert.equal(h.state().locked,true);
+    }
+    assert.equal(h.requests.length,4);
+  });
+}
+
+test('both scanner states are independent and all explicit filter/page/sort handlers reset the proper lock',()=>{
+  const h=browseHarness('dual');h.run('marketBrowseStates.spot.locked=true;marketBrowseStates.dual.locked=true;resetMarketBrowse("spot")');
+  assert.equal(h.run('marketBrowseStates.spot.locked'),false);assert.equal(h.state().locked,true);
+  for(const [scope,names] of Object.entries({spot:['setSpotSortFromPicker','toggleSpotSortDirection','setSpotSort','changeSpotFuturesPage','selectSpotFuturesPage','setBinanceSpotFilter','setBinanceAlphaFilter','setSpotFundingInterval','setSpotFuturesSearch'],dual:['setDualSortFromPicker','toggleDualSortDirection','setDualSort','setDualIncludeBybitOkx','changeDualFuturesPage','selectDualFuturesPage','setDualFuturesSearch']})){
+    for(const name of names){const line=source.split('\n').find(line=>line.startsWith('function '+name+'('));assert.ok(line.includes(`resetMarketBrowse('${scope}')`),name)}
+  }
+  const hooks=source.slice(source.indexOf('function installMarketBrowseLocks'),source.indexOf('function marketScrollAnchor'));
+  for(const event of ['wheel','touchstart','pointerdown','pointerover','focusin','keydown'])assert.ok(hooks.includes(`'${event}'`));
+  assert.ok(!hooks.includes("addEventListener('scroll'"));assert.ok(!hooks.includes('setTimeout'));
 });
 
 function enableSpotHeader(h){

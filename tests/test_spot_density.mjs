@@ -50,6 +50,17 @@ test('each venue keeps its own edge, wallet control and hedge action while share
   assert.ok(!markup.includes('trendLights'));assert.ok(!markup.includes('fetch('));
 });
 
+test('missing pinned spot routes cannot show cached prices or enable a hedge; live contract metrics still update',()=>{
+  const context=harness(),missing={long_exchange:'Gate',_unavailable:true};
+  let markup=context.spotRows([{symbol:'A/USDT',rows:[missing,row('Bitget')]}]);
+  const rows=[...markup.matchAll(/<tr[^>]*>(.*?)<\/tr>/g)].map(match=>match[1]);
+  assert.ok(rows[0].includes('暂无行情'));assert.ok(rows[0].includes('disabled title="路径暂不可用"'));
+  assert.ok(!rows[0].includes('openHedgePositionBuilder'));assert.ok(rows[0].includes('FUNDING:0.03'));
+  assert.ok(rows[1].includes('openHedgePositionBuilder'));assert.ok(!rows[1].includes('disabled'));
+  markup=context.spotRows([{symbol:'A/USDT',rows:[missing]}]);
+  assert.ok(!markup.includes('undefined%'));assert.ok(!markup.includes('0%'));assert.ok(!markup.includes('undefinedH'));
+});
+
 test('header reorder is idempotent and preserves the original header nodes',()=>{
   const context=harness(),original=Array.from({length:12},(_,index)=>({index}));
   const header={children:[...original],dataset:{},appendChild(node){this.children.splice(this.children.indexOf(node),1);this.children.push(node)}};

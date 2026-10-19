@@ -128,12 +128,22 @@
   ];
   fixtures['/api/market-metadata/delisted-symbols']={symbols:['DEMO/USDT','SAMPLE/USDT'],events:listingSamples,updated_at:new Date().toISOString()};
   fixtures['/api/daily-report/listings']={events:[...listingSamples,...Array.from({length:57},(_,index)=>({...listingSample,id:index+5,symbol:`TEST${index}/USDT`,matched_symbols:[],exchange:'Bitget',source_url:'https://www.bitget.com/support/articles/preview-only',effective_time_status:'not_stated'}))],automation_status:[]};
+  // Opt-in moving rankings prove pinning across pages while every poll changes quotes.
+  const movingRank=new URLSearchParams(location.search).get('rank_preview')==='1',rankTicks={};
   window.fetch = async (input, options={}) => {
     const method = String(options.method || 'GET').toUpperCase();
     if (method !== 'GET') return Response.json({error:'隔离预览禁止写入'}, {status:405});
     const url = new URL(String(input), location.origin),path=url.pathname;
     if (!(path in fixtures)) return Response.json({error:`未定义的合成接口 ${path}`}, {status:404});
     const payload = structuredClone(fixtures[path]);
+    if(movingRank&&['/api/spot-futures','/api/dual-futures'].includes(path)){
+      const tick=rankTicks[path]=(rankTicks[path]||0)+1,seed=payload.symbols[0];
+      while(payload.symbols.length<65){const index=payload.symbols.length;payload.symbols.push({...structuredClone(seed),symbol:`RANK${String(index).padStart(2,'0')}/USDT`})}
+      payload.symbols.forEach((group,index)=>group.rows.forEach((row,route)=>{
+        row.open_spread=((index+tick*13)%65)/10+(tick%2?route:-route)*.03+tick*.001;
+        row.long_ask=1+tick*.01+index*.001;row.close_spread=row.open_spread-.02;
+      }));
+    }
     if(path==='/api/spot-futures'){
       const key=url.searchParams.get('sort_by')||'open_spread',direction=url.searchParams.get('sort_direction')||'desc',sign=direction==='desc'?-1:1;
       const compare=(a,b)=>Number.isFinite(a)?Number.isFinite(b)?sign*(a-b):-1:Number.isFinite(b)?1:0;
@@ -143,7 +153,19 @@
       groups.sort((a,b)=>compare(a.rows[0][key],b.rows[0][key]));
       const pages=Math.max(1,Math.ceil(groups.length/30)),page=Math.min(pages,Number(url.searchParams.get('page'))||1);
       Object.assign(payload,{symbols:groups.slice((page-1)*30,page*30),total_symbols:groups.length,pages,page,sort_by:key,sort_direction:direction});
+      if(url.searchParams.has('observed_symbols')){const observed=JSON.parse(url.searchParams.get('observed_symbols'));payload.observed_symbols=groups.filter(group=>observed.includes(group.symbol))}
     }
+    if(path==='/api/dual-futures'){
+      const query=(url.searchParams.get('symbol')||'').toUpperCase(),key=url.searchParams.get('sort_by')||'open_spread',sign=url.searchParams.get('sort_direction')==='asc'?1:-1;
+      let groups=payload.symbols.filter(group=>!query||group.symbol.includes(query));
+      if(url.searchParams.get('include_bybit_okx')!=='1')groups=groups.map(group=>({...group,rows:group.rows.filter(row=>row.long_exchange!=='Bybit'||row.short_exchange!=='OKX')})).filter(group=>group.rows.length);
+      if(movingRank)groups.forEach(group=>group.rows.sort((a,b)=>sign*(a[key]-b[key])));
+      groups.sort((a,b)=>sign*(Math.max(...a.rows.map(row=>row[key]||0))-Math.max(...b.rows.map(row=>row[key]||0))));
+      const pages=Math.max(1,Math.ceil(groups.length/30)),page=Math.min(pages,Number(url.searchParams.get('page'))||1);
+      Object.assign(payload,{symbols:groups.slice((page-1)*30,page*30),total_symbols:groups.length,pages,page,include_bybit_okx:url.searchParams.get('include_bybit_okx')==='1'});
+      if(url.searchParams.has('observed_symbols')){const observed=JSON.parse(url.searchParams.get('observed_symbols'));payload.observed_symbols=groups.filter(group=>observed.includes(group.symbol))}
+    }
+    if(payload.observed_symbols)payload.symbols=payload.symbols.map(group=>({symbol:group.symbol,rows:group.rows.map(row=>({long_exchange:row.long_exchange,short_exchange:row.short_exchange}))}));
     if(path==='/api/alerts'){
       if(url.searchParams.get('view')==='detail'){
         const symbol=url.searchParams.get('symbol'),strategy=url.searchParams.get('strategy')||null,path_id=url.searchParams.get('path')||null,group=alertGroups.find(item=>item.symbol===symbol),items=(group?.timeline||[]).filter(item=>(!strategy||item.strategy===strategy)&&(!path_id||item.path_id===path_id)),size=Math.min(100,Number(url.searchParams.get('page_size'))||40),pages=Math.max(1,Math.ceil(items.length/size)),page=Math.min(pages,Number(url.searchParams.get('page'))||1);

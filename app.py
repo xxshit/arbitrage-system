@@ -3455,7 +3455,8 @@ def background_alert_pulses():
                         db.session.remove()
                 initialized = True
                 ALERT_STREAM_HUB.running = True
-            if time.monotonic() - reconciled >= 30:
+                ALERT_STREAM_HUB.start_quote_refresh()
+            if ALERT_STREAM_HUB.subscription_dirty.is_set() or time.monotonic() - reconciled >= 30:
                 ALERT_STREAM_HUB.reconcile()
                 reconciled = time.monotonic()
             batch = ALERT_STREAM_HUB.batch()

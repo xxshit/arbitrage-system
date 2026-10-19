@@ -1,7 +1,7 @@
 """Public, unauthenticated market streams for the alert centre only.
 
-No keys, account endpoints, Lark messages or order methods exist here. REST is
-used by the existing application for instrument discovery, never as a fake tick.
+No keys, account endpoints, Lark messages or order methods exist here. Bounded
+public order-book snapshots can confirm quiet symbols, never as a fake tick.
 All outputs are full BBOs, not incremental L2 books. Bybit ticker deltas
 are applied only after a connection-local full snapshot.
 """
@@ -94,7 +94,7 @@ def parse_frame(feed, message, received, ticker_state=None):
             if data["topic"] != "tickers." + symbol:
                 return []
             previous = ticker_state.get(symbol) if ticker_state is not None else None
-            if previous and (stamp < previous["at"] or seq <= previous["sequence"]):
+            if previous and (stamp < previous["at"] or seq < previous["sequence"] or (stamp == previous["at"] and seq == previous["sequence"])):
                 return []
             if data.get("type") == "snapshot":
                 merged = {}
@@ -104,7 +104,10 @@ def parse_frame(feed, message, received, ticker_state=None):
                 return []  # never reconstruct from a prior socket or an incomplete seed
             fields = ("bid1Price", "ask1Price", "bid1Size", "ask1Size")
             merged.update((name, item[name]) for name in fields if name in item)
+            if previous and seq == previous["sequence"] and merged != previous["fields"]:
+                return []  # same sequence may confirm unchanged BBO, not change it
             book(symbol, *(merged[name] for name in fields), stamp, seq)
+            output[-1]["sequence_kind"] = "bybit_ticker"
             if ticker_state is not None:
                 ticker_state[symbol] = dict(fields=merged, at=stamp, sequence=seq)
         elif feed == "bitget" and data.get("arg", {}).get("topic") == "ticker" and data.get("action") == "snapshot":
@@ -169,6 +172,8 @@ class AlertStreamHub:
         self.owners = {}
         self.loop = None
         self.loop_delays = deque(maxlen=120)
+        self.subscription_dirty = threading.Event()
+        self.quote_refresh = None
 
     def _updates(self, updates):
         for update in updates:
@@ -177,6 +182,7 @@ class AlertStreamHub:
     def register(self, strategy, routes, now=None):
         now = time.time() if now is None else now
         with self.lock:
+            prior_keys = set(self.by_key)
             incoming = {route.path: route for route in routes}
             for path in [p for p in self.routes if p[0] == strategy and incoming.get(p) != self.routes[p]]:
                 self._updates(self.detector.reset(path, now, "isolated" if path not in incoming else "data_gap"))
@@ -192,6 +198,8 @@ class AlertStreamHub:
                 for key in (route.long_key, route.short_key, route.mark_key):
                     if key:
                         self.by_key[key].add(route.path)
+            if prior_keys != self.by_key.keys():
+                self.subscription_dirty.set()
 
     def invalidate(self, keys, now=None, owner=None):
         now = time.time() if now is None else now
@@ -254,7 +262,7 @@ class AlertStreamHub:
                     self.rejected += 1
                     counts["invalid_book"] += 1
                     return
-                if previous and item.get("sequence") is not None and previous.get("sequence") is not None and item["sequence"] < previous["sequence"]:
+                if previous and item.get("sequence_kind") == previous.get("sequence_kind") and item.get("sequence") is not None and previous.get("sequence") is not None and item["sequence"] < previous["sequence"]:
                     if not item.get("reset"):
                         self.rejected += 1
                         counts["sequence_order"] += 1
@@ -434,7 +442,14 @@ class AlertStreamHub:
                         overloaded=self.overloaded, last_persisted_at=self.last_persisted_at, checked_at=now,
                         transport="asyncio", path_quality=dict(quality), unfresh_samples=examples,
                         basis_fresh_paths=basis_fresh,
+                        quote_refresh=self.quote_refresh.status() if self.quote_refresh else {},
                         loop_delay_max_seconds=round(max(self.loop_delays, default=0), 4))
+
+    def start_quote_refresh(self):
+        if self.quote_refresh is None:
+            from quote_refresh import PublicBookRefresh
+            self.quote_refresh = PublicBookRefresh(self)
+            self.quote_refresh.start()
 
     async def _observe_loop_delay(self):
         # Scheduling delay distinguishes local CPU starvation from quote age.
@@ -493,6 +508,7 @@ class AlertStreamHub:
                     self.workers[key] = worker
                     start.append(worker)
             self.owners = {(worker.feed, symbol): worker for worker in self.workers.values() for symbol in worker.symbols}
+            self.subscription_dirty.clear()
         for worker in stop:
             if worker.future:
                 worker.future.cancel()

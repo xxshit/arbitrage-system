@@ -93,6 +93,27 @@ class Sample:
     context: dict
 
 
+HISTORY_FIELDS = {"spread": ("close_spread", "mid_spread"), "price": ("long_mid", "short_mid"), "basis": ()}
+
+
+@dataclass(slots=True)
+class HistorySample:
+    """Same evidence and precision without a separate dict for every extremum.
+
+    The full quote is still retained on actual triggers/peaks. A context dict is
+    materialized only when a history point is examined or becomes a baseline.
+    """
+    at: float
+    value: float
+    metric: str
+    first: float | None = None
+    second: float | None = None
+
+    @property
+    def context(self):
+        return dict(zip(HISTORY_FIELDS[self.metric], (self.first, self.second)))
+
+
 @dataclass
 class Track:
     # One-second buckets retain BOTH extrema and their original timestamps.
@@ -122,9 +143,9 @@ class Track:
         # Idle history needs only the fields used for displacement validation.
         # Do not retain four large quote contexts per second for every path.
         # Trigger, peak and current pulse evidence still retain full contexts.
-        fields = {"spread": ("close_spread", "mid_spread"), "price": ("long_mid", "short_mid")}.get(metric, ())
-        sample = Sample(sample.at, sample.value, {name: sample.context[name] for name in fields})
-        if self.history and all(item.value == sample.value and item.context == sample.context for item in self.history[-1]):
+        fields = HISTORY_FIELDS[metric]
+        sample = HistorySample(sample.at, sample.value, metric, *(sample.context[name] for name in fields))
+        if self.history and all((item.value, item.first, item.second) == (sample.value, sample.first, sample.second) for item in self.history[-1]):
             # A flat plateau needs only its latest real observation. Earlier
             # different extrema remain; this never coalesces a peak with a dip.
             self.history[-1] = [sample, sample]
@@ -165,15 +186,16 @@ class PulseDetector:
 
     @staticmethod
     def supported(metric, baseline, sample, threshold):
+        old, current = baseline.context, sample.context
         if metric == "spread":
             # A widening bid/ask alone is not evidence of a price displacement.
             delta = sample.value - baseline.value
-            closing = sample.context["close_spread"] - baseline.context["close_spread"]
-            middle = sample.context["mid_spread"] - baseline.context["mid_spread"]
+            closing = current["close_spread"] - old["close_spread"]
+            middle = current["mid_spread"] - old["mid_spread"]
             return delta * closing > 0 and abs(closing) >= threshold * .6 and abs(middle) >= threshold * .7
         if metric == "price":
-            long_change = 100 * math.log(sample.context["long_mid"] / baseline.context["long_mid"])
-            short_change = 100 * math.log(sample.context["short_mid"] / baseline.context["short_mid"])
+            long_change = 100 * math.log(current["long_mid"] / old["long_mid"])
+            short_change = 100 * math.log(current["short_mid"] / old["short_mid"])
             return long_change * short_change > 0 and min(abs(long_change), abs(short_change)) >= threshold * .6
         return True
 

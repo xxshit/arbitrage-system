@@ -655,9 +655,10 @@ function alertTimelineNode(item,expandedPulses=new Set()){
 }
 function alertPulseLabel(item){
   const pulse=item.pulse;if(!pulse)return alertLabel(item.type);
-  const status={watch:pulse.ordinal>1?'再次启动':'提前关注',expanded:'扩大中',retraced:pulse.direction===-1?'已反弹':'已回落',settled:'已结束',data_gap:'数据中断',isolated:'路径隔离'};
+  const status={watch:pulse.ordinal>1?'再次启动':'提前关注',expanded:'扩大中',retraced:pulse.direction===-1?'已反弹':'已回落',settled:'已结束',data_gap:'',isolated:'路径隔离'};
   const metric={spread:'开差',basis:'基差',price:'双端价格'};
-  return `${metric[pulse.metric]||'盘口'}异动 · ${status[pulse.state]||'已记录'}${item.reminder?.record_only?' · 仅记录':pulse.ordinal>1?` · 第${Number(pulse.ordinal)||1}次`:''}`;
+  const phase=Object.hasOwn(status,pulse.state)?status[pulse.state]:'';
+  return `${metric[pulse.metric]||'盘口'}异动${phase?` · ${phase}`:''}${!item.reminder?.record_only&&pulse.ordinal>1?` · 第${Number(pulse.ordinal)||1}次`:''}`;
 }
 function alertPulseKey(item){return JSON.stringify([item.id??null,item.pulse?.id??null,item.pulse?.metric,item.pulse?.baseline_at])}
 function alertPulseViewState(root,preserve=true){
@@ -674,12 +675,17 @@ function alertPulseTrace(item,expanded=false){
   if(!Number.isFinite(delta))return '';
   const down=delta<0,tone=down?'fall':delta>0?'rise':'flat',verb=down?(price?'下跌':'下降'):delta>0?(price?'上涨':'上升'):'未变';
   const value=n=>alertCompactMetric(Number.isFinite(n)?(price?100*Math.expm1((n-p.baseline)/100):n):null);
+  const noun=p.metric==='basis'?'基差':'开差',scope=p.metric==='basis'?'币安':'';
+  const direction=delta===0?`${metric}未变`:p.baseline<0&&p.peak>0?`${metric}由负转正`:p.baseline>0&&p.peak<0?`${metric}由正转负`:p.peak===0?`${metric}回到零`:`${scope}${p.peak<0?'负':'正'}${noun}${Math.abs(p.peak)>Math.abs(p.baseline)?'扩大':'收窄'}`;
+  // Signed endpoint percentages make negative widening vs narrowing explicit.
+  // Do not relabel a percentage-point displacement as a relative price return.
+  const movement=price?`<span aria-hidden="true">${down?'↓':delta>0?'↑':'—'}</span> ${metric}${verb} <b>${Math.abs(delta).toFixed(2)}<span class="alert-pulse-unit">%</span></b>`:`<span class="alert-pulse-direction">${direction}</span><b class="alert-pulse-endpoints" aria-label="起点 ${value(p.baseline)}，${down?'低点':'峰值'} ${value(p.peak)}"><span class="${changeClass(p.baseline)}">${value(p.baseline)}</span><span class="alert-pulse-arrow" aria-hidden="true">→</span><span class="${changeClass(p.peak)}">${value(p.peak)}</span></b>`;
   const peakLabel=down?'低点':'峰值',retraceLabel=down?'反弹':'回落';
   const seconds=(start,end)=>Number.isFinite(start)&&Number.isFinite(end)&&end>=start?(end-start).toFixed(1):null;
   const elapsed=seconds(p.baseline_at,p.peak_at),retrace=seconds(p.peak_at,p.retrace_at);
   const end=Number.isFinite(p.ended_at)||['settled','data_gap','isolated'].includes(p.state)?'末次':'当前';
   const title=`起点 ${value(p.baseline)}；${peakLabel} ${value(p.peak)}；${end} ${value(p.current)}${retrace!==null?`；${retrace}秒${retraceLabel}`:''}`;
-  return `<details class="alert-pulse-trace pulse-${tone}" data-alert-pulse="${escapeChatHtml(alertPulseKey(item))}"${expanded?' open':''}><summary title="${escapeChatHtml(title)}"><strong class="alert-pulse-move"><span aria-hidden="true">${down?'↓':delta>0?'↑':'—'}</span> ${metric}${verb} <b>${Math.abs(delta).toFixed(2)}<span class="alert-pulse-unit">${price?'%':' 个百分点'}</span></b></strong><span class="alert-pulse-time">${elapsed===null?'耗时未知':`${elapsed}秒内`}</span><span class="alert-pulse-expand">详情</span></summary><dl class="alert-pulse-values"><div><dt>起点${price?'（相对）':''}</dt><dd>${value(p.baseline)}</dd></div><div><dt>${peakLabel}</dt><dd>${value(p.peak)}</dd></div><div><dt>${end}</dt><dd>${value(p.current)}</dd></div></dl>${retrace!==null?`<p class="alert-pulse-note">触及${peakLabel}后 ${retrace}秒${retraceLabel}</p>`:''}<p class="alert-pulse-note">${p.metric==='basis'?'币安标记价相对指数的基差变化。':price?'价格变化以本次起点为基准。':'开差变化，不代表币价涨跌。'}${end==='末次'?'末次为历史记录，非实时报价。':''}</p></details>`;
+  return `<details class="alert-pulse-trace pulse-${tone}" data-alert-pulse="${escapeChatHtml(alertPulseKey(item))}"${expanded?' open':''}><summary title="${escapeChatHtml(title)}"><strong class="alert-pulse-move">${movement}</strong><span class="alert-pulse-time">${elapsed===null?'耗时未知':`${elapsed}秒内`}</span><span class="alert-pulse-expand">详情</span></summary><dl class="alert-pulse-values"><div><dt>起点${price?'（相对）':''}</dt><dd>${value(p.baseline)}</dd></div><div><dt>${peakLabel}</dt><dd>${value(p.peak)}</dd></div><div><dt>${end}</dt><dd>${value(p.current)}</dd></div></dl>${retrace!==null?`<p class="alert-pulse-note">触及${peakLabel}后 ${retrace}秒${retraceLabel}</p>`:''}<p class="alert-pulse-note">${p.metric==='basis'?'币安标记价相对指数的基差变化。':price?'价格变化以本次起点为基准。':'开差变化，不代表币价涨跌。'}${end==='末次'?'末次为历史记录，非实时报价。':''}</p></details>`;
 }
 function renderAlertStreamStatus(status){
   const target=byId('alertStreamStatus');if(!target)return;
@@ -695,12 +701,12 @@ function alertMetricRange(range){
 function alertPaths(group){return (Array.isArray(group?.paths)?group.paths:[]).filter(path=>path&&typeof path.id==='string'&&typeof path.strategy==='string')}
 function alertAttentionMarkup(assessment){
   if(!assessment)return '';
-  const label={candidate:'条件候选',watch:'提前关注',record:'仅记录'}[assessment.tier]||'仅记录';
+  const label={candidate:'条件候选',watch:'提前关注'}[assessment.tier]||'';
   const edge=Number.isFinite(assessment.net_edge)?` · 估算净空间 ${alertCompactMetric(assessment.net_edge)}`:'';
   const opening=assessment.live&&Number.isFinite(assessment.entry_spread)?` · 当前开差 ${alertCompactMetric(assessment.entry_spread)}`:'';
   const reverse=assessment.direction==='reverse'?` · 反向：${assessment.long_exchange}多 → ${assessment.short_exchange}空`:'';
   const explanation=`${assessment.reason||''}。${reverse} 按${assessment.notional||alertNotional} USDT多腿名义金额、等标的数量估算；首档数量仅使用50%，不足不猜深档。平仓假设取冲击前平差75分位并留10%名义价格缓冲，非保证回归；四笔保守费用预算、0.10%滑点预留、8小时不利资费已扣，不计正资费收入，实际费率与成交须另核验。`;
-  return `<div class="alert-attention ${assessment.tier==='candidate'?'candidate':assessment.tier==='watch'?'watch':''}" title="${escapeChatHtml(explanation)}"><b>${label}</b><span>${escapeChatHtml(assessment.reason||'')}${escapeChatHtml(reverse)}${opening}${edge}</span></div>`;
+  return `<div class="alert-attention ${assessment.tier==='candidate'?'candidate':assessment.tier==='watch'?'watch':''}" title="${escapeChatHtml(explanation)}">${label?`<b>${label}</b>`:''}<span>${escapeChatHtml(assessment.reason||'')}${escapeChatHtml(reverse)}${opening}${edge}</span></div>`;
 }
 function alertSelectedPath(group){return alertPaths(group).find(path=>path.id===alertDetailState.pathId)||null}
 function alertStrategyLabel(strategy){return ['spot_futures','futures_futures'].includes(strategy)?strategyLabel(strategy):'未分类'}
@@ -770,7 +776,7 @@ function renderFundingAlerts(){
 }
 function fundingDetailCard(group){
   const stale=group.status==='stale',cycle=group.change?fundingCycle(group.change):`${group.interval}H`,direction=group.rate>0?'正费率：多头付、空头收':group.rate<0?'负费率：空头付、多头收':'费率为零';
-  return `<article class="funding-detail"><header><b>${exchangeName(group.exchange)} ${escapeChatHtml(group.symbol)}</b><strong class="funding-state">${escapeChatHtml(fundingStatusLabel(group))}</strong></header><div class="funding-metrics"><div><small>${stale?'上次费率':'当前预估费率'}</small><b class="${changeClass(group.rate)}">${fundingRate(group.rate)} <em>/ ${group.interval}H</em></b></div><div><small>结算周期</small><b>${escapeChatHtml(cycle)}</b></div><div><small>上限 / 下限</small><b>${fundingRate(group.cap)} / ${fundingRate(group.floor)}</b></div></div><p class="funding-context">${direction} · 下次结算 ${fundingTime(group.next_at)} UTC${stale?' · 数据已过期，不作当前提醒':''}</p><div class="funding-history" tabindex="0" role="region" aria-label="24小时资费变化记录"><table><thead><tr><th>发现时间（UTC）</th><th>事件</th><th>费率</th><th>周期</th></tr></thead><tbody>${group.history.length?group.history.map(item=>`<tr><td>${fundingTime(item.observed_at)}</td><td>${fundingEventLabel(item)}${item.after_gap?'<small>断档后发现</small>':''}${item.settlement_at?`<small>实际结算 ${fundingTime(item.settlement_at)} UTC</small>`:''}${!item.notice?'<small>仅记录</small>':''}</td><td class="${changeClass(item.rate)}">${fundingRate(item.rate)}</td><td>${escapeChatHtml(fundingCycle(item))}</td></tr>`).join(''):'<tr><td colspan="4">当前周期已确认，尚无新变化记录。</td></tr>'}</tbody></table></div><p class="funding-context">触顶 ≠ 已切换1H；按官方周期确认。限值缺失显示“—”，不猜测。此处是合约资费事件，不代表该币所有交易路径都可套利。</p></article>`;
+  return `<article class="funding-detail"><header><b>${exchangeName(group.exchange)} ${escapeChatHtml(group.symbol)}</b><strong class="funding-state">${escapeChatHtml(fundingStatusLabel(group))}</strong></header><div class="funding-metrics"><div><small>${stale?'上次费率':'当前预估费率'}</small><b class="${changeClass(group.rate)}">${fundingRate(group.rate)} <em>/ ${group.interval}H</em></b></div><div><small>结算周期</small><b>${escapeChatHtml(cycle)}</b></div><div><small>上限 / 下限</small><b>${fundingRate(group.cap)} / ${fundingRate(group.floor)}</b></div></div><p class="funding-context">${direction} · 下次结算 ${fundingTime(group.next_at)} UTC${stale?' · 数据已过期，不作当前提醒':''}</p><div class="funding-history" tabindex="0" role="region" aria-label="24小时资费变化记录"><table><thead><tr><th>发现时间（UTC）</th><th>事件</th><th>费率</th><th>周期</th></tr></thead><tbody>${group.history.length?group.history.map(item=>`<tr><td>${fundingTime(item.observed_at)}</td><td>${fundingEventLabel(item)}${item.after_gap?'<small>断档后发现</small>':''}${item.settlement_at?`<small>实际结算 ${fundingTime(item.settlement_at)} UTC</small>`:''}</td><td class="${changeClass(item.rate)}">${fundingRate(item.rate)}</td><td>${escapeChatHtml(fundingCycle(item))}</td></tr>`).join(''):'<tr><td colspan="4">当前周期已确认，尚无新变化记录。</td></tr>'}</tbody></table></div><p class="funding-context">触顶 ≠ 已切换1H；按官方周期确认。限值缺失显示“—”，不猜测。此处是合约资费事件，不代表该币所有交易路径都可套利。</p></article>`;
 }
 function visibleAlertGroups(groups=latestAlertGroups){
   const query=alertListQuery.toUpperCase().replace(/[\s/_-]/g,'');

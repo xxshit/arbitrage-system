@@ -8,6 +8,7 @@ are applied only after a connection-local full snapshot.
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass, field
+import asyncio
 import json
 import math
 import random
@@ -35,7 +36,12 @@ def subscription(feed, symbols):
         # host's network under full-market load. Top-five snapshots bound the
         # cadence without turning incremental depth deltas into fake BBOs.
         suffix = {"bn_mark": "@markPrice@1s", "bn_future": "@depth5@500ms"}.get(feed, "@bookTicker")
-        return {"method": "SUBSCRIBE", "params": [s.lower() + suffix for s in symbols], "id": 1}
+        params = [s.lower() + suffix for s in symbols]
+        if feed == "bn_spot":
+            # bookTicker has no exchange time. A clock on the SAME socket
+            # detects a backed-up connection; receipt time alone cannot do so.
+            params.append("btcusdt@miniTicker")
+        return {"method": "SUBSCRIBE", "params": params, "id": 1}
     if feed == "gate":
         return {"time": int(time.time()), "channel": "spot.book_ticker", "event": "subscribe", "payload": list(symbols)}
     if feed == "bybit":
@@ -65,7 +71,9 @@ def parse_frame(feed, message, received, ticker_state=None):
     try:
         if feed.startswith("bn_"):
             data = data.get("data", data)
-            if feed == "bn_mark" and data.get("e") == "markPriceUpdate":
+            if feed == "bn_spot" and data.get("e") == "24hrMiniTicker" and data.get("s") == "BTCUSDT":
+                output.append(dict(clock_only=True, at=float(data["E"]) / 1000))
+            elif feed == "bn_mark" and data.get("e") == "markPriceUpdate":
                 output.append(dict(symbol=data["s"], mark=float(data["p"]), index=float(data["i"]),
                                    funding=float(data["r"]) * 100, at=float(data["E"]) / 1000))
             elif feed == "bn_future" and data.get("e") == "depthUpdate":
@@ -157,6 +165,8 @@ class AlertStreamHub:
         self.persistence_error = False
         self.last_persisted_at = None
         self.overloaded = False
+        self.owners = {}
+        self.loop = None
 
     def _updates(self, updates):
         for update in updates:
@@ -180,11 +190,13 @@ class AlertStreamHub:
                     if key:
                         self.by_key[key].add(route.path)
 
-    def invalidate(self, keys, now=None):
+    def invalidate(self, keys, now=None, owner=None):
         now = time.time() if now is None else now
         with self.lock:
             affected = set()
             for key in keys:
+                if owner is not None and self.owners.get(key) is not owner:
+                    continue  # a retired socket must never erase its successor
                 self.books.pop(key, None)
                 self.marks.pop(key, None)
                 self.evaluated_at.pop(key, None)
@@ -196,10 +208,12 @@ class AlertStreamHub:
                 self.dirty.add(path)
                 self._updates(self.detector.reset(path, now))
 
-    def ingest(self, feed, item, received=None):
+    def ingest(self, feed, item, received=None, owner=None):
         now = time.time() if received is None else received
         key = (feed, item["symbol"])
         with self.lock:
+            if owner is not None and self.owners.get(key) is not owner:
+                return
             counts = self.frame_counts[feed]
             counts["received"] += 1
             # Fail visibly instead of exhausting RAM during a prolonged DB
@@ -282,7 +296,9 @@ class AlertStreamHub:
                         continue
                 self.fresh[path] = now
                 self.dirty.discard(path)
-                context["screen_reference"] = self.noise.setdefault(path, NoiseWindow()).observe(now, context)
+                if path not in self.noise:
+                    self.noise[path] = NoiseWindow()
+                context["screen_reference"] = self.noise[path].observe(now, context)
                 self.live_quotes[path] = context
                 # Public, aligned books are observations, NOT a bullish claim.
                 for metric, value in (("spread", context["open_spread"]), ("basis", context["basis"]), ("price", 50 * (math.log(lm) + math.log(sm)))):
@@ -348,12 +364,24 @@ class AlertStreamHub:
                 state["errors"] += worker.errors
                 if worker.last_error_type:
                     state["last_error_type"] = worker.last_error_type
+                state["stale_reconnects"] = state.get("stale_reconnects", 0) + worker.stale_reconnects
+                state["stale_frames"] = state.get("stale_frames", 0) + worker.stale_frames
+                state["last_source_at"] = max(state.get("last_source_at", 0), worker.last_source_at)
             fresh = sum(now - value <= self.MAX_AGE for path, value in self.fresh.items() if path in self.routes)
             return dict(running=self.running, paths=len(self.routes), fresh_paths=fresh, feeds=dict(feeds),
                         policy_version=POLICY_VERSION, screening_ready_paths=sum(bool(window.cached.get("ready")) for window in self.noise.values()),
                         rejected_frames=self.rejected, pending=len(self.pending), persistence_error=self.persistence_error,
                         frame_counts={feed: dict(counts) for feed, counts in self.frame_counts.items()},
-                        overloaded=self.overloaded, last_persisted_at=self.last_persisted_at, checked_at=now)
+                        overloaded=self.overloaded, last_persisted_at=self.last_persisted_at, checked_at=now,
+                        transport="asyncio")
+
+    def _start_worker(self, worker):
+        # One I/O loop, not two OS threads per socket fighting for the GIL.
+        # Detection still consumes EVERY accepted frame in arrival order.
+        if self.loop is None:
+            self.loop = asyncio.new_event_loop()
+            threading.Thread(target=self.loop.run_forever, daemon=True, name="alert-stream-io").start()
+        worker.future = asyncio.run_coroutine_threadsafe(worker.run(), self.loop)
 
     def reconcile(self):
         """Subscribe the entire discovered universe, not just moving candidates."""
@@ -364,20 +392,43 @@ class AlertStreamHub:
             desired = {}
             for feed, names in symbols.items():
                 size = 40 if feed == "bitget" else 100
-                names.sort()
-                for offset in range(0, len(names), size):
-                    desired[(feed, offset // size)] = tuple(names[offset:offset + size])
+                remaining = set(names)
+                # Keep established shards stable when a symbol is listed,
+                # removed or isolated. Sorting the universe into fresh slices
+                # used to restart every later shard after one insertion.
+                for key, worker in sorted(self.workers.items()):
+                    if key[0] == feed:
+                        retained = tuple(s for s in worker.symbols if s in remaining)
+                        if retained:
+                            desired[key] = retained
+                            remaining.difference_update(retained)
+                additions = sorted(remaining)
+                for key in [key for key in desired if key[0] == feed]:
+                    count = min(size-len(desired[key]), len(additions))
+                    desired[key] += tuple(additions[:count])
+                    del additions[:count]
+                shard = 0
+                while additions:
+                    while (feed, shard) in desired:
+                        shard += 1
+                    desired[(feed, shard)] = tuple(additions[:size])
+                    del additions[:size]
             stop = [self.workers.pop(key) for key in list(self.workers) if key not in desired or self.workers[key].symbols != desired[key]]
             start = []
+            for worker in stop:
+                worker.stop.set()
+                self.invalidate([(worker.feed, symbol) for symbol in worker.symbols])
             for key, names in desired.items():
                 if key not in self.workers:
                     worker = PublicWorker(key[0], names, self)
                     self.workers[key] = worker
                     start.append(worker)
+            self.owners = {(worker.feed, symbol): worker for worker in self.workers.values() for symbol in worker.symbols}
         for worker in stop:
-            worker.stop.set()
+            if worker.future:
+                worker.future.cancel()
         for worker in start:
-            threading.Thread(target=worker.run, daemon=True, name="alert-ws-" + worker.feed).start()
+            self._start_worker(worker)
 
 
 class PublicWorker:
@@ -386,9 +437,13 @@ class PublicWorker:
         self.stop = threading.Event()
         self.connected, self.last_message, self.errors = False, 0, 0
         self.last_error_type = None
+        self.future = None
+        self.last_source_at = 0
+        self.stale_reconnects = 0
+        self.stale_frames = 0
 
-    def run(self):
-        from websockets.sync.client import connect
+    async def run(self):
+        from websockets.asyncio.client import connect
         backoff = 1
         keys = [(self.feed, symbol) for symbol in self.symbols]
         while not self.stop.is_set():
@@ -399,45 +454,96 @@ class PublicWorker:
                 # full-market feeds. Bounded receive buffers apply backpressure,
                 # never silently discard price frames. Default TLS verification
                 # and strict UTF-8 decoding remain enabled.
-                socket = connect(ENDPOINTS[self.feed], open_timeout=5, close_timeout=1,
+                socket = await connect(ENDPOINTS[self.feed], open_timeout=5, close_timeout=1,
                                  ping_interval=None, proxy=None, compression="deflate",
-                                 max_size=1048576, max_queue=16, legacy=True)
-                socket.send(json.dumps(subscription(self.feed, self.symbols)))
+                                 max_size=1048576, max_queue=16)
+                await socket.send(json.dumps(subscription(self.feed, self.symbols)))
                 ticker_state = {}  # Bybit deltas never cross a reconnect boundary
                 self.connected = True
                 self.last_message = time.time()
                 last_ping = time.monotonic()
+                lag = StreamLagGuard(self.feed, self.hub.MAX_AGE)
+                frames = 0
                 while not self.stop.is_set():
                     now = time.monotonic()
                     if now - connected_at >= 23 * 3600 or time.time() - self.last_message > 60:
                         break
                     if now - last_ping >= 20:
                         if self.feed in ("bitget", "okx"):
-                            socket.send("ping")
+                            await socket.send("ping")
                         elif self.feed == "bybit":
-                            socket.send('{"op":"ping"}')
+                            await socket.send('{"op":"ping"}')
                         elif self.feed == "gate":
-                            socket.send(json.dumps({"time": int(time.time()), "channel": "spot.ping"}))
+                            await socket.send(json.dumps({"time": int(time.time()), "channel": "spot.ping"}))
                         else:
-                            socket.ping()
+                            await socket.ping()
                         last_ping = now
                     try:
-                        message = socket.recv(timeout=2)
+                        async with asyncio.timeout(2):
+                            message = await socket.recv()
                     except TimeoutError:
                         continue
                     if not message:
                         break
                     self.last_message = time.time()
                     for item in parse_frame(self.feed, message, self.last_message, ticker_state):
-                        self.hub.ingest(self.feed, item, self.last_message)
+                        accepted = lag.observe(item, self.last_message, time.monotonic())
+                        self.last_source_at = lag.last_source_at
+                        if not accepted and not item.get("clock_only"):
+                            self.stale_frames += 1
+                        if lag.expired:
+                            self.stale_reconnects += 1
+                            raise StaleStreamError()
+                        if accepted:
+                            self.hub.ingest(self.feed, item, self.last_message, owner=self)
+                    frames += 1
+                    if frames % 16 == 0:
+                        await asyncio.sleep(0)  # let other sockets and pongs run
             except Exception as error:
                 # Never log server payloads, headers, or exception URLs.
                 self.errors += 1
                 self.last_error_type = type(error).__name__
             finally:
                 self.connected = False
-                if socket:
-                    socket.close()
-                self.hub.invalidate(keys)
+                try:
+                    if socket:
+                        await socket.close()
+                except Exception as error:
+                    self.errors += 1
+                    self.last_error_type = type(error).__name__
+                finally:
+                    self.hub.invalidate(keys, owner=self)
             backoff = 1 if time.monotonic() - connected_at > 60 else min(60, backoff * 2)
-            self.stop.wait(backoff + random.random())
+            await asyncio.sleep(backoff + random.random())
+
+
+class StaleStreamError(Exception):
+    """Only a safe type name is surfaced, never exchange payloads or URLs."""
+
+
+class StreamLagGuard:
+    """Reconnect a continuously stale socket, rather than drain old data forever.
+
+    A five-second stale streak triggers reconnect with the normal capped backoff.
+    Fresh books keep their real timestamps. No gap is bridged by an invented tick.
+    Binance spot additionally needs a fresh exchange clock from the same socket;
+    its individual book timestamps remain honestly labeled 'receipt'.
+    """
+    def __init__(self, feed, max_age):
+        self.feed, self.max_age = feed, max_age
+        self.last_source_at = 0
+        self.stale_since = None
+        self.expired = False
+
+    def observe(self, item, received, monotonic):
+        clock = item.get("clock_only", False)
+        if clock or self.feed != "bn_spot":
+            self.last_source_at = item["at"]
+        fresh = finite(self.last_source_at) and -2 <= received-self.last_source_at <= self.max_age
+        if fresh:
+            self.stale_since = None
+        else:
+            if self.stale_since is None:
+                self.stale_since = monotonic
+            self.expired = monotonic-self.stale_since >= 5
+        return fresh and not clock

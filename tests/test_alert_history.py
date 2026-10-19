@@ -286,9 +286,9 @@ class AlertHistoryTests(unittest.TestCase):
         from tests.test_alert_screening import reference
         engine, updates = PulseDetector(), {}
         epoch = self.now.replace(tzinfo=timezone.utc).timestamp()
-        screen_clock = patch.object(module.time, "time", return_value=epoch)
-        screen_clock.start()
-        self.addCleanup(screen_clock.stop)
+        # setUp already freezes this clock. A nested patch stopped after
+        # tearDown used to restore the outer mock and leak frozen time to
+        # subsequent real-socket tests.
         for venue, values in [("Gate", (0, 1.5, .1) if retraced else (0, 1.5))] + ([("Bitget", (-.8, .01))] if other_path else []):
             for index, value in enumerate(values):
                 context = dict(open_spread=value, close_spread=value+.04, mid_spread=value+.02,

@@ -39,7 +39,7 @@ test('pulse trace retains peak after retracement and identifies a restart below 
 test('gap and ended pulse never present their last quote as a live current value',()=>{
   const h=harness(),pulse={metric:'basis',state:'data_gap',baseline:0,baseline_at:0,peak:1,peak_at:1,current:.2,current_at:2};
   assert.ok(h.context.alertPulseTrace({pulse}).includes('<dt>末次</dt><dd>+0.20%'));
-  assert.ok(h.context.alertPulseLabel({pulse}).includes('数据中断'));
+  assert.equal(h.context.alertPulseLabel({pulse}),'基差异动');
 });
 
 test('noise filtering and empty responses cannot silently unmute a user-selected coin',()=>{
@@ -56,12 +56,12 @@ test('restart and negative pulses use unambiguous labels',()=>{
   assert.ok(h.context.alertPulseTrace({pulse}).includes('1.0秒反弹'));
 });
 
-test('range repeats are marked record-only without implying a new reminder count',()=>{
+test('range repeats hide administrative labels without implying a new reminder count',()=>{
   const h=harness(),item={pulse:{metric:'spread',state:'watch',ordinal:30},reminder:{record_only:true}};
   const label=h.context.alertPulseLabel(item);
-  assert.ok(label.includes('仅记录'));assert.ok(!label.includes('第30次'));
+  assert.ok(!label.includes('仅记录'));assert.ok(!label.includes('第30次'));
   assert.ok(h.context.alertRosterColumnsMarkup().includes('<span>提醒</span>'));
-  assert.ok(html.includes('20261019-funding-alerts-v1'));
+  assert.ok(html.includes('20261019-alert-direction-v1'));
 });
 
 test('price trace converts log prices into relative moves instead of showing a log-price as percent',()=>{
@@ -69,11 +69,11 @@ test('price trace converts log prices into relative moves instead of showing a l
   const markup=h.context.alertPulseTrace({pulse});assert.ok(markup.includes('+2.00%'));assert.ok(markup.includes('+1.00%'));
 });
 
-test('screenshot case emphasizes a 1.24 percentage-point fall and hides the three-value trace by default',()=>{
+test('signed endpoints and zero crossing are visible without opening details',()=>{
   const h=harness(),pulse={metric:'spread',direction:-1,state:'settled',baseline:.04,baseline_at:100,peak:-1.2,peak_at:112.8,current:-1.2,ended_at:114},original=JSON.stringify(pulse);
   const markup=h.context.alertPulseTrace({id:42,pulse}),summary=markup.match(/<summary[^>]*>(.*?)<\/summary>/s)[1].replace(/<[^>]+>/g,'');
-  for(const text of ['↓','开差下降','1.24','个百分点','12.8秒内','详情'])assert.ok(summary.includes(text),text);
-  for(const text of ['起点','低点','末次','+0.04%','-1.20%','→'])assert.ok(!summary.includes(text),text);
+  for(const text of ['开差由正转负','+0.04%','-1.20%','→','12.8秒内','详情'])assert.ok(summary.includes(text),text);
+  for(const text of ['个百分点','末次','数据中断','仅记录'])assert.ok(!summary.includes(text),text);
   assert.ok(markup.includes('pulse-fall'));assert.ok(!markup.match(/<details[^>]*\sopen/));
   for(const text of ['<dt>起点</dt><dd>+0.04%','<dt>低点</dt><dd>-1.20%','<dt>末次</dt><dd>-1.20%','非实时报价'])assert.ok(markup.includes(text),text);
   assert.equal(JSON.stringify(pulse),original);
@@ -81,17 +81,36 @@ test('screenshot case emphasizes a 1.24 percentage-point fall and hides the thre
 
 test('direction describes the change, not the sign of the final spread or a claim about coin prices',()=>{
   const h=harness(),markup=h.context.alertPulseTrace({pulse:{metric:'spread',baseline:-1.2,peak:-.4,current:-.5,baseline_at:1,peak_at:3}});
-  assert.ok(markup.includes('pulse-rise'));assert.ok(markup.includes('开差上升'));assert.ok(markup.includes('0.80'));
+  assert.ok(markup.includes('pulse-rise'));assert.ok(markup.includes('负开差收窄'));assert.ok(markup.includes('-1.20%'));assert.ok(markup.includes('-0.40%'));
   assert.ok(markup.includes('开差变化，不代表币价涨跌'));assert.ok(!markup.includes('开差上涨'));
 });
 
 test('basis and relative price summaries keep distinct names and units',()=>{
   const h=harness(),basis=h.context.alertPulseTrace({pulse:{metric:'basis',baseline:.2,peak:.7,current:.5}});
-  assert.ok(basis.includes('币安基差上升'));assert.ok(basis.includes('0.50'));assert.ok(basis.includes('个百分点'));
+  assert.ok(basis.includes('币安正基差扩大'));assert.ok(basis.includes('+0.20%'));assert.ok(basis.includes('+0.70%'));assert.ok(!basis.includes('个百分点'));
   for(const ratio of [1.02,.98]){
     const price=h.context.alertPulseTrace({pulse:{metric:'price',baseline:100*Math.log(100),peak:100*Math.log(100*ratio),current:100*Math.log(100)}});
     assert.ok(price.includes(ratio>1?'双端价格上涨':'双端价格下跌'));assert.ok(price.includes('2.00<span class="alert-pulse-unit">%'));assert.ok(!price.includes('个百分点'));
   }
+});
+
+test('all signed spread directions show the actual frozen baseline and extreme in the collapsed row',()=>{
+  const h=harness();
+  for(const [baseline,peak,label] of [[-.6,-1.27,'负开差扩大'],[-1.27,-.6,'负开差收窄'],[.2,.8,'正开差扩大'],[.8,.2,'正开差收窄'],[-.2,.5,'开差由负转正'],[.2,-.5,'开差由正转负'],[-.5,0,'开差回到零'],[0,-.5,'负开差扩大'],[0,.5,'正开差扩大'],[.5,.5,'开差未变']]){
+    const markup=h.context.alertPulseTrace({pulse:{metric:'spread',baseline,peak,current:0,baseline_at:1,peak_at:3}}),summary=markup.match(/<summary[^>]*>(.*?)<\/summary>/s)[1];
+    assert.ok(summary.includes(label),label);
+    assert.ok(summary.includes(h.context.alertCompactMetric(baseline)));
+    assert.ok(summary.includes(h.context.alertCompactMetric(peak)));
+    assert.ok(!summary.includes('个百分点'));
+  }
+});
+
+test('hidden record and gap labels do not hide historical values or screening reasons',()=>{
+  const h=harness(),item={pulse:{metric:'spread',state:'data_gap',baseline:-.6,peak:-1.27,current:-.8},reminder:{record_only:true}};
+  assert.equal(h.context.alertPulseLabel(item),'开差异动');
+  assert.ok(h.context.alertPulseTrace(item).includes('非实时报价'));
+  const attention=h.context.alertAttentionMarkup({tier:'record',reason:'非本方向开仓信号'});
+  assert.ok(attention.includes('非本方向开仓信号'));assert.ok(!attention.includes('仅记录'));
 });
 
 test('missing or reversed timestamps and current values are not rendered as fabricated zeroes',()=>{
@@ -129,18 +148,18 @@ test('tips use the same simplified summary and retain open details across update
   const h=harness(),item={id:42,symbol:'DEMO/USDT',strategy:'spot_futures',type:'rapid_spread',attention:{tier:'candidate'},pulse:{metric:'spread',baseline:0,peak:1,current:1}},key=h.context.alertPulseKey(item);
   h.node('tipsItems').querySelectorAll=()=>[{open:true,dataset:{alertPulse:key},contains:()=>false}];
   vm.runInContext(source.slice(source.indexOf('function renderTipsItems('),source.indexOf('async function loadAlerts(')),h.context);
-  h.context.renderTipsItems([item]);assert.ok(h.node('tipsItems').innerHTML.includes('开差上升'));assert.ok(h.node('tipsItems').innerHTML.match(/<details[^>]*\sopen/));
+  h.context.renderTipsItems([item]);assert.ok(h.node('tipsItems').innerHTML.includes('正开差扩大'));assert.ok(h.node('tipsItems').innerHTML.match(/<details[^>]*\sopen/));
 });
 
 test('pulse summaries have readable emphasis, explicit direction and native keyboard disclosure',()=>{
   assert.ok(css.includes('summary:focus-visible'));assert.ok(css.includes('.alert-pulse-move > b {white-space:nowrap;font-size:14px'));
   for(const text of ['.pulse-fall','.pulse-rise','flex-wrap:wrap','grid-template-columns:repeat(3,minmax(0,1fr))'])assert.ok(css.includes(text));
-  assert.ok(html.includes('20261019-funding-alerts-v1'));
+  assert.ok(html.includes('20261019-alert-direction-v1'));
 });
 
 test('pulse labels do not interpolate untrusted backend strings',()=>{
   const h=harness(),markup=h.context.alertPulseLabel({pulse:{metric:'<script>',state:'<img>',ordinal:'<img>'}});
-  assert.ok(!markup.includes('<'));assert.ok(markup.includes('已记录'));
+  assert.ok(!markup.includes('<'));assert.equal(markup,'盘口异动');
 });
 
 test('compact coin rows contain name, count, mute and signed peaks but no timestamps or large metadata cards',()=>{
@@ -606,7 +625,7 @@ test('funding missing limits are not zero and small rates keep meaningful digits
 
 test('funding histories keep observations separate from actual settlement timestamps',()=>{
   const h=fundingHarness(),item=fundingGroup();item.history=[{kind:'settled_cap',side:'positive',observed_at:1792414805,settlement_at:1792414800,rate:1,interval:4,notice:false}];
-  const markup=h.context.fundingDetailCard(item);assert.ok(markup.includes('实际结算触顶'));assert.ok(markup.includes('实际结算 '));assert.ok(markup.includes('仅记录'));
+  const markup=h.context.fundingDetailCard(item);assert.ok(markup.includes('实际结算触顶'));assert.ok(markup.includes('实际结算 '));assert.ok(!markup.includes('仅记录'));
 });
 
 test('funding search, selection and refresh keep the selected coin and scroll',()=>{

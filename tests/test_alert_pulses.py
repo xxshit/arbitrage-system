@@ -365,7 +365,7 @@ class StreamHubTests(unittest.TestCase):
         routes = [Route(("spot_futures", f"COIN{i}/USDT", "Bitget", "Binance"),
                         ("bitget", f"COIN{i}USDT"), ("bn_future", f"COIN{i}USDT")) for i in range(121)]
         self.hub.register("spot_futures", routes, 1000)
-        with patch("anomaly_streams.threading.Thread") as thread:
+        with patch.object(self.hub, "_start_worker") as thread:
             self.hub.reconcile()
             self.assertEqual(thread.call_count, 6)  # 4 x 40 Bitget; 2 x 100 Binance
             workers = dict(self.hub.workers)
@@ -448,7 +448,7 @@ class PublicParserTests(unittest.TestCase):
         from anomaly_streams import ENDPOINTS
         self.assertEqual(ENDPOINTS["bn_future"], "wss://fstream.binance.com/public/ws")
         self.assertEqual(subscription("bn_future", ["BTCUSDT"])["params"], ["btcusdt@depth5@500ms"])
-        self.assertEqual(subscription("bn_spot", ["BTCUSDT"])["params"], ["btcusdt@bookTicker"])
+        self.assertEqual(subscription("bn_spot", ["BTCUSDT"])["params"], ["btcusdt@bookTicker", "btcusdt@miniTicker"])
         self.assertEqual(subscription("bn_mark", ["BTCUSDT"])["params"], ["btcusdt@markPrice@1s"])
 
     def test_binance_futures_partial_depth_uses_best_full_levels(self):

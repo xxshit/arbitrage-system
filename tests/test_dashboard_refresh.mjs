@@ -210,6 +210,20 @@ test('one server admission sounds once across phases and temporary absence, next
   active=[{...event,id:5,notice_key:'range:5:1'}];await h.context.loadAlerts();assert.equal(sounds,3);
 });
 
+test('funding notices have independent identities, respect mute and do not replay on refresh',async()=>{
+  const h=harness();let sounds=0,muted=false;
+  Object.assign(h.context,{pruneAlertMutes(){},isAlertMuted:()=>muted,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){},replaceHtmlKeepingExchangeLogos(){},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});
+  h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
+  let funding=[];h.context.fetch=async()=>({ok:true,json:async()=>({events:[],active_events:[],basis_tracking:[],funding:{groups:[],active_events:funding}})});
+  const cap={id:'cap',symbol:'DEMO/USDT',type:'funding_change',notice_key:'funding:cap',audible:true};
+  funding=[cap];await h.context.loadAlerts();assert.equal(sounds,0);
+  await h.context.loadAlerts();assert.equal(sounds,0);
+  funding=[{...cap,id:'1h',notice_key:'funding:1h'}];await h.context.loadAlerts();assert.equal(sounds,1);
+  funding=[];await h.context.loadAlerts();funding=[cap];await h.context.loadAlerts();assert.equal(sounds,1);
+  muted=true;funding=[{...cap,id:'negative',notice_key:'funding:negative'}];await h.context.loadAlerts();assert.equal(sounds,1);
+  assert.equal(h.context.latestActiveAlertEvents.length,1);
+});
+
 test('data gap, isolated and settled pulses cannot ring while a genuine new round can',async()=>{
   const h=harness();let sounds=0;
   Object.assign(h.context,{pruneAlertMutes(){},isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){},replaceHtmlKeepingExchangeLogos(){},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});

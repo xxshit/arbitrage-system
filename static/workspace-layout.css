@@ -624,6 +624,34 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 #equity-arbitrage .equity-table small.equity-stale {color:#a65b16}
 #equity-arbitrage .equity-notes {font-size:12px;line-height:1.6;color:#667e74}
 #equityCoverage {display:block;margin-top:3px;color:#42695e}
+/* Funding events are contract-level, separate from executable-spread screening. */
+#alerts .alert-scope-controls {flex-wrap:wrap}
+#alerts .funding-roster-head,#alerts .funding-roster-row {display:grid;grid-template-columns:minmax(86px,1fr) 89px minmax(90px,1fr) 42px;gap:5px;align-items:center;padding:8px;border-bottom:1px solid #dce7dc;font-size:11px}
+#alerts .funding-roster-head {position:sticky;top:0;background:#e8f0e6;color:#60796f;z-index:2;font-size:10px}
+#alerts .funding-roster-row.active {background:#e4f2f6;box-shadow:inset 3px 0 #1593a7}
+#alerts .funding-roster-row .alert-coin-select {font-size:11px;min-width:0;white-space:normal;overflow-wrap:anywhere;text-align:left}
+#alerts .funding-roster-row>span {font-variant-numeric:tabular-nums;font-weight:600}
+#alerts .funding-roster-row>span small {display:block;font-weight:400;color:#72877f}
+#alerts .funding-state {font-size:11px;color:#9c550c;line-height:1.45;overflow-wrap:anywhere}
+#alerts .funding-state.stale {color:#89908e}
+#alerts .funding-detail {min-width:0;padding:10px;background:#fff;border:1px solid #dce7dc;border-radius:8px}
+#alerts .funding-detail header {display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+#alerts .funding-detail header>b {display:flex;align-items:center;gap:6px;font-size:13px}
+#alerts .funding-metrics {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+#alerts .funding-metrics>div {background:#f0f5ed;border-radius:4px;padding:9px;min-width:0;overflow-wrap:anywhere}
+#alerts .funding-metrics small,#alerts .funding-metrics b {display:block}
+#alerts .funding-metrics small {font-size:10px;color:#6c8179;margin-bottom:5px}
+#alerts .funding-metrics b {font-size:16px;font-variant-numeric:tabular-nums}
+#alerts .funding-metrics em {font-size:11px;font-style:normal;color:#6c8179;font-weight:400}
+#alerts .funding-context {font-size:11px;line-height:1.5;color:#6c8179;margin:8px 0}
+#alerts .funding-history {max-height:calc(100dvh - 310px);min-height:180px;overflow:auto;scrollbar-gutter:stable}
+#alerts .funding-history table {width:100%;border-collapse:collapse;font-size:12px}
+#alerts .funding-history th {background:#eaf1e8;position:sticky;top:0;z-index:1;color:#5d776d;text-align:left;font-size:10px}
+#alerts .funding-history th,#alerts .funding-history td {padding:9px 7px;border-bottom:1px solid #e1e9df;font-variant-numeric:tabular-nums;white-space:nowrap}
+#alerts .funding-history td small {display:block;font-size:10px;color:#7c8e87;margin-top:3px}
+.funding-tip p {display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:5px 0}
+.funding-tip>small {color:#71857b;line-height:1.5}
+@media(max-width:760px){#alerts .funding-metrics {grid-template-columns:repeat(2,minmax(0,1fr))}#alerts .funding-metrics>div:last-child {grid-column:1/-1}#alerts .funding-roster-head,#alerts .funding-roster-row {grid-template-columns:minmax(75px,1fr) 75px minmax(68px,1fr) 40px;gap:3px;padding:7px 4px}#alerts .funding-history {max-height:55dvh}#alerts .funding-history th,#alerts .funding-history td {padding:8px 5px;font-size:10px}}
 #equity-arbitrage .equity-pairing {font-size:11px;font-weight:400;white-space:normal;max-width:230px;margin-top:4px}
 #equity-arbitrage .equity-pairing summary {cursor:pointer;color:#396a86}
 #equity-arbitrage .equity-pairing div {padding:6px;background:#eef4ed;border-radius:4px;line-height:1.6;overflow-wrap:anywhere}

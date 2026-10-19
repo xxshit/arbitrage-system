@@ -24,7 +24,7 @@ function harness(fetcher=async url=>{const params=new URL(url,'https://example.t
   const context={URLSearchParams,console,clearTimeout(){},window:{innerWidth:1280},byId:node,escapeChatHtml:escape,delistingSymbolClass:()=>'',changeClass:value=>value<0?'negative':'positive',percent:value=>(value>=0?'+':'')+Number(value).toFixed(4)+'%',intervalClass:()=>'',exchangeName:escape,fetchRefreshJson:fetcher,renderTipsItems(){},
     replaceHtmlKeepingExchangeLogos:(target,markup)=>{if(target.innerHTML!==markup)target.innerHTML=markup}};
   vm.createContext(context);
-  vm.runInContext("let mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertScope='history',alertNotional=1000,alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+exchangeHelpers+'\n'+transferHelpers+'\n'+helpers+'\n'+functions,context);
+  vm.runInContext("let latestFundingAlerts={groups:[],active_events:[]},selectedFundingContract='',mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertScope='history',alertNotional=1000,alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+exchangeHelpers+'\n'+transferHelpers+'\n'+helpers+'\n'+functions,context);
   return {context,node,scroll,transferScroll,run:code=>vm.runInContext(code,context)};
 }
 
@@ -61,7 +61,7 @@ test('range repeats are marked record-only without implying a new reminder count
   const label=h.context.alertPulseLabel(item);
   assert.ok(label.includes('仅记录'));assert.ok(!label.includes('第30次'));
   assert.ok(h.context.alertRosterColumnsMarkup().includes('<span>提醒</span>'));
-  assert.ok(html.includes('20261019-alert-range-reminder-v1'));
+  assert.ok(html.includes('20261019-funding-alerts-v1'));
 });
 
 test('price trace converts log prices into relative moves instead of showing a log-price as percent',()=>{
@@ -135,7 +135,7 @@ test('tips use the same simplified summary and retain open details across update
 test('pulse summaries have readable emphasis, explicit direction and native keyboard disclosure',()=>{
   assert.ok(css.includes('summary:focus-visible'));assert.ok(css.includes('.alert-pulse-move > b {white-space:nowrap;font-size:14px'));
   for(const text of ['.pulse-fall','.pulse-rise','flex-wrap:wrap','grid-template-columns:repeat(3,minmax(0,1fr))'])assert.ok(css.includes(text));
-  assert.ok(html.includes('20261019-alert-pulse-clear-v1'));
+  assert.ok(html.includes('20261019-funding-alerts-v1'));
 });
 
 test('pulse labels do not interpolate untrusted backend strings',()=>{
@@ -580,4 +580,53 @@ test('path and wallet icons follow the exact selected route through switching an
   for(const exchange of ['gate','binance'])assert.ok(!markup.includes(`/static/exchanges/${exchange}.png`));
   assert.ok(markup.includes('充提未知'));assert.ok(markup.includes('data-transfer-status='));
   assert.ok(markup.includes('现货充提 · 非合约权限'));
+});
+
+const fundingGroup=(contract='DEMOUSDT')=>({contract,symbol:contract.replace('USDT','/USDT'),exchange:'Binance',rate:.0125,cap:1,floor:-1,interval:1,next_at:1792414800,status:'hourly',side:null,change:null,history:[],alert_count:0});
+function fundingHarness(groups=[fundingGroup()]){const h=harness();h.context.syntheticFunding=groups;h.run("latestFundingAlerts={groups:syntheticFunding,active_events:[]};alertScope='funding'");h.context.renderAlertMasterDetail([]);return h}
+
+test('funding view can show a coin with no spread opportunity and no fake spot path',()=>{
+  const h=fundingHarness(),markup=h.node('alertDetailPane').innerHTML;
+  assert.ok(markup.includes('当前 1H'));assert.ok(!markup.includes('已切换 1H'));assert.ok(!markup.includes('alertPathSelect'));
+  assert.ok(markup.includes('+0.0125%'));assert.ok(markup.includes('不代表该币所有交易路径都可套利'));
+  assert.ok(h.node('alertScopeControls').innerHTML.includes('资费异动'));assert.equal(h.node('alertSymbolSort').hidden,true);
+});
+
+test('funding transition and indicative cap have distinct unambiguous labels',()=>{
+  const h=fundingHarness(),item=fundingGroup();item.change={from_interval:4,to_interval:1};
+  let markup=h.context.fundingDetailCard(item);assert.ok(markup.includes('4H → 1H'));assert.ok(markup.includes('已切换 1H'));
+  item.change=null;item.interval=4;item.status='cap_touch';item.side='negative';item.rate=-1;
+  markup=h.context.fundingDetailCard(item);assert.ok(markup.includes('负费率触底 · 待结算'));assert.ok(markup.includes('空头付、多头收'));assert.ok(!markup.includes('已切换 1H'));
+});
+
+test('funding missing limits are not zero and small rates keep meaningful digits',()=>{
+  const h=fundingHarness(),item=fundingGroup();item.cap=null;item.floor=null;
+  assert.ok(h.context.fundingDetailCard(item).includes('— / —'));assert.equal(h.context.fundingRate(.0001),'+0.0001%');assert.equal(h.context.fundingRate(null),'—');assert.equal(h.context.fundingRate(1),'+1%');
+});
+
+test('funding histories keep observations separate from actual settlement timestamps',()=>{
+  const h=fundingHarness(),item=fundingGroup();item.history=[{kind:'settled_cap',side:'positive',observed_at:1792414805,settlement_at:1792414800,rate:1,interval:4,notice:false}];
+  const markup=h.context.fundingDetailCard(item);assert.ok(markup.includes('实际结算触顶'));assert.ok(markup.includes('实际结算 '));assert.ok(markup.includes('仅记录'));
+});
+
+test('funding search, selection and refresh keep the selected coin and scroll',()=>{
+  const h=fundingHarness([fundingGroup(),fundingGroup('OTHERUSDT')]);h.context.selectFundingContract('OTHERUSDT');h.scroll.scrollTop=165;
+  h.context.renderAlertMasterDetail([]);assert.equal(h.run('selectedFundingContract'),'OTHERUSDT');assert.equal(h.scroll.scrollTop,165);
+  h.context.filterAlertSymbols('DEMO');assert.equal(h.run('selectedFundingContract'),'DEMOUSDT');assert.ok(!h.node('alertSymbolList').innerHTML.includes('OTHER/USDT'));
+});
+
+test('funding is stale and current notices cleared on request failure without losing evidence',()=>{
+  const h=fundingHarness();h.context.clearAlertCurrent('failed');const markup=h.node('alertDetailPane').innerHTML;
+  assert.ok(markup.includes('数据待更新'));assert.ok(markup.includes('上次费率'));assert.equal(h.run('latestFundingAlerts.active_events.length'),0);
+});
+
+test('funding selection does not issue spread history requests and switching back restores controls',async()=>{
+  const h=fundingHarness();assert.equal(await h.context.loadSelectedAlertHistory(),false);
+  h.context.setAlertScope('history');assert.equal(h.node('alertSymbolSort').hidden,false);
+});
+
+test('funding labels and inline actions escape source-controlled symbols',()=>{
+  const item=fundingGroup();item.symbol='<img onerror=1>';item.contract='" onmouseover="bad';const h=fundingHarness([item]);
+  assert.ok(!h.node('alertDetailPane').innerHTML.includes('<img onerror'));
+  assert.ok(!h.node('alertSymbolList').innerHTML.includes('onclick="selectFundingContract("'));
 });

@@ -94,6 +94,8 @@ let alertCountdownTimer;
 let selectedAlertSymbol = '';
 let latestAlertGroups = [];
 let latestActiveAlertEvents = [];
+let latestFundingAlerts = {groups:[],active_events:[]};
+let selectedFundingContract = '';
 let mutedAlertSymbols = new Set();
 let alertListQuery = '';
 let alertListSort = 'latest';
@@ -737,6 +739,39 @@ function alertSymbolCard(group){
   const symbol=escapeChatHtml(group.symbol),peaks=group.move_peaks||{};
   return `<article class="alert-symbol-option ${group.symbol===selectedAlertSymbol?'active':''} ${alertClass(group.latest.type)} ${isAlertMuted(group.symbol)?'muted-alert':''}" data-alert-symbol="${symbol}"><div class="alert-symbol-cell"><button type="button" class="alert-coin-select ${delistingSymbolClass(group.symbol)}" data-market-symbol="${symbol}" onclick="selectAlertSymbol(${alertActionSymbol(group.symbol)})" aria-label="${symbol}，${group.alert_count}次提醒，查看详情" aria-pressed="${group.symbol===selectedAlertSymbol}">${symbol}</button></div><span class="alert-symbol-count" title="24小时首次异动及明显突破次数；按策略、路径和指标独立去重，同区间仅记录。声音仍需通过当前候选核验。">${group.alert_count}</span><span class="alert-symbol-peak ${changeClass(peaks.open_spread)}">${alertCompactMetric(peaks.open_spread)}</span><span class="alert-symbol-peak ${changeClass(peaks.basis)}">${alertCompactMetric(peaks.basis)}</span>${alertMuteButton(group.symbol)}</article>`;
 }
+function fundingGroups(){return typeof latestFundingAlerts==='undefined'?[]:(latestFundingAlerts.groups||[])}
+function fundingTime(stamp){return Number.isFinite(stamp)?new Date(stamp*1000).toISOString().slice(5,19).replace('T',' '):'—'}
+function fundingRate(value){return value===null||value===undefined||!Number.isFinite(Number(value))?'—':`${value>=0?'+':''}${Number(value).toFixed(4).replace(/(\.\d*?[1-9])0+$|\.0+$/,'$1')}%`}
+function fundingStatusLabel(group){
+  const side=group.side==='negative'?'负费率触底':'正费率触顶';
+  return ({stale:'数据待更新',settling:'等待结算核验',settled_cap:`结算${group.settled?.side==='negative'?'触底':'触顶'} · 周期待确认`,cap_touch:`${side} · 待结算`,hourly_cap:`1H · ${side}`,hourly:group.change?.to_interval===1?'已切换 1H':'当前 1H',normal:'已回落 / 历史'})[group.status]||'待核验';
+}
+function fundingEventLabel(item){return ({cap_touch:item.side==='negative'?'负费率触底':'正费率触顶',settled_cap:item.side==='negative'?'实际结算触底':'实际结算触顶',settled_below_cap:'结算未触及限值',interval_shortened:'已切换 1H',interval_changed:'结算周期调整'})[item.kind]||'资费变化'}
+function fundingCycle(item){return item.from_interval?`${item.from_interval}H → ${item.to_interval}H`:`${item.interval}H`}
+function fundingTip(item){return `<article class="tips-item funding-tip"><div class="tips-item-head"><b>${escapeChatHtml(item.symbol)} · ${fundingEventLabel(item)}</b>${alertSpeakerButton(item.symbol)}</div><p>${exchangeName(item.exchange)} <strong>${fundingRate(item.rate)} / ${item.interval}H</strong> ${escapeChatHtml(fundingCycle(item))}</p><small>${item.kind==='cap_touch'?'盘中触及限值，不代表结算时仍触顶或一定改为1H。':'官方周期已变更；未来费率不固定，不代表确定收益。'}</small></article>`}
+function renderAlertScopes(){
+  const target=byId('alertScopeControls');if(!target)return;
+  target.innerHTML=[['candidate','候选'],['watch','观察'],['history','24H历史'],['funding','资费异动']].map(([scope,label])=>`<button type="button" aria-pressed="${alertScope===scope}" class="${alertScope===scope?'active':''}" onclick="setAlertScope('${scope}')">${label} <b>${scope==='funding'?fundingGroups().length:scope==='history'?latestAlertGroups.length:latestAlertGroups.filter(group=>group.attention?.live&&group.attention.tier===scope).length}</b></button>`).join('');
+}
+function selectFundingContract(contract){if(!fundingGroups().some(item=>item.contract===contract))return;selectedFundingContract=contract;renderFundingAlerts();if(window.innerWidth<1100)byId('alertDetailPane')?.scrollIntoView({block:'start',behavior:'smooth'})}
+function renderFundingAlerts(){
+  const query=alertListQuery.toUpperCase().replace(/[\s/_-]/g,''),groups=fundingGroups().filter(item=>!query||item.contract.toUpperCase().includes(query));
+  if(alertListSort==='count')groups.sort((a,b)=>b.alert_count-a.alert_count);
+  if(!groups.some(item=>item.contract===selectedFundingContract))selectedFundingContract=groups[0]?.contract||'';
+  const list=byId('alertSymbolList'),pane=byId('alertDetailPane');if(!list||!pane)return;
+  const top=list.scrollTop;
+  replaceHtmlKeepingExchangeLogos(list,`<div class="funding-roster-head"><span>币种</span><span>当前费率</span><span>状态</span><span>静音</span></div>`+(groups.length?groups.map(item=>`<article class="funding-roster-row ${item.contract===selectedFundingContract?'active':''}"><button type="button" class="alert-coin-select" aria-pressed="${item.contract===selectedFundingContract}" onclick="selectFundingContract(${alertActionSymbol(item.contract)})">${escapeChatHtml(item.symbol)}</button><span class="${changeClass(item.rate)}">${fundingRate(item.rate)}<small> / ${item.interval}H</small></span><span class="funding-state ${item.status==='stale'?'stale':''}">${escapeChatHtml(fundingStatusLabel(item))}</span>${alertMuteButton(item.symbol)}</article>`).join(''):`<p class="empty-alert">${query?'没有匹配的资费记录。':'暂无触顶或周期变化；采集启动后会自动记录。'}</p>`));list.scrollTop=top;
+  renderAlertScopes();byId('alertRosterCount').textContent=`${groups.length} 币 · 币安`;
+  const sort=byId('alertSymbolSort');if(sort)sort.hidden=true;
+  const group=groups.find(item=>item.contract===selectedFundingContract),same=pane.dataset.fundingContract===group?.contract,scrollTop=same?(pane.querySelector('.funding-history')?.scrollTop||0):0;
+  replaceHtmlKeepingExchangeLogos(pane,group?fundingDetailCard(group):'<p class="empty-alert">选择左侧币种查看资费事件。</p>');pane.dataset.fundingContract=group?.contract||'';
+  const history=pane.querySelector('.funding-history');if(history)history.scrollTop=scrollTop;
+  byId('alertTotalSymbols').textContent=fundingGroups().length;byId('alertTotalEvents').textContent=fundingGroups().reduce((sum,item)=>sum+item.alert_count,0);byId('alertActiveCount').textContent=typeof latestFundingAlerts==='undefined'?0:latestFundingAlerts.active_events.length;
+}
+function fundingDetailCard(group){
+  const stale=group.status==='stale',cycle=group.change?fundingCycle(group.change):`${group.interval}H`,direction=group.rate>0?'正费率：多头付、空头收':group.rate<0?'负费率：空头付、多头收':'费率为零';
+  return `<article class="funding-detail"><header><b>${exchangeName(group.exchange)} ${escapeChatHtml(group.symbol)}</b><strong class="funding-state">${escapeChatHtml(fundingStatusLabel(group))}</strong></header><div class="funding-metrics"><div><small>${stale?'上次费率':'当前预估费率'}</small><b class="${changeClass(group.rate)}">${fundingRate(group.rate)} <em>/ ${group.interval}H</em></b></div><div><small>结算周期</small><b>${escapeChatHtml(cycle)}</b></div><div><small>上限 / 下限</small><b>${fundingRate(group.cap)} / ${fundingRate(group.floor)}</b></div></div><p class="funding-context">${direction} · 下次结算 ${fundingTime(group.next_at)} UTC${stale?' · 数据已过期，不作当前提醒':''}</p><div class="funding-history" tabindex="0" role="region" aria-label="24小时资费变化记录"><table><thead><tr><th>发现时间（UTC）</th><th>事件</th><th>费率</th><th>周期</th></tr></thead><tbody>${group.history.length?group.history.map(item=>`<tr><td>${fundingTime(item.observed_at)}</td><td>${fundingEventLabel(item)}${item.after_gap?'<small>断档后发现</small>':''}${item.settlement_at?`<small>实际结算 ${fundingTime(item.settlement_at)} UTC</small>`:''}${!item.notice?'<small>仅记录</small>':''}</td><td class="${changeClass(item.rate)}">${fundingRate(item.rate)}</td><td>${escapeChatHtml(fundingCycle(item))}</td></tr>`).join(''):'<tr><td colspan="4">当前周期已确认，尚无新变化记录。</td></tr>'}</tbody></table></div><p class="funding-context">触顶 ≠ 已切换1H；按官方周期确认。限值缺失显示“—”，不猜测。此处是合约资费事件，不代表该币所有交易路径都可套利。</p></article>`;
+}
 function visibleAlertGroups(groups=latestAlertGroups){
   const query=alertListQuery.toUpperCase().replace(/[\s/_-]/g,'');
   return groups.filter(group=>(alertScope==='history'||(group.attention?.live&&group.attention.tier===alertScope))&&(!query||group.symbol.toUpperCase().replace(/[/_-]/g,'').includes(query))).slice().sort((a,b)=>{
@@ -747,21 +782,24 @@ function visibleAlertGroups(groups=latestAlertGroups){
 }
 function alertRosterColumnsMarkup(){return '<div class="alert-roster-columns" aria-hidden="true"><span>币种</span><span>提醒</span><span>开差峰值</span><span>基差峰值</span><span>静音</span></div>'}
 function renderAlertRoster(){
+  if(alertScope==='funding'){renderFundingAlerts();return}
+  const sort=byId('alertSymbolSort');if(sort)sort.hidden=false;
   const groups=visibleAlertGroups(),list=byId('alertSymbolList');if(!list)return;
   const top=list.scrollTop;
   replaceHtmlKeepingExchangeLogos(list,alertRosterColumnsMarkup()+(groups.length?groups.map(alertSymbolCard).join(''):`<p class="empty-alert">${alertListQuery?'没有匹配的币种，清空搜索可查看全部。':alertScope==='candidate'?'暂无通过成本与深度筛选的候选。可切换观察或24H历史。':alertScope==='watch'?'暂无提前关注信号，历史异动仍保留。':'最近24小时暂无确认后的报警。'}</p>`));list.scrollTop=top;
   byId('alertRosterCount').textContent=alertListQuery?`${groups.length} / ${latestAlertGroups.length} 币`:`${alertScope==='history'?'全部':'当前'} ${groups.length} 币`;
-  const scopes=byId('alertScopeControls');if(scopes)scopes.innerHTML=[['candidate','候选'],['watch','观察'],['history','24H历史']].map(([scope,label])=>`<button type="button" aria-pressed="${alertScope===scope}" class="${alertScope===scope?'active':''}" onclick="setAlertScope('${scope}')">${label} <b>${scope==='history'?latestAlertGroups.length:latestAlertGroups.filter(group=>group.attention?.live&&group.attention.tier===scope).length}</b></button>`).join('');
+  renderAlertScopes();
   byId('alertTotalSymbols').textContent=latestAlertGroups.length;
   byId('alertTotalEvents').textContent=latestAlertGroups.reduce((sum,group)=>sum+group.alert_count,0);
   byId('alertActiveCount').textContent=latestActiveAlertEvents.length;
 }
-function setAlertScope(scope){if(!['candidate','watch','history'].includes(scope))return;alertScope=scope;selectedAlertSymbol='';renderAlertMasterDetail(latestAlertGroups);loadSelectedAlertHistory(1,true)}
+function setAlertScope(scope){if(!['candidate','watch','history','funding'].includes(scope))return;alertScope=scope;alertDetailVersion++;selectedAlertSymbol='';renderAlertMasterDetail(latestAlertGroups);if(scope!=='funding')loadSelectedAlertHistory(1,true)}
 function setAlertNotional(value){const amount=Number(value);if(!Number.isFinite(amount)||amount<100||amount>1000000){byId('alertNotional').value=alertNotional;return false}alertNotional=amount;alertDetailVersion++;alertDetailState.data=null;clearAlertCurrent('正在重新核验参考金额');loadAlerts(true);return true}
-function clearAlertCurrent(reason){latestActiveAlertEvents=[];latestAlertGroups=latestAlertGroups.map(group=>({...group,attention:{tier:'record',live:false,reason},paths:(group.paths||[]).map(path=>({...path,attention:{tier:'record',live:false,reason}}))}));renderAlertMasterDetail(latestAlertGroups);renderTipsItems([]);byId('tipsCount').textContent=0}
+function clearAlertCurrent(reason){latestActiveAlertEvents=[];latestFundingAlerts={groups:fundingGroups().map(group=>({...group,status:'stale'})),active_events:[]};latestAlertGroups=latestAlertGroups.map(group=>({...group,attention:{tier:'record',live:false,reason},paths:(group.paths||[]).map(path=>({...path,attention:{tier:'record',live:false,reason}}))}));renderAlertMasterDetail(latestAlertGroups);renderTipsItems([]);byId('tipsCount').textContent=0}
 function filterAlertSymbols(value){alertListQuery=String(value||'');if(byId('alertSymbolList'))byId('alertSymbolList').scrollTop=0;renderAlertRoster()}
 function sortAlertSymbols(value){alertListSort=['latest','count','open_spread','basis'].includes(value)?value:'latest';if(byId('alertSymbolList'))byId('alertSymbolList').scrollTop=0;renderAlertRoster()}
 function renderAlertDetailPane(){
+  if(alertScope==='funding')return;
   const group=latestAlertGroups.find(item=>item.symbol===selectedAlertSymbol),pane=byId('alertDetailPane');if(!pane)return;
   const key=JSON.stringify([group?.symbol||'',alertDetailState.pathId]),samePath=pane.dataset.alertKey===key;
   const top=samePath?pane.querySelector('.alert-timeline-scroll')?.scrollTop||0:0;
@@ -776,6 +814,7 @@ function renderAlertDetailPane(){
 }
 function renderAlertMasterDetail(groups){
   latestAlertGroups=groups;
+  if(alertScope==='funding'){renderFundingAlerts();return}
   const visible=visibleAlertGroups(groups);
   if(!visible.some(group=>group.symbol===selectedAlertSymbol))selectedAlertSymbol=visible[0]?.symbol||'';
   syncAlertDetailSelection(groups.find(group=>group.symbol===selectedAlertSymbol));
@@ -787,6 +826,7 @@ function selectAlertSymbol(symbol){
   if(window.innerWidth<1100)byId('alertDetailPane')?.scrollIntoView({block:'start',behavior:'smooth'});
 }
 async function loadSelectedAlertHistory(page=alertDetailState.data?.page||1,resetScroll=false){
+  if(alertScope==='funding')return false;
   const symbol=selectedAlertSymbol,{strategy,pathId}=alertDetailState,notional=alertNotional;if(!symbol||!pathId)return false;
   const key=JSON.stringify([symbol,strategy,pathId,page,notional]);if(alertDetailRequest?.key===key)return alertDetailRequest.promise;
   const version=++alertDetailVersion;alertDetailState.loading=true;alertDetailState.error='';renderAlertDetailPane();
@@ -800,16 +840,18 @@ async function loadSelectedAlertHistory(page=alertDetailState.data?.page||1,rese
   finally{if(alertDetailRequest?.version===version)alertDetailRequest=null}})();
   alertDetailRequest={key,version,promise};return promise;
 }
-function renderTipsItems(activeEvents){const target=byId('tipsItems');if(!target)return;const pulseView=alertPulseViewState(target);target.innerHTML=activeEvents.length?activeEvents.map(item=>`<article class="tips-item ${alertClass(item.type)} ${isAlertMuted(item.symbol)?'muted-alert':''}"><div class="tips-item-head"><b class="${delistingSymbolClass(item.symbol)}" data-market-symbol="${item.symbol}">${item.symbol} · ${strategyLabel(item.strategy)} · ${alertPulseLabel(item)}${isAlertMuted(item.symbol)?' · 已静音':''}</b>${alertSpeakerButton(item.symbol)}</div>${alertExchangePair(item)}${alertAttentionMarkup(item.attention)}<span>触发开差 ${alertMetric(item.open_spread)} · 基差 ${alertMetric(item.basis)}</span>${alertPulseTrace(item,pulseView.expanded.has(alertPulseKey(item)))}${item.attention?.tier==='candidate'?'':alertDeathMarkup(item)}</article>`).join(''):'<p class="empty-alert">当前没有通过筛选的提醒，已发生的异动保留在24H历史。</p>';restoreAlertPulseFocus(target,pulseView.focused)}
+function renderTipsItems(activeEvents){const target=byId('tipsItems');if(!target)return;const pulseView=alertPulseViewState(target);target.innerHTML=activeEvents.length?activeEvents.map(item=>item.type==='funding_change'?fundingTip(item):`<article class="tips-item ${alertClass(item.type)} ${isAlertMuted(item.symbol)?'muted-alert':''}"><div class="tips-item-head"><b class="${delistingSymbolClass(item.symbol)}" data-market-symbol="${item.symbol}">${item.symbol} · ${strategyLabel(item.strategy)} · ${alertPulseLabel(item)}${isAlertMuted(item.symbol)?' · 已静音':''}</b>${alertSpeakerButton(item.symbol)}</div>${alertExchangePair(item)}${alertAttentionMarkup(item.attention)}<span>触发开差 ${alertMetric(item.open_spread)} · 基差 ${alertMetric(item.basis)}</span>${alertPulseTrace(item,pulseView.expanded.has(alertPulseKey(item)))}${item.attention?.tier==='candidate'?'':alertDeathMarkup(item)}</article>`).join(''):'<p class="empty-alert">当前没有通过筛选的提醒，已发生的异动保留在24H历史。</p>';restoreAlertPulseFocus(target,pulseView.focused)}
 async function loadAlerts(force=false){
   const version=++alertSummaryVersion,requestedNotional=alertNotional;
   try{
     const data=await fetchRefreshJson(`/api/alerts?view=summary&notional=${requestedNotional}`),activeEvents=(data.active_events||[]).filter(item=>!item.reminder||item.reminder.eligible===true),groups=data.events||[],tracking=data.basis_tracking||[];
     if(version!==alertSummaryVersion||requestedNotional!==alertNotional)return false;
+    latestFundingAlerts=data.funding||{groups:[],active_events:[]};
+    activeEvents.push(...(latestFundingAlerts.active_events||[]));
     renderAlertStreamStatus(data.realtime);
     pruneAlertMutes(groups,activeEvents);latestActiveAlertEvents=activeEvents;
     renderDivergenceRegister(data.isolated_paths);
-    const signature=JSON.stringify({groups,tracking,activeEvents},(key,value)=>key==='remaining_seconds'?undefined:value);
+    const signature=JSON.stringify({groups,tracking,activeEvents,funding:latestFundingAlerts},(key,value)=>key==='remaining_seconds'?undefined:value);
     const audibleKeys=activeEvents.filter(item=>item.audible===true&&!isAlertMuted(item.symbol)&&!['data_gap','isolated','settled'].includes(item.pulse?.state)).map(item=>item.notice_key||(item.pulse?`${item.id}-${item.pulse.notice_version}`:`${item.symbol}-${item.type}-${item.open_spread}-${item.basis}-${item.created_at}`)),audibleSignature=audibleKeys.join('|');
     const noticeNow=Date.now();
     for(const [key,seenAt] of alertNoticeMemory)if(noticeNow-seenAt>86400000)alertNoticeMemory.delete(key);

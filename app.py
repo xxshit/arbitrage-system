@@ -43,6 +43,7 @@ from alert_reminders import admit_pulse, current_notice, reminder_count, reminde
 from alert_screening import DEFAULT_NOTIONAL, okx_contract_unit, pulse_has_watch_peak, screen_pulse
 from asset_catalog import NON_CRYPTO_BOOTSTRAP, bootstrap_category, compact_symbol, instrument_category
 from equity_spot import EXTRA_URLS as EQUITY_SPOT_URLS, METADATA_TTLS as EQUITY_SPOT_TTLS, build_snapshot as build_equity_spot_snapshot
+from funding_alerts import advance as advance_funding_alert, binance_observations, event_is_active as funding_event_is_active, fresh as funding_fresh, status as funding_alert_status
 
 load_dotenv()
 
@@ -310,6 +311,19 @@ class AlertReminderState(db.Model):
     """Persistent range checkpoints; no account, position, or execution data."""
     id = db.Column(db.String(64), primary_key=True)
     state_json = db.Column(db.Text, nullable=False)
+
+
+class FundingAlertState(db.Model):
+    """Contract-level public evidence, deliberately independent of spot paths."""
+    contract = db.Column(db.String(30), primary_key=True)
+    state_json = db.Column(db.Text, nullable=False)
+
+
+class FundingAlertEvent(db.Model):
+    id = db.Column(db.String(64), primary_key=True)
+    contract = db.Column(db.String(30), nullable=False, index=True)
+    observed_at_ms = db.Column(db.BigInteger, nullable=False, index=True)
+    evidence_json = db.Column(db.Text, nullable=False)
 
 
 class SpotDivergence(db.Model):
@@ -3594,7 +3608,7 @@ def spot_futures_snapshot():
     }
     collect_equity_metadata()
     results, errors = fetch_market_payloads(urls, {
-        "futures_info": 3600, "funding_info": 60, "futures_24h": 20,
+        "futures_info": 3600, "funding_info": 15, "futures_24h": 20,
         "binance_spot_24h": 20,
     })
     metadata, metadata_errors = collect_equity_metadata()
@@ -3743,7 +3757,7 @@ def dual_futures_snapshot():
         "okx_open_interest": "https://www.okx.com/api/v5/public/open-interest?instType=SWAP",
     }
     results, errors = fetch_market_payloads(urls, {
-        "binance_24h": 20, "binance_funding_info": 60, "binance_info": 3600,
+        "binance_24h": 20, "binance_funding_info": 15, "binance_info": 3600,
         "bybit_instruments": 3600, "okx_instruments": 3600,
     })
     required = {"binance_books", "binance_funding", "bybit_instruments", "bybit_tickers", "okx_instruments", "okx_tickers", "okx_mark_prices", "okx_index_tickers"}
@@ -13152,6 +13166,7 @@ def alerts():
         "checked_at_epoch": time.time(),
         "realtime": ALERT_STREAM_HUB.status(),
         "window_hours": 24,
+        "funding": funding_alert_payload(screening_now),
         "screening": {"notional": notional, "min_net_edge": .30, "version": 3},
         "total_symbols": len(grouped_events),
         "total_alerts": count_reminders(all_events),
@@ -14606,6 +14621,118 @@ def background_dual_market_refresh():
         time.sleep(max(0.25, interval - (time.monotonic() - cycle_started_at)))
 
 
+def funding_alert_priority_symbols(now=None):
+    """Reuse the existing 60-symbol history budget, never add private/API calls."""
+    now = time.time() if now is None else now
+    targets = []
+    for contract, raw in db.session.query(FundingAlertState.contract, FundingAlertState.state_json):
+        state = json.loads(raw)
+        if is_rwa_stock_pair(state["symbol"]):
+            continue
+        pending = [item for item in state.get("pending", []) if not item.get("resolved")
+                   and 0 <= now - item["at"] < 1200 and item.get("touched")]
+        if pending:
+            targets.append((min(item["at"] for item in pending), contract))
+    return [contract for _, contract in sorted(targets)[:10]]
+
+
+def refresh_funding_alerts():
+    """One worker consumes existing public caches. HTTP reads never fetch/write."""
+    now = time.time()
+    urls = {name: "https://fapi.binance.com/fapi/v1/" + endpoint for name, endpoint in
+            (("instruments", "exchangeInfo"), ("rates", "premiumIndex"), ("info", "fundingInfo"))}
+    cached = {key: MARKET_PAYLOAD_CACHE.get(url, {}) for key, url in urls.items()}
+    monotonic_now = time.monotonic()
+    # Date each captured payload version, not a newer cache entry swapped by
+    # another market thread between the payload read and timestamp read.
+    stamps = {key: now - (monotonic_now - item["fetched_at"]) if isinstance(item.get("fetched_at"), (int, float)) else None
+              for key, item in cached.items()}
+    if not funding_fresh(stamps["instruments"], now, 7200):
+        return 0
+    instruments = cached["instruments"].get("payload", {}).get("symbols", [])
+    observations = binance_observations(instruments, cached["rates"].get("payload"), cached["info"].get("payload"), stamps["rates"], stamps["info"], now)
+    # Product metadata is checked directly as well as against durable classification.
+    excluded = {item.get("symbol") for item in instruments if instrument_category(item, "Binance") is not None}
+    observations = [item for item in observations if item["contract"] not in excluded and not is_rwa_stock_pair(item["symbol"])]
+    if not observations:
+        return 0
+    records = {item.contract: item for item in FundingAlertState.query.all()}
+    histories = {}
+    # Only the last hour can confirm a captured settlement boundary. Full histories
+    # and all funding calculations continue to use their existing tables unchanged.
+    for contract, stamp, rate in db.session.query(FundingRateRecord.symbol, FundingRateRecord.funding_time, FundingRateRecord.funding_rate).filter(FundingRateRecord.funding_time >= int((now - 3660) * 1000), FundingRateRecord.funding_time <= int(now * 1000)):
+        histories.setdefault(contract, []).append({"at": stamp / 1000, "rate": rate})
+    count = 0
+    for observation in observations:
+        record = records.get(observation["contract"])
+        old = json.loads(record.state_json) if record else {}
+        state, events = advance_funding_alert(old, observation, histories.get(observation["contract"], ()))
+        if old and not events and now - old["observed_at"] < 15:
+            continue
+        encoded = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+        if record is None:
+            db.session.add(FundingAlertState(contract=observation["contract"], state_json=encoded))
+        else:
+            record.state_json = encoded
+        for event in events:
+            if db.session.get(FundingAlertEvent, event["id"]) is None:
+                db.session.add(FundingAlertEvent(id=event["id"], contract=event["contract"], observed_at_ms=int(event["observed_at"]*1000), evidence_json=json.dumps(event, ensure_ascii=False, separators=(",", ":"))))
+                count += 1
+    db.session.commit()  # Both dedupe checkpoints and events commit, or neither does.
+    return count
+
+
+def funding_alert_payload(now=None):
+    now = time.time() if now is None else now
+    states = {contract: json.loads(raw) for contract, raw in db.session.query(FundingAlertState.contract, FundingAlertState.state_json)}
+    events = {}
+    for contract, raw in db.session.query(FundingAlertEvent.contract, FundingAlertEvent.evidence_json).filter(FundingAlertEvent.observed_at_ms >= int((now - 86400)*1000), FundingAlertEvent.observed_at_ms <= int(now*1000)).order_by(FundingAlertEvent.observed_at_ms.desc(), FundingAlertEvent.id):
+        events.setdefault(contract, []).append(json.loads(raw))
+    groups, active = [], []
+    for contract, state in states.items():
+        if is_rwa_stock_pair(state["symbol"]):
+            continue
+        history = events.get(contract, [])
+        current_status = funding_alert_status(state, now)
+        if not history and not funding_fresh(state.get("rate_at"), now, 86400):
+            continue
+        if not history and not state.get("side") and state["interval"] != 1:
+            continue
+        recent = state.get("change")
+        if recent and now - recent["observed_at"] > 86400:
+            recent = None
+        groups.append({"contract": contract, "symbol": state["symbol"], "exchange": state["exchange"],
+                       "status": current_status, "rate": state["rate"], "cap": state["cap"], "floor": state["floor"],
+                       "interval": state["interval"], "next_at": state["next_at"], "side": state.get("side"),
+                       "rate_at": state["rate_at"], "info_at": state["info_at"], "change": recent,
+                       "settled": state.get("settled"), "history": history,
+                       "alert_count": sum(bool(item["notice"]) for item in history)})
+        candidates = [item for item in history if funding_event_is_active(item, state, now)]
+        # One contract, one current reminder even when interval+cap change together.
+        if candidates:
+            event = next((item for item in candidates if item["kind"] == "interval_shortened"), candidates[0])
+            active.append({**event, "type": "funding_change", "strategy": "funding", "notice_key": "funding:" + event["id"], "audible": True,
+                           "remaining_seconds": max(0, int(120 - (now - event["observed_at"]))), "created_at_epoch": event["observed_at"]})
+    groups.sort(key=lambda item: (item["history"][0]["observed_at"] if item["history"] else 0, abs(item["rate"])), reverse=True)
+    return {"exchange": "Binance", "window_hours": 24, "groups": groups, "active_events": active,
+            "observed_at": max((item["rate_at"] for item in states.values()), default=None),
+            "info_at": max((item["info_at"] for item in states.values()), default=None)}
+
+
+def background_funding_alerts():
+    time.sleep(10)
+    while True:
+        with app.app_context():
+            try:
+                refresh_funding_alerts()
+            except Exception:
+                db.session.rollback()
+                app.logger.exception("funding_alert_refresh_failed")
+            finally:
+                db.session.remove()
+        time.sleep(5)
+
+
 def background_funding_history_sync():
     global FUNDING_SYNC_CURSOR
     time.sleep(5)
@@ -14615,11 +14742,14 @@ def background_funding_history_sync():
                 snapshot = load_latest_market_snapshot()
                 if snapshot:
                     symbols = [group["symbol"].replace("/", "") for group in snapshot["symbols"]]
-                    batch = symbols[FUNDING_SYNC_CURSOR:FUNDING_SYNC_CURSOR + 60]
+                    priority = funding_alert_priority_symbols()
+                    capacity = 60 - len(priority)
+                    batch = symbols[FUNDING_SYNC_CURSOR:FUNDING_SYNC_CURSOR + capacity]
                     if not batch:
                         FUNDING_SYNC_CURSOR = 0
-                        batch = symbols[:60]
+                        batch = symbols[:capacity]
                     FUNDING_SYNC_CURSOR = (FUNDING_SYNC_CURSOR + len(batch)) % len(symbols)
+                    batch = list(dict.fromkeys(priority + batch))[:60]
                     sync_funding_history(batch)
         except Exception:
             db.session.rollback()
@@ -15022,6 +15152,7 @@ def start_background_workers():
     threading.Thread(target=background_spot_market_refresh, daemon=True, name="spot-market-refresh").start()
     threading.Thread(target=background_dual_market_refresh, daemon=True, name="dual-market-refresh").start()
     threading.Thread(target=background_funding_history_sync, daemon=True, name="funding-history-sync").start()
+    threading.Thread(target=background_funding_alerts, daemon=True, name="funding-alerts").start()
     threading.Thread(target=background_dual_funding_history_sync, daemon=True, name="dual-funding-history-sync").start()
     threading.Thread(target=background_price_history_backfill, daemon=True, name="price-history-backfill").start()
     threading.Thread(target=background_index_component_sync, daemon=True, name="index-component-sync").start()

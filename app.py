@@ -2312,7 +2312,9 @@ def sync_funding_history(symbols):
     cutoff = int(datetime.combine(now.date() - timedelta(days=30), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
     FundingRateRecord.query.filter(FundingRateRecord.funding_time < cutoff).delete(synchronize_session=False)
     db.session.commit()
-    stored_rows = FundingRateRecord.query.filter(FundingRateRecord.symbol.in_(symbols), FundingRateRecord.funding_time >= start_time, FundingRateRecord.funding_time <= end_time).all()
+    # Only three scalar fields are needed; never retain a batch of ORM objects
+    # and their identity-map state just to calculate a read-only return value.
+    stored_rows = db.session.query(FundingRateRecord.symbol, FundingRateRecord.funding_time, FundingRateRecord.funding_rate).filter(FundingRateRecord.symbol.in_(symbols), FundingRateRecord.funding_time >= start_time, FundingRateRecord.funding_time <= end_time).all()
     stored_by_symbol = {}
     for item in stored_rows:
         stored_by_symbol.setdefault(item.symbol, []).append(item)
@@ -2548,6 +2550,58 @@ def calculate_dual_funding_differences(long_records, short_records, now=None):
     return output
 
 
+def settled_funding_summaries(model, targets, now):
+    """Aggregate in SQL; Python memory scales with instruments, not 30-day rows.
+
+    Keep the last *minute* as well as its sum. The two hedge legs may settle at
+    different times, so subtracting each leg's last rate would invent an event.
+    No ORM history objects, driver-buffered full histories or account data.
+    """
+    if not targets:
+        return {}
+    starts = {
+        days: int(datetime.combine(now.date() - timedelta(days=days - 1), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
+        for days in (1, 3, 7, 30)
+    }
+    end_time = int(now.timestamp() * 1000)
+    keys = [model.symbol] if model is FundingRateRecord else [model.exchange, model.symbol]
+    target_filter = model.symbol.in_(targets) if model is FundingRateRecord else tuple_(*keys).in_(targets)
+    aggregate = db.session.query(
+        *keys, func.max(model.funding_time).label("latest_at"),
+        *(func.sum(case((model.funding_time >= start, model.funding_rate), else_=0.0)).label(f"day_{days}")
+          for days, start in starts.items()),
+    ).filter(target_filter, model.funding_time >= starts[30], model.funding_time <= end_time).group_by(*keys)
+    summaries = {}
+    for row in aggregate.all():
+        key = row[0] if len(keys) == 1 else (row[0], row[1])
+        latest_at = row[len(keys)]
+        summaries[key] = {"latest_minute": latest_at // 60_000,
+                          **dict(zip((f"day_{days}" for days in starts), row[len(keys) + 1:]))}
+    if not summaries:
+        return {}
+    latest = aggregate.with_entities(*keys, func.max(model.funding_time).label("latest_at")).subquery()
+    minute_start = latest.c.latest_at - (latest.c.latest_at % 60_000)
+    previous = db.session.query(*keys, func.sum(model.funding_rate)).join(latest, and_(
+        *(column == latest.c[column.key] for column in keys),
+        model.funding_time >= minute_start, model.funding_time <= latest.c.latest_at,
+    )).group_by(*keys)
+    for row in previous.all():
+        key = row[0] if len(keys) == 1 else (row[0], row[1])
+        summaries[key]["previous"] = row[-1]
+    return summaries
+
+
+def combine_funding_summaries(long, short):
+    if not long or not short:
+        return {key: None for key in ("previous", "day_1", "day_3", "day_7", "day_30")}
+    latest_minute = max(long["latest_minute"], short["latest_minute"])
+    return {
+        "previous": ((short["previous"] if short["latest_minute"] == latest_minute else 0.0)
+                     - (long["previous"] if long["latest_minute"] == latest_minute else 0.0)),
+        **{f"day_{days}": short[f"day_{days}"] - long[f"day_{days}"] for days in (1, 3, 7, 30)},
+    }
+
+
 def dual_funding_statistics(groups):
     targets = frozenset(
         (exchange, group["symbol"])
@@ -2572,33 +2626,17 @@ def dual_funding_statistics(groups):
         ):
             return DUAL_FUNDING_STATISTICS_CACHE["data"]
         now = datetime.now(SHANGHAI_TZ)
-        start_time = int(datetime.combine(now.date() - timedelta(days=29), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
-        symbols = {symbol for _exchange, symbol in targets}
-        records = {}
-        non_binance = ExchangeFundingRateRecord.query.filter(
-            ExchangeFundingRateRecord.symbol.in_(symbols),
-            ExchangeFundingRateRecord.funding_time >= start_time,
-        ).all() if symbols else []
-        for item in non_binance:
-            records.setdefault((item.exchange, item.symbol), []).append(item)
-        canonical_by_compact = {symbol.replace("/", ""): symbol for symbol in symbols}
-        compact_symbols = set(canonical_by_compact)
-        binance_rows = FundingRateRecord.query.filter(
-            FundingRateRecord.symbol.in_(compact_symbols),
-            FundingRateRecord.funding_time >= start_time,
-        ).all() if compact_symbols else []
-        for item in binance_rows:
-            canonical = canonical_by_compact.get(item.symbol)
-            if canonical:
-                records.setdefault(("Binance", canonical), []).append(item)
+        summaries = settled_funding_summaries(ExchangeFundingRateRecord, {(exchange, symbol) for exchange, symbol in targets if exchange != "Binance"}, now)
+        canonical_by_compact = {symbol.replace("/", ""): symbol for exchange, symbol in targets if exchange == "Binance"}
+        for compact, summary in settled_funding_summaries(FundingRateRecord, set(canonical_by_compact), now).items():
+            summaries[("Binance", canonical_by_compact[compact])] = summary
         output = {}
         for group in groups:
             for row in group.get("rows", []):
                 key = (group["symbol"], row.get("long_exchange"), row.get("short_exchange"))
-                output[key] = calculate_dual_funding_differences(
-                    records.get((row.get("long_exchange"), group["symbol"]), []),
-                    records.get((row.get("short_exchange"), group["symbol"]), []),
-                    now,
+                output[key] = combine_funding_summaries(
+                    summaries.get((row.get("long_exchange"), group["symbol"])),
+                    summaries.get((row.get("short_exchange"), group["symbol"])),
                 )
         DUAL_FUNDING_STATISTICS_CACHE.update({"ts": now_ts, "key": targets, "data": output})
         return output

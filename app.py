@@ -2274,6 +2274,22 @@ def refresh_binance_open_interest(contracts):
                 continue
 
 
+def funding_statistics_window_starts(now):
+    """Inclusive millisecond starts: rolling 24H, existing 3/7/30 calendar days.
+
+    The 24H window is (now - 24 hours, now], not Shanghai midnight to now.
+    Excluding its left endpoint avoids counting 25 hourly settlements at an
+    exact settlement boundary. Longer periods and date-picker semantics stay
+    unchanged; these are sums of settled records, never projected funding.
+    """
+    local_now = now.astimezone(SHANGHAI_TZ)
+    return {
+        1: int(now.timestamp() * 1000) - 24 * 60 * 60 * 1000 + 1,
+        **{days: int(datetime.combine(local_now.date() - timedelta(days=days - 1), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
+           for days in (3, 7, 30)},
+    }
+
+
 def sync_funding_history(symbols):
     now = datetime.now(SHANGHAI_TZ)
     start_day = now.date() - timedelta(days=29)
@@ -2337,18 +2353,13 @@ def sync_funding_history(symbols):
     for item in stored_rows:
         stored_by_symbol.setdefault(item.symbol, []).append(item)
     output = {}
+    starts = funding_statistics_window_starts(now)
     for symbol in symbols:
         rows = sorted(stored_by_symbol.get(symbol, []), key=lambda item: item.funding_time)
-        by_date = {}
-        for item in rows:
-            funding_date = datetime.fromtimestamp(item.funding_time / 1000, tz=timezone.utc).astimezone(SHANGHAI_TZ).date()
-            by_date[funding_date] = by_date.get(funding_date, 0.0) + item.funding_rate
         output[symbol] = {
             "previous": rows[-1].funding_rate if rows else None,
-            "day_1": sum(by_date.get(now.date() - timedelta(days=offset), 0.0) for offset in range(1)),
-            "day_3": sum(by_date.get(now.date() - timedelta(days=offset), 0.0) for offset in range(3)),
-            "day_7": sum(by_date.get(now.date() - timedelta(days=offset), 0.0) for offset in range(7)),
-            "day_30": sum(by_date.get(now.date() - timedelta(days=offset), 0.0) for offset in range(30)),
+            **{f"day_{days}": sum(item.funding_rate for item in rows if item.funding_time >= start) if rows else None
+               for days, start in starts.items()},
         }
     return output
 
@@ -2377,10 +2388,7 @@ def funding_statistics(symbols):
         start_day = now.date() - timedelta(days=29)
         start_time = int(datetime.combine(start_day, datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
         end_time = int(now.timestamp() * 1000)
-        starts = {
-            days: int(datetime.combine(now.date() - timedelta(days=days - 1), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
-            for days in (1, 3, 7, 30)
-        }
+        starts = funding_statistics_window_starts(now)
         aggregates = db.session.query(
             FundingRateRecord.symbol,
             func.sum(case((FundingRateRecord.funding_time >= starts[1], FundingRateRecord.funding_rate), else_=0.0)),
@@ -2427,7 +2435,7 @@ def enrich_funding_statistics(groups):
     for group in groups:
         stats = statistics.get(group["symbol"].replace("/", ""), {})
         for row in group["rows"]:
-            row.update({"funding_previous": stats.get("previous"), "funding_24h": stats.get("day_1", 0.0), "funding_3d": stats.get("day_3", 0.0), "funding_7d": stats.get("day_7", 0.0), "funding_30d": stats.get("day_30", 0.0)})
+            row.update({"funding_previous": stats.get("previous"), "funding_24h": stats.get("day_1"), "funding_3d": stats.get("day_3"), "funding_7d": stats.get("day_7"), "funding_30d": stats.get("day_30")})
 
 
 def dual_funding_history_targets(snapshot):
@@ -2542,13 +2550,14 @@ def sync_dual_funding_history(targets):
 def calculate_dual_funding_differences(long_records, short_records, now=None):
     """Net settled funding for a hedge: short receipts minus long payments."""
     now = now or datetime.now(SHANGHAI_TZ)
+    end_time = int(now.timestamp() * 1000)
 
     def normalized(records, sign):
         result = []
         for item in records:
             funding_time = item.get("funding_time") if isinstance(item, dict) else item.funding_time
             funding_rate = item.get("funding_rate") if isinstance(item, dict) else item.funding_rate
-            if funding_time is not None and funding_rate is not None:
+            if funding_time is not None and funding_rate is not None and int(funding_time) <= end_time:
                 result.append((int(funding_time), sign * float(funding_rate)))
         return result
 
@@ -2562,9 +2571,8 @@ def calculate_dual_funding_differences(long_records, short_records, now=None):
     latest_minute = max(timestamp // 60_000 for timestamp, _rate in events)
     previous = sum(rate for timestamp, rate in events if timestamp // 60_000 == latest_minute)
     output = {"previous": previous}
-    for days in (1, 3, 7, 30):
-        start = int(datetime.combine(now.date() - timedelta(days=days - 1), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
-        output[f"day_{days}"] = sum(rate for timestamp, rate in events if start <= timestamp <= int(now.timestamp() * 1000))
+    for days, start in funding_statistics_window_starts(now).items():
+        output[f"day_{days}"] = sum(rate for timestamp, rate in events if start <= timestamp <= end_time)
     return output
 
 
@@ -2577,10 +2585,7 @@ def settled_funding_summaries(model, targets, now):
     """
     if not targets:
         return {}
-    starts = {
-        days: int(datetime.combine(now.date() - timedelta(days=days - 1), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
-        for days in (1, 3, 7, 30)
-    }
+    starts = funding_statistics_window_starts(now)
     end_time = int(now.timestamp() * 1000)
     keys = [model.symbol] if model is FundingRateRecord else [model.exchange, model.symbol]
     target_filter = model.symbol.in_(targets) if model is FundingRateRecord else tuple_(*keys).in_(targets)

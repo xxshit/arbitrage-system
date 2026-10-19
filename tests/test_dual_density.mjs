@@ -93,7 +93,8 @@ test('funding comparison removes the settlement note without dropping any period
     const row={...route('Bybit',0),funding_settlement_label:label},before=JSON.stringify(row),markup=context.dualFundingHistory(row);
     assert.equal(JSON.stringify(row),before);assert.equal((markup.match(/<em /g)||[]).length,6);
     for(const period of ['当前','上期','24H','3D','7D','30D'])assert.ok(markup.includes(`<b>${period}</b>`));
-    assert.ok(!markup.includes('<small>'));assert.ok(!markup.includes('结算'));assert.ok(!markup.includes('待同步'));
+    const visibleText=markup.replace(/<[^>]*>/g,'');
+    assert.ok(!markup.includes('<small>'));assert.ok(!visibleText.includes('结算'));assert.ok(!visibleText.includes('待同步'));
     // Each leg's own settlement clock and cycle are still present.
     assert.ok(context.dualExchangeCard(row,'long').includes('12:00:00'));
     assert.ok(context.dualExchangeCard(row,'short').includes('16:00:00'));

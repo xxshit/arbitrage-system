@@ -34,7 +34,7 @@ class DualFundingHistoryTests(unittest.TestCase):
 
         # 08:00 双方同时结算：空端 +0.006%，多端支付 0.020%。
         self.assertAlmostEqual(result["previous"], -0.014)
-        # 24H 使用北京时间今日 00:00 至当前的全部真实结算事件。
+        # 24H 使用最近24小时的全部真实结算事件；昨日08:00已在窗口外。
         self.assertAlmostEqual(result["day_1"], -0.022)
         # 3D 再包含昨日的两个结算事件，而不是按固定周期补齐虚拟记录。
         self.assertAlmostEqual(result["day_3"], -0.004)

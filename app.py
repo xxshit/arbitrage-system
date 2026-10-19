@@ -3317,12 +3317,16 @@ def initialize_alert_reminders():
     Keep every original field; add only reminder metadata. Page reads never write.
     """
     marker = "range-policy-1-initialized"
-    if db.session.get(AlertReminderState, marker):
-        return 0
+    initialized = db.session.get(AlertReminderState, marker) is not None
     cutoff = datetime.now() - timedelta(hours=24)
-    identities = [row[0] for row in db.session.query(AlertPulse.id).join(AlertEvent, AlertPulse.alert_event_id == AlertEvent.id)
-                  .filter(AlertEvent.created_at >= cutoff, AlertEvent.created_at <= datetime.now())
-                  .order_by(func.json_extract(AlertPulse.evidence_json, "$.peak_at"), AlertPulse.id).all()]
+    query = db.session.query(AlertPulse.id).join(AlertEvent, AlertPulse.alert_event_id == AlertEvent.id).filter(AlertEvent.created_at >= cutoff, AlertEvent.created_at <= datetime.now())
+    if initialized:
+        # A code rollback can briefly run an older writer. Catch up only its
+        # unannotated observations, silently, without resetting saved bounds.
+        query = query.filter(func.json_extract(AlertPulse.evidence_json, "$.reminder.policy").is_(None))
+    identities = [row[0] for row in query.order_by(func.json_extract(AlertPulse.evidence_json, "$.peak_at"), AlertPulse.id).all()]
+    if initialized and not identities:
+        return 0
     isolated = {}
     for episode in SpotDivergence.query.filter(or_(SpotDivergence.resolved_at.is_(None), SpotDivergence.resolved_at >= cutoff)).all():
         isolated.setdefault(spot_divergence_key(episode.symbol, episode.long_exchange, episode.short_exchange), []).append(episode)
@@ -3340,7 +3344,8 @@ def initialize_alert_reminders():
                 pulse = store_pulse_reminder(pulse, None, states, seeded=True)
             record.evidence_json = json.dumps(pulse, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
         db.session.flush()
-    db.session.add(AlertReminderState(id=marker, state_json="{}"))
+    if not initialized:
+        db.session.add(AlertReminderState(id=marker, state_json="{}"))
     db.session.commit()
     return len(identities)
 

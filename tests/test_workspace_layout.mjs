@@ -75,9 +75,30 @@ test('layout assets load after the existing business assets, and risk has four i
   assert.ok(html.indexOf("filename='workspace-layout.css'")>html.indexOf("filename='style.css'"));
   assert.ok(html.indexOf("filename='workspace-layout.js'")>html.indexOf("filename='app.js'"));
   assert.ok(html.includes("filename='workspace-layout.css') }}?v=20261019-spot-density-v1"));
-  assert.ok(html.includes("filename='workspace-layout.js') }}?v=20261019-equity-spot-v1"));
+  assert.ok(html.includes("filename='workspace-layout.js') }}?v=20261020-spot-no-guide-v1"));
   const risk=html.slice(html.indexOf('<section id="risk"'),html.indexOf('<section id="thinking"'));
   assert.equal((risk.match(/<article>/g)||[]).length,4);assert.ok(risk.includes('真实下单尚未开放'));
+});
+
+test('spot scanner ends after its live controls with no explanatory cards or empty wrapper',()=>{
+  const spot=html.match(/<section id="spot-futures"\s[\s\S]*?<\/section>/)?.[0];
+  assert.ok(spot);
+  for(const removed of ['strategy-grid','EXECUTION FLOW','RISK REMINDER','执行逻辑','实时数据说明','layout-reading-guide'])assert.ok(!spot.includes(removed),removed);
+  for(const id of ['spotFuturesSearch','binanceSpotOnly','spotFuturesRows','previousPage','nextPage','pageInfo','spotFuturesUpdated','spotFuturesCountdown'])assert.ok(spot.includes(`id="${id}"`),id);
+  assert.ok(spot.endsWith('</p></div></section>'));
+});
+
+test('initial layout and repeated refreshes never fold a spot guide; other guides remain supported',()=>{
+  const calls=[],context={foldReadingGuide:(node,title)=>calls.push({node,title}),prepareOutline:()=>{},accessibleScroll:()=>{}};
+  vm.createContext(context);
+  vm.runInContext(metadata+'\n'+script.slice(script.indexOf('function prepareView('),script.indexOf('\n  let frame =')),context);
+  const view={id:'spot-futures',dataset:{},classList:{add(){}},querySelectorAll:()=>[],querySelector:selector=>{
+    assert.notEqual(selector,'.strategy-grid','spot must not recreate a guide on refresh');return {};
+  }};
+  context.prepareView(view);context.prepareView(view);
+  assert.equal(calls.length,0);assert.equal(view.dataset.layout,'market');
+  const guide={};context.prepareView({...view,id:'dual-futures',querySelector:()=>guide});
+  assert.equal(calls.length,1);assert.equal(calls[0].node,guide);assert.equal(calls[0].title,'执行逻辑与数据说明');
 });
 
 test('navigation restores the shared header but data mutations never reset reading position',()=>{

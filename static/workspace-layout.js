@@ -133,7 +133,7 @@
     if (view.id === 'funding-trend') view.querySelectorAll('.funding-trend-grid').forEach(groupFundingMetrics);
     if (view.id === 'gainers-losers') prepareRankingScroll(view);
     if (view.id === 'onchain-opportunities') foldReadingGuide(view.querySelector('.onchain-method'), '机会分计算方法与数据说明');
-    if (['spot-futures','dual-futures'].includes(view.id)) foldReadingGuide(view.querySelector('.strategy-grid'), '执行逻辑与数据说明');
+    if (view.id === 'dual-futures') foldReadingGuide(view.querySelector('.strategy-grid'), '执行逻辑与数据说明');
     if (view.id === 'thinking') foldReadingGuide(view.querySelector('.strategy-grid'), '筛选原则与执行纪律');
     prepareOutline(view, profile);
   }

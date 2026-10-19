@@ -17,6 +17,7 @@ test('spot 24H keeps settled total separate from current and explains rolling wi
   assert.ok(markup.includes('title="最近24小时已结算资费累计，不含当前预估"'));
   assert.match(markup,/<b>24H<\/b><span[^>]*>0.03%<\/span>/);
   for(const label of ['当前','上期','24H','3D','7D','30D'])assert.ok(markup.includes(`<b>${label}</b>`));
+  for(const [days,hours] of [[3,72],[7,168],[30,720]])assert.ok(markup.includes(`title="最近${days}天（${hours}小时）已结算资费累计，不含当前预估"`));
   assert.ok(!markup.includes('0.035%'));
 });
 
@@ -24,6 +25,7 @@ test('dual 24H renders actual signed difference and does not fabricate missing h
   const context=harness();
   const markup=context.dualFundingHistory({funding_difference:.005,funding_difference_previous:.005,funding_difference_24h:-.027});
   assert.ok(markup.includes('最近24小时已结算净资费：空端累计减多端累计，不含当前预估'));
+  for(const [days,hours] of [[3,72],[7,168],[30,720]])assert.ok(markup.includes(`title="最近${days}天（${hours}小时）已结算净资费：空端累计减多端累计，不含当前预估"`));
   assert.match(markup,/<b>24H<\/b><em class="negative">-0.027%<\/em>/);
   assert.match(context.dualFundingHistory({funding_difference_24h:null}),/<b>24H<\/b><em[^>]*>—<\/em>/);
 });

@@ -1142,7 +1142,7 @@ ANNOUNCEMENT_SOURCES = {
 }
 INDEX_COMPONENT_CURSOR = 0
 FUNDING_SYNC_CURSOR = 0
-DUAL_FUNDING_SYNC_CURSOR = 0
+DUAL_FUNDING_SYNC_CURSOR = None
 MARKET_REFRESH_SECONDS = 5
 EQUITY_MARKET_REFRESH_SECONDS = 15
 MARKET_DB_PERSIST_SECONDS = 15
@@ -2275,34 +2275,43 @@ def refresh_binance_open_interest(contracts):
 
 
 def funding_statistics_window_starts(now):
-    """Inclusive millisecond starts: rolling 24H, existing 3/7/30 calendar days.
+    """Inclusive millisecond starts for (now - N * 24 hours, now].
 
-    The 24H window is (now - 24 hours, now], not Shanghai midnight to now.
-    Excluding its left endpoint avoids counting 25 hourly settlements at an
-    exact settlement boundary. Longer periods and date-picker semantics stay
-    unchanged; these are sums of settled records, never projected funding.
+    Left + 1ms avoids counting an extra settlement at an exact boundary.
+    All fixed periods sum settled facts, never projected funding. The explicit
+    date picker remains a separate calendar-day query.
     """
-    local_now = now.astimezone(SHANGHAI_TZ)
-    return {
-        1: int(now.timestamp() * 1000) - 24 * 60 * 60 * 1000 + 1,
-        **{days: int(datetime.combine(local_now.date() - timedelta(days=days - 1), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
-           for days in (3, 7, 30)},
-    }
+    end = int(now.timestamp() * 1000)
+    return {days: end - days * 24 * 60 * 60 * 1000 + 1 for days in (1, 3, 7, 30)}
+
+
+def funding_history_sync_start(earliest, latest, now):
+    """Keep a 31-day buffer; repair old partial histories before going incremental.
+
+    A recent latest record alone does not prove the rolling 30-day left edge
+    was fetched. New listings can have shorter histories: fetch only real
+    available events, never invent missing periods or multiply today's rate.
+    """
+    full_start = int(now.timestamp() * 1000) - 31 * 24 * 60 * 60 * 1000
+    if earliest is not None and earliest <= funding_statistics_window_starts(now)[30]:
+        return max(full_start, (latest or full_start) - 24 * 60 * 60 * 1000)
+    return full_start
 
 
 def sync_funding_history(symbols):
+    if not symbols:
+        return {}
     now = datetime.now(SHANGHAI_TZ)
-    start_day = now.date() - timedelta(days=29)
-    start_time = int(datetime.combine(start_day, datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
+    start_time = funding_history_sync_start(None, None, now)
     end_time = int(now.timestamp() * 1000)
-    latest_times = {symbol: timestamp for symbol, timestamp in db.session.query(FundingRateRecord.symbol, func.max(FundingRateRecord.funding_time)).filter(FundingRateRecord.symbol.in_(symbols)).group_by(FundingRateRecord.symbol).all()}
+    history_bounds = {symbol: (earliest, latest) for symbol, earliest, latest in db.session.query(FundingRateRecord.symbol, func.min(FundingRateRecord.funding_time), func.max(FundingRateRecord.funding_time)).filter(FundingRateRecord.symbol.in_(symbols)).group_by(FundingRateRecord.symbol).all()}
     existing_keys = {(symbol, timestamp) for symbol, timestamp in db.session.query(FundingRateRecord.symbol, FundingRateRecord.funding_time).filter(FundingRateRecord.symbol.in_(symbols), FundingRateRecord.funding_time >= start_time).all()}
     pending = list(symbols)
 
     def fetch_history(symbol):
-        recent_start = max(start_time, (latest_times.get(symbol) or start_time) - 24 * 60 * 60 * 1000)
+        recent_start = funding_history_sync_start(*history_bounds.get(symbol, (None, None)), now)
         # Some cloud routes reject wide start/end queries and requests above 200 rows.
-        # Read stable 200-row pages backwards with endTime; four pages cover 30 days
+        # Read stable 200-row pages backwards with endTime; four pages cover 31 days
         # even when a contract settles hourly.
         output = []
         cursor_end = None
@@ -2339,29 +2348,12 @@ def sync_funding_history(symbols):
                             existing_keys.add(key)
                 except Exception:
                     pass
-        cutoff = int(datetime.combine(now.date() - timedelta(days=30), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
-        FundingRateRecord.query.filter(FundingRateRecord.funding_time < cutoff).delete(synchronize_session=False)
-        db.session.commit()
-
-    cutoff = int(datetime.combine(now.date() - timedelta(days=30), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
-    FundingRateRecord.query.filter(FundingRateRecord.funding_time < cutoff).delete(synchronize_session=False)
+    FundingRateRecord.query.filter(FundingRateRecord.funding_time < start_time).delete(synchronize_session=False)
     db.session.commit()
-    # Only three scalar fields are needed; never retain a batch of ORM objects
-    # and their identity-map state just to calculate a read-only return value.
-    stored_rows = db.session.query(FundingRateRecord.symbol, FundingRateRecord.funding_time, FundingRateRecord.funding_rate).filter(FundingRateRecord.symbol.in_(symbols), FundingRateRecord.funding_time >= start_time, FundingRateRecord.funding_time <= end_time).all()
-    stored_by_symbol = {}
-    for item in stored_rows:
-        stored_by_symbol.setdefault(item.symbol, []).append(item)
-    output = {}
-    starts = funding_statistics_window_starts(now)
-    for symbol in symbols:
-        rows = sorted(stored_by_symbol.get(symbol, []), key=lambda item: item.funding_time)
-        output[symbol] = {
-            "previous": rows[-1].funding_rate if rows else None,
-            **{f"day_{days}": sum(item.funding_rate for item in rows if item.funding_time >= start) if rows else None
-               for days, start in starts.items()},
-        }
-    return output
+    FUNDING_STATISTICS_CACHE.update({"ts": 0.0, "symbols": frozenset(), "data": {}})
+    DUAL_FUNDING_STATISTICS_CACHE.update({"ts": 0.0, "key": frozenset(), "data": {}})
+    # Share the page's bounded SQL aggregation, including empty-window semantics.
+    return funding_statistics(symbols)
 
 
 def funding_statistics(symbols):
@@ -2385,8 +2377,6 @@ def funding_statistics(symbols):
         if result is not None:
             return result
         now = datetime.now(SHANGHAI_TZ)
-        start_day = now.date() - timedelta(days=29)
-        start_time = int(datetime.combine(start_day, datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
         end_time = int(now.timestamp() * 1000)
         starts = funding_statistics_window_starts(now)
         aggregates = db.session.query(
@@ -2397,7 +2387,7 @@ def funding_statistics(symbols):
             func.sum(case((FundingRateRecord.funding_time >= starts[30], FundingRateRecord.funding_rate), else_=0.0)),
         ).filter(
             FundingRateRecord.symbol.in_(symbols),
-            FundingRateRecord.funding_time >= start_time,
+            FundingRateRecord.funding_time >= starts[30],
             FundingRateRecord.funding_time <= end_time,
         ).group_by(FundingRateRecord.symbol).all()
         aggregate_by_symbol = {row[0]: row[1:] for row in aggregates}
@@ -2448,6 +2438,39 @@ def dual_funding_history_targets(snapshot):
         for exchange in (row.get("long_exchange"), row.get("short_exchange"))
         if exchange in {"Bybit", "OKX"}
     })
+
+
+def dual_funding_history_batch(targets):
+    """Interleave venues and resume after restarts, rather than starving OKX."""
+    ordered = sorted(set(targets), key=lambda target: (target[1], target[0]))
+    if not ordered:
+        return []
+    cursor = DUAL_FUNDING_SYNC_CURSOR
+    if cursor is None:
+        try:
+            with (Path(app.instance_path) / "dual-funding-history-cursor.json").open() as handle:
+                saved = json.loads(handle.read(4096))
+            if isinstance(saved, list) and len(saved) == 2 and all(isinstance(part, str) and len(part) <= 80 for part in saved):
+                cursor = tuple(saved)
+        except (OSError, ValueError):
+            pass  # disposable progress, never historical funding or account data
+    start = next((index for index, target in enumerate(ordered)
+                  if cursor is None or (target[1], target[0]) > (cursor[1], cursor[0])), 0)
+    return (ordered + ordered)[start:start + min(12, len(ordered))]
+
+
+def save_dual_funding_history_cursor(target):
+    global DUAL_FUNDING_SYNC_CURSOR
+    DUAL_FUNDING_SYNC_CURSOR = tuple(target)
+    path = Path(app.instance_path) / "dual-funding-history-cursor.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(target))
+        temporary.replace(path)
+    except OSError:
+        # Continue this process's fair rotation even if progress cannot persist.
+        app.logger.warning("dual_funding_history_cursor_save_failed")
 
 
 def fetch_exchange_funding_history(exchange, symbol, start_time, end_time):
@@ -2503,7 +2526,7 @@ def sync_dual_funding_history(targets):
     if not targets:
         return 0
     now = datetime.now(SHANGHAI_TZ)
-    full_start = int(datetime.combine(now.date() - timedelta(days=29), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
+    full_start = funding_history_sync_start(None, None, now)
     end_time = int(now.timestamp() * 1000)
 
     def fetch_target(target):
@@ -2512,8 +2535,7 @@ def sync_dual_funding_history(targets):
             func.min(ExchangeFundingRateRecord.funding_time),
             func.max(ExchangeFundingRateRecord.funding_time),
         ).filter_by(exchange=exchange, symbol=symbol).one()
-        history_complete = earliest is not None and earliest <= full_start + 12 * 60 * 60 * 1000
-        start_time = max(full_start, (latest or full_start) - 24 * 60 * 60 * 1000) if history_complete else full_start
+        start_time = funding_history_sync_start(earliest, latest, now)
         return target, start_time, fetch_exchange_funding_history(exchange, symbol, start_time, end_time)
 
     fetched = []
@@ -2540,8 +2562,7 @@ def sync_dual_funding_history(targets):
             ))
             existing.add(funding_time)
             inserted += 1
-    cutoff = int(datetime.combine(now.date() - timedelta(days=30), datetime.min.time(), tzinfo=SHANGHAI_TZ).timestamp() * 1000)
-    ExchangeFundingRateRecord.query.filter(ExchangeFundingRateRecord.funding_time < cutoff).delete(synchronize_session=False)
+    ExchangeFundingRateRecord.query.filter(ExchangeFundingRateRecord.funding_time < full_start).delete(synchronize_session=False)
     db.session.commit()
     DUAL_FUNDING_STATISTICS_CACHE.update({"ts": 0.0, "key": frozenset(), "data": {}})
     return inserted
@@ -14984,18 +15005,18 @@ def background_funding_history_sync():
 
 
 def background_dual_funding_history_sync():
-    global DUAL_FUNDING_SYNC_CURSOR
     time.sleep(20)
     while True:
         try:
             with app.app_context():
                 targets = dual_funding_history_targets(load_latest_dual_futures_snapshot())
                 if targets:
-                    batch_size = min(12, len(targets))
-                    start = DUAL_FUNDING_SYNC_CURSOR % len(targets)
-                    batch = (targets + targets)[start:start + batch_size]
-                    DUAL_FUNDING_SYNC_CURSOR = (start + len(batch)) % len(targets)
-                    sync_dual_funding_history(batch)
+                    batch = dual_funding_history_batch(targets)
+                    try:
+                        sync_dual_funding_history(batch)
+                    finally:
+                        # A failed target must not keep later venues from running.
+                        save_dual_funding_history_cursor(batch[-1])
         except Exception:
             with app.app_context():
                 db.session.rollback()

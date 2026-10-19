@@ -227,7 +227,7 @@ body:has(#spot-futures.active) main > header,
 .layout-view#spot-futures .layout-table-hint {display:none}
 .layout-view#spot-futures .spot-sort-picker {padding:0;border:0;background:none}
 .layout-view#spot-futures.active .table-wrap {flex:1 1 0;min-height:0;max-height:none;overflow:auto;overscroll-behavior:contain}
-.layout-view#spot-futures table {min-width:1440px}
+.layout-view#spot-futures table {min-width:1300px}
 .layout-view#spot-futures thead th {padding:8px;line-height:1.35;white-space:nowrap}
 .layout-view#spot-futures td {padding:5px 8px;font-size:12px;line-height:1.4;vertical-align:middle}
 .layout-view#spot-futures td.symbol {min-width:134px;vertical-align:top;padding:8px}

@@ -5,6 +5,7 @@ import test from 'node:test';
 
 const source=readFileSync(new URL('../static/app.js',import.meta.url),'utf8');
 const css=readFileSync(new URL('../static/workspace-layout.css',import.meta.url),'utf8');
+const html=readFileSync(new URL('../templates/index.html',import.meta.url),'utf8');
 const renderer=source.slice(source.indexOf('function spotRows('),source.indexOf('async function loadSpotFutures('));
 const columns=source.slice(source.indexOf('function configureSpotColumns('),source.indexOf('function configureSpotLayoutShell('));
 function harness(){
@@ -19,14 +20,14 @@ const row=(exchange,index=0)=>({long_exchange:exchange,open_spread:index+.51,clo
   funding_interval_hours:4,next_funding_time:'12:00',spot_volume:index+100,futures_volume:1000,change_5m:5.7});
 const groups=[['ONE',['Gate']],['TWO',['Binance','Bitget']],['THREE',['Binance','Gate','Bitget']]].map(([symbol,venues])=>({symbol:symbol+'/USDT',rows:venues.map(row)}));
 
-test('compact rows retain all twelve columns and align shared cells for one, two and three venues',()=>{
+test('compact rows omit the redundant contract venue and align eleven columns for one, two and three venues',()=>{
   const markup=harness().spotRows(groups),rows=[...markup.matchAll(/<tr[^>]*>(.*?)<\/tr>/g)].map(match=>match[1]);
-  const active=Array(12).fill(null);let route=0;
+  const active=Array(11).fill(null);let route=0;
   for(const group of groups)for(const expected of group.rows){
     const cells=[...rows[route++].matchAll(/<td([^>]*)>(.*?)<\/td>/g)],grid=active.map(item=>item?.value??null);let col=0;
     for(const [,attrs,value] of cells){
       while(grid[col]!==null)col++;
-      assert.ok(col<12,'unexpected thirteenth column');grid[col]=value;
+      assert.ok(col<11,'unexpected twelfth column');grid[col]=value;
       const span=Number(attrs.match(/rowspan="(\d+)"/)?.[1]||1);active[col]={value,left:span};
     }
     assert.ok(grid.every(Boolean),'missing column');
@@ -35,10 +36,11 @@ test('compact rows retain all twelve columns and align shared cells for one, two
     assert.equal(grid[4],'0.23%');assert.equal(grid[5],'FUNDING:0.03');
     assert.ok(grid[6].includes('4H'));assert.equal(grid[7],'CHANGES:5.7');
     assert.equal(grid[8],`SPOT_VOLUME:${expected.spot_volume}`);assert.equal(grid[9],'FUTURE_VOLUME:1000');
-    assert.equal(grid[10],'EXCHANGE:Binance 合约');assert.ok(grid[11].includes(encodeURIComponent(`${group.symbol}|${expected.long_exchange}`)));
+    assert.ok(grid[10].includes(encodeURIComponent(`${group.symbol}|${expected.long_exchange}`)));
     active.forEach((item,index)=>{if(item&&!--item.left)active[index]=null});
   }
   assert.equal(route,6);assert.ok(active.every(item=>item===null));
+  assert.ok(!markup.includes('contract-cell'));assert.ok(!markup.includes('Binance 合约'));
 });
 
 test('each venue keeps its own edge, wallet control and hedge action while shared metrics render once',()=>{
@@ -62,13 +64,28 @@ test('missing pinned spot routes cannot show cached prices or enable a hedge; li
 });
 
 test('header reorder is idempotent and preserves the original header nodes',()=>{
-  const context=harness(),original=Array.from({length:12},(_,index)=>({index}));
+  const context=harness(),original=Array.from({length:11},(_,index)=>({index}));
   const header={children:[...original],dataset:{},appendChild(node){this.children.splice(this.children.indexOf(node),1);this.children.push(node)}};
   context.configureSpotColumns(header);context.configureSpotColumns(header);
-  assert.deepEqual(header.children.map(node=>node.index),[0,3,9,10,6,7,8,1,2,5,4,11]);
-  assert.equal(new Set(header.children).size,12);assert.ok(header.children.every(node=>original.includes(node)));
-  const partial={children:[...original.slice(0,11)],dataset:{},appendChild(){throw new Error('must not alter partial header')}};
+  assert.deepEqual(header.children.map(node=>node.index),[0,3,8,9,5,6,7,1,2,4,10]);
+  assert.equal(new Set(header.children).size,11);assert.ok(header.children.every(node=>original.includes(node)));
+  const partial={children:[...original.slice(0,10)],dataset:{},appendChild(){throw new Error('must not alter partial header')}};
   context.configureSpotColumns(partial);context.configureSpotColumns(null);assert.deepEqual(partial.dataset,{});
+});
+
+test('spot header, initial loading, empty, error and group dividers all occupy eleven columns',()=>{
+  const spot=html.match(/<section id="spot-futures"\s[\s\S]*?<\/section>/)?.[0];
+  assert.ok(spot);
+  const header=spot.match(/<thead><tr>([\s\S]*?)<\/tr>/)?.[1];
+  assert.equal((header.match(/<th>/g)||[]).length,11);
+  assert.ok(!header.includes('Binance 合约'));assert.ok(!spot.includes('colspan="12"'));
+  assert.equal((spot.match(/colspan="11"/g)||[]).length,2);
+  const loader=source.slice(source.indexOf('async function loadSpotFutures('),source.indexOf('function hedgeMetric('));
+  assert.equal((loader.match(/colspan="11"/g)||[]).length,2);
+  assert.ok(!loader.includes('colspan="12"'));
+  const frame=source.slice(source.indexOf('function applyGroupFrameClasses(')).split('\n')[0];
+  assert.ok(frame.includes("columns=prefix==='spot'?11:5"));
+  assert.ok(css.includes('.layout-view#spot-futures table {min-width:1300px}'));
 });
 
 test('compact styling is spot-scoped, keeps all period values and wraps divergence inside its cell',()=>{

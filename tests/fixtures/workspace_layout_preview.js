@@ -60,6 +60,7 @@
     price_usd:index===0?'0.0000000001234567890123456789':'1.23456789',opportunity_score:82-index*6,risk_level:index?'注意风险':'极高',score_components:{liquidity:22,activity:20,buy_pressure:12,momentum:28},
     price_change_5m:3.2,price_change_1h:7.8,price_change_6h:13.4,price_change_24h:22.1,liquidity_usd:4500000,volume_24h_usd:2700000,turnover:0.6,buy_ratio:63,source_url:'https://example.com/pool'}));
   const fixtures = {
+    '/api/equity-arbitrage':{items:[],page:1,pages:1,total:0,available:{spot_futures:0,futures_futures:0},captured_at_epoch:now(),execution_enabled:false},
     '/api/auth/me':{user_id:1,username:'preview_admin',is_admin:true,account_level:'lv3',csrf_token:'synthetic-only',device_lock_required:false,chat_nav_hidden:false},
     '/api/market-metadata/delisted-symbols':{symbols:[]},
     '/api/spot-futures':{symbols:spot,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:5,page:1,pages:1,next_refresh_in_seconds:5},

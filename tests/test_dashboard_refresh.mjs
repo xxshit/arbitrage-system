@@ -104,7 +104,7 @@ test('indicator displays real source time and ages it even without another respo
   assert.ok(status.textContent.includes('行情延迟'));
 });
 
-for(const [view,name] of [['spot-futures','loadSpotFutures'],['dual-futures','loadDualFutures'],['my-positions','loadHedgePositions'],['alerts','loadAlerts']]){
+for(const [view,name] of [['spot-futures','loadSpotFutures'],['dual-futures','loadDualFutures'],['equity-arbitrage','loadEquityArbitrage'],['my-positions','loadHedgePositions'],['alerts','loadAlerts']]){
   test(`${view}: 5-second start cadence, independent of response duration`,async()=>{
     const h=harness(),starts=[];h.context.active=view;
     h.context[name]=()=>{starts.push(h.now());return new Promise(resolve=>h.context.setTimeout(resolve,2000))};

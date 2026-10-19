@@ -44,7 +44,7 @@ function harness(){
 
 test('every profile has a dedicated name, purpose and source boundary',()=>{
   const h=harness();const missing=h.run('Object.keys(pageRefreshProfiles).filter(id=>!sectionWorkspaceMeta[id]?.name||!sectionWorkspaceMeta[id]?.description||!sectionWorkspaceMeta[id]?.source)');
-  assert.equal(missing.length,0);assert.equal(h.run('Object.keys(sectionWorkspaceMeta).length'),20);
+  assert.equal(missing.length,0);assert.equal(h.run('Object.keys(sectionWorkspaceMeta).length'),21);
   for(const id of h.run('Object.keys(sectionWorkspaceMeta)')){h.context.updateSectionWorkspace(id);assert.equal(h.heading.textContent,h.run(`sectionWorkspaceMeta['${id}'].name`));assert.ok(h.subtitle.textContent.length>0)}
 });
 

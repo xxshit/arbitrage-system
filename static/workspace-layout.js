@@ -5,6 +5,7 @@
     dashboard: {kind:'overview', sections:[['#majorMarketOverview','大盘风向'],['.opportunity-signal-grid','结构候选'],['.table-wrap','跨所报价']]},
     'onchain-opportunities': {kind:'discovery'},
     'spot-futures': {kind:'market'},
+    'equity-arbitrage': {kind:'market'},
     'dual-futures': {kind:'market'},
     'my-positions': {kind:'ledger'},
     'funding-trend': {kind:'funding'},

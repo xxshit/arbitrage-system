@@ -9,7 +9,7 @@
   <title>ArbiScope | 套利监控中心</title>
   <link rel="manifest" href="{{ url_for('web_app_manifest') }}?v=20260815-web-push">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20261018-workspace-refresh-v3">
-  <link rel="stylesheet" href="{{ url_for('static', filename='workspace-layout.css') }}?v=20261019-alert-screen-v3">
+  <link rel="stylesheet" href="{{ url_for('static', filename='workspace-layout.css') }}?v=20261019-equity-workspace-v1">
 </head>
 <body>
   <div id="mobileNavBackdrop" class="mobile-nav-backdrop" onclick="toggleMobileNav(false)" aria-hidden="true"></div>
@@ -28,6 +28,7 @@
       <a data-view="dual-futures" href="#dual-futures">⇄ &nbsp;期多期空套利</a>
       <a data-view="spot-futures" data-subnav="spot-period-nav" href="#spot-futures">◐ &nbsp;现多期空套利</a>
       <div class="spot-period-nav nav-sub hidden" aria-label="Binance 合约结算周期筛选"><button class="spot-period-filter active" data-spot-period="all" onclick="setSpotFundingInterval('all')">全部</button><button class="spot-period-filter" data-spot-period="1H" onclick="setSpotFundingInterval('1H')">1H</button><button class="spot-period-filter" data-spot-period="4H" onclick="setSpotFundingInterval('4H')">4H</button><button class="spot-period-filter" data-spot-period="8H" onclick="setSpotFundingInterval('8H')">8H</button></div>
+      <a data-view="equity-arbitrage" href="#equity-arbitrage">▤ &nbsp;美股套利</a>
       <a data-view="my-positions" href="#my-positions">▥ &nbsp;我的仓位</a>
       <a data-view="funding-trend" href="#funding-trend">↗ &nbsp;主升正资费套利榜</a>
       <a data-view="trade-validation" href="#trade-validation">▣ &nbsp;趋势验证</a>
@@ -107,11 +108,30 @@
       </div>
     </section>
     <section id="thinking" class="view"><div class="strategy-hero"><p class="eyebrow">MY ARBITRAGE THINKING</p><h2>我的套利思维</h2><p>先确认可成交的盘口价差，再确认资金费、流动性、结算周期与风险边界。信号是观察起点，不是自动下单理由。</p></div><div class="strategy-grid"><article class="panel"><p class="eyebrow">CORE PRINCIPLES</p><h3>核心原则</h3><div class="field-list"><span>只用买一、卖一计算开平差，避免最后成交价失真。</span><span>基差与开差异常必须连续确认，排除短时插针。</span><span>按流动性、资金费、结算时点综合判断机会质量。</span></div></article><article class="panel"><p class="eyebrow">EXECUTION DISCIPLINE</p><h3>执行纪律</h3><div class="field-list"><span>先做小额验证，确认双腿可成交与资金划转路径。</span><span>优先处理单腿风险，设置明确的撤退与平仓条件。</span><span>持续记录异常、实际滑点与资金费结果，复盘后再迭代阈值。</span></div></article></div></section>
+    <section id="equity-arbitrage" class="view">
+      <div class="panel equity-workspace">
+        <div class="equity-toolbar">
+          <div class="equity-mode-switch" role="group" aria-label="美股套利路径">
+            <button type="button" data-equity-mode="all" aria-pressed="true" class="active" onclick="setEquityFilter('strategy','all')">全部路径</button>
+            <button type="button" data-equity-mode="spot_futures" aria-pressed="false" onclick="setEquityFilter('strategy','spot_futures')">现多期空</button>
+            <button type="button" data-equity-mode="futures_futures" aria-pressed="false" onclick="setEquityFilter('strategy','futures_futures')">期多期空</button>
+          </div>
+          <label><input id="equitySearch" type="search" placeholder="搜索美股 / ETF 代码" aria-label="搜索美股标的" oninput="setEquityFilter('symbol',this.value)"></label>
+          <label class="equity-sort"><span>排序</span><select id="equitySort" aria-label="美股路径排序" onchange="setEquityFilter('sort_by',this.value)"><option value="open_spread">开差</option><option value="close_spread">平差</option><option value="symbol">标的</option></select><button id="equityDirection" type="button" onclick="toggleEquityDirection()">从高到低 ↓</button></label>
+          <span id="equityCount"></span>
+        </div>
+        <p class="equity-boundary">美股及 ETF 相关产品 · 不计入普通币报警。休市、指数更新及产品条款差异可能形成价差，不代表可成交收益。</p>
+        <div class="table-wrap"><table class="equity-table"><thead><tr><th>标的 / 路径</th><th>做多 · 卖一</th><th>做空 · 买一</th><th>开差 / 平差</th><th>资金费率 / 周期</th><th>合约基差</th><th>行情</th></tr></thead><tbody id="equityRows"><tr><td colspan="7" class="loading">正在读取美股路径…</td></tr></tbody></table></div>
+        <div class="pagination"><button id="equityPrevious" type="button" onclick="changeEquityPage(-1)">← 上一页</button><span id="equityPageInfo">第 1 页</span><button id="equityNext" type="button" onclick="changeEquityPage(1)">下一页 →</button></div>
+        <p id="equityStatus" class="data-status" role="status"></p>
+        <details class="equity-notes"><summary>配对范围</summary><p>只展示已识别为美股的匹配路径；现货须有已核验的同标的映射，不按相似名称或价格强行配对。未核验、单边缺失或其他地区股票不补成美股路径。没有现多期空数据时会明确显示为空。此栏不自动下单、不新增声音或 Lark 推送。</p></details>
+      </div>
+    </section>
   </main>
   <section id="tipsPanel" class="tips-panel collapsed"><button class="tips-toggle" onclick="toggleTips()"><span class="tips-dot"></span><b>TIPS</b><span id="tipsCount">0</span><span id="tipsChevron">⌃</span></button><div class="tips-body"><div class="tips-title"><span>实时报警</span><button onclick="loadAlerts()">↻</button></div><div id="tipsItems" class="tips-items"><p>正在检查报警…</p></div><button class="tips-collapse" onclick="toggleTips()">收起</button></div></section>
   <div id="modal" class="modal hidden"><form class="dialog" onsubmit="saveStrategy(event)"><button type="button" class="close" onclick="closeModal()">×</button><p class="eyebrow">NEW STRATEGY</p><h2>创建监控策略</h2><label>策略名称<input id="name" required placeholder="例如：BTC 跨所价差"></label><label>套利类型<select id="strategyMode"><option>跨所合约套利</option><option>现货多/合约空</option><option>资金费率套利</option></select></label><label>交易对<select id="symbol"><option>BTC/USDT</option><option>ETH/USDT</option><option>SOL/USDT</option></select></label><button class="primary submit">创建策略</button></form></div>
   <section id="chatRemarkModal" class="modal hidden"><form class="dialog chat-remark-dialog" onsubmit="saveChatRemark(event)"><button type="button" class="close" onclick="closeChatRemarkEditor()">×</button><p class="eyebrow">PRIVATE CONTACT NOTE</p><h2>修改联系人备注</h2><p id="chatRemarkAccount" class="chat-remark-account"></p><label>备注名<input id="chatRemarkInput" maxlength="24" autocomplete="off" placeholder="例如：盘友小林"></label><small class="chat-remark-help">备注仅在你的账号中可见，不会修改对方真实账号名。</small><div class="chat-remark-actions"><button type="button" onclick="saveChatRemark(event,true)">清空备注</button><button class="primary" type="submit">保存备注</button></div></form></section>
   <section id="hedgePositionModal" class="modal hidden"><form class="dialog hedge-preview-dialog" onsubmit="event.preventDefault()"><button type="button" class="close" onclick="closeHedgePositionBuilder()">×</button><p class="eyebrow">TWO-LEG ORDER PREVIEW</p><h2 id="hedgePreviewTitle">建立对冲仓位</h2><p id="hedgePreviewRoute" class="hedge-preview-route"></p><div class="hedge-preview-fields"><label>投入金额（USDT）<input id="hedgeQuoteAmount" type="number" min="10" step="1" value="100" oninput="renderHedgePositionPreview()"></label><label>合约杠杆<input id="hedgeLeverage" type="number" min="1" max="10" step="1" value="1" oninput="renderHedgePositionPreview()"></label><label>最大允许滑点<input id="hedgeMaxSlippage" type="number" min="0" max="5" step="0.05" value="0.30" oninput="renderHedgePositionPreview()"><span>%</span></label></div><div id="hedgeOrderPreview" class="hedge-order-preview"></div><div class="hedge-preview-notice"><b>安全边界</b><span>价格和数量均为当前盘口估算；接入私有 API 后仍需在最终确认页核对两腿数量、实际成交、手续费和单腿失败处置。</span></div><button id="hedgeSubmitButton" class="primary submit" type="button" disabled>等待币安私有 API</button></form></section>
-  <script src="{{ url_for('static', filename='app.js') }}?v=20261019-alert-screen-v3"></script>
-  <script src="{{ url_for('static', filename='workspace-layout.js') }}?v=20261018-alert-desk-v1"></script>
+  <script src="{{ url_for('static', filename='app.js') }}?v=20261019-equity-workspace-v1"></script>
+  <script src="{{ url_for('static', filename='workspace-layout.js') }}?v=20261019-equity-workspace-v1"></script>
 </body></html>

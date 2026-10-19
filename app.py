@@ -40,6 +40,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from anomaly_streams import AlertStreamHub, Route
 from anomaly_engine import alert_round_ids, pulse_is_actionable
 from alert_screening import DEFAULT_NOTIONAL, okx_contract_unit, pulse_has_watch_peak, screen_pulse
+from asset_catalog import NON_CRYPTO_BOOTSTRAP, bootstrap_category, compact_symbol, instrument_category
 
 load_dotenv()
 
@@ -75,7 +76,7 @@ def compress_alert_market_response(response):
 
 @app.after_request
 def disable_live_view_response_cache(response):
-    if request.path in {"/api/dashboard", "/api/spot-futures", "/api/dual-futures", "/api/alerts", "/api/hedge-positions", "/api/daily-report/listings", "/api/market-metadata/delisted-symbols"}:
+    if request.path in {"/api/dashboard", "/api/spot-futures", "/api/dual-futures", "/api/equity-arbitrage", "/api/alerts", "/api/hedge-positions", "/api/daily-report/listings", "/api/market-metadata/delisted-symbols"}:
         response.headers["Cache-Control"] = "private, no-store"
     return response
 
@@ -420,6 +421,16 @@ class TrendHorizonEvent(db.Model):
     observed_at = db.Column(db.DateTime, nullable=False, default=datetime.now, index=True)
     price = db.Column(db.Float)
     detail_json = db.Column(db.Text)
+
+
+class MarketAssetClassification(db.Model):
+    """Public, durable non-crypto classification; no account or wallet data."""
+    id = db.Column(db.Integer, primary_key=True)
+    exchange = db.Column(db.String(30), nullable=False)
+    symbol = db.Column(db.String(40), nullable=False)
+    category = db.Column(db.String(30), nullable=False)
+    observed_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+    __table_args__ = (db.UniqueConstraint("exchange", "symbol", name="uq_market_asset_classification"),)
 
 
 class LatestMarketSnapshot(db.Model):
@@ -1011,6 +1022,9 @@ BINANCE_ALPHA_CATALOG_CACHE = {"symbols": frozenset(), "expires_at": 0.0, "updat
 BINANCE_ALPHA_CATALOG_LOCK = threading.Lock()
 RWA_STOCK_SYMBOLS = set()
 RWA_STOCK_METADATA_READY = threading.Event()
+ASSET_CLASSIFICATIONS = {}
+ASSET_CLASSIFICATION_LOCK = threading.RLock()
+ASSET_CLASSIFICATION_SAVED = {}
 STATIC_RWA_STOCK_SYMBOLS = {
     # Binance/partner TradFi perpetuals are sometimes unavailable in exchangeInfo during partial refreshes.
     # Keep a local guard so stock, ETF and metal RWA contracts do not leak into crypto arbitrage scanners.
@@ -1475,7 +1489,56 @@ def refresh_rwa_stock_symbols(instruments):
         item.get("symbol") for item in instruments
         if item.get("contractType") == "TRADIFI_PERPETUAL" or item.get("underlyingType") == "EQUITY" or "TradFi" in item.get("underlyingSubType", [])
     }
+    refresh_asset_classifications(instruments, "Binance")
     RWA_STOCK_METADATA_READY.set()
+
+
+def load_asset_classifications():
+    """Restore before HTTP/worker startup so a restart cannot leak stock alerts."""
+    ASSET_CLASSIFICATIONS.update({(row.exchange, row.symbol): row.category for row in MarketAssetClassification.query.all()})
+    ASSET_CLASSIFICATION_SAVED.update(ASSET_CLASSIFICATIONS)
+
+
+def refresh_asset_classifications(instruments, exchange):
+    classified = {(exchange, compact_symbol(item.get("symbol"))): category for item in instruments
+                  if (category := instrument_category(item, exchange)) and item.get("symbol")}
+    if not classified:
+        return
+    with ASSET_CLASSIFICATION_LOCK:
+        # Missing entries in a partial/delisted catalog never erase old identity.
+        ASSET_CLASSIFICATIONS.update(classified)
+        changed = {key: kind for key, kind in classified.items() if ASSET_CLASSIFICATION_SAVED.get(key) != kind}
+        if changed and has_app_context():
+            existing = {(row.exchange, row.symbol): row for row in MarketAssetClassification.query.filter_by(exchange=exchange).all()}
+            for key, category in changed.items():
+                row = existing.get(key)
+                if row is None:
+                    row = MarketAssetClassification(exchange=key[0], symbol=key[1], category=category)
+                    db.session.add(row)
+                else:
+                    row.category, row.observed_at = category, datetime.now()
+            db.session.commit()
+            ASSET_CLASSIFICATION_SAVED.update(changed)
+
+
+def asset_category(symbol, exchange=None):
+    compact = compact_symbol(symbol)
+    if exchange:
+        return ASSET_CLASSIFICATIONS.get((exchange, compact)) or bootstrap_category(compact, exchange)
+    # Binance distinguishes US equity from HK/KR/CN, commodities and pre-IPO.
+    return asset_category(compact, "Binance") or asset_category(compact, "Bybit")
+
+
+def is_us_equity_pair(symbol):
+    return asset_category(symbol) == "us_equity"
+
+
+def verified_equity_spot_alias(symbol, raw_symbol, exchange, aliases):
+    # Same ticker or a similar price is not enough to equate a crypto spot token
+    # with a share/ETF derivative. Require an explicitly verified spot mapping.
+    return any(row.verified and str(row.exchange).upper() == str(exchange).upper() and str(row.market_type).lower() == "spot" and
+               compact_pair(row.canonical_symbol) == compact_pair(symbol) and
+               compact_pair(row.alias_symbol) == compact_pair(raw_symbol) for row in aliases)
 
 
 def sync_binance_listing_events(instruments):
@@ -2079,8 +2142,9 @@ def enrich_transfer_networks(groups):
 
 
 def is_rwa_stock_pair(symbol):
-    compact = symbol.replace("/", "").replace("-", "")
-    return compact in RWA_STOCK_SYMBOLS or compact in STATIC_RWA_STOCK_SYMBOLS
+    compact = compact_symbol(symbol)
+    return (compact in NON_CRYPTO_BOOTSTRAP or compact in RWA_STOCK_SYMBOLS or compact in STATIC_RWA_STOCK_SYMBOLS
+            or ("Binance", compact) in ASSET_CLASSIFICATIONS or ("Bybit", compact) in ASSET_CLASSIFICATIONS)
 
 
 def refresh_binance_open_interest(contracts):
@@ -2895,6 +2959,7 @@ def load_latest_dual_futures_snapshot():
             "funding_difference", "long_funding_rate", "short_funding_rate", "long_funding_interval_hours", "short_funding_interval_hours",
             "long_next_funding_time", "short_next_funding_time", "open_spread", "close_spread",
         )}
+        row["captured_at_epoch"] = item.captured_at.replace(tzinfo=timezone.utc).timestamp()
         groups.setdefault(item.symbol, []).append(row)
     elapsed = max(0.0, (datetime.now() - captured_at).total_seconds())
     return {"symbols": [{"symbol": symbol, "rows": entries} for symbol, entries in groups.items()], "errors": {}, "updated_at": captured_at.strftime("%H:%M:%S"), "captured_at_epoch": captured_at.timestamp(), "next_refresh_in_seconds": max(0, int(MARKET_REFRESH_SECONDS - elapsed + 0.999)), "stored": True}
@@ -3365,6 +3430,7 @@ def load_latest_market_snapshot():
         if is_spot_contract_symbol_mismatch(item.symbol, item.long_exchange):
             continue
         groups.setdefault(item.symbol, []).append({"long_exchange": item.long_exchange, "long_ask": item.long_ask, "long_bid": item.long_bid, "short_exchange": item.short_exchange, "short_bid": item.short_bid, "short_ask": item.short_ask, "basis": item.basis, "funding_rate": item.funding_rate, "funding_interval_hours": item.funding_interval_hours, "next_funding_time": item.next_funding_time, "spot_volume": item.spot_volume, "futures_volume": item.futures_volume, "futures_open_interest": item.futures_open_interest, "open_spread": item.open_spread, "close_spread": item.close_spread})
+        groups[item.symbol][-1]["captured_at_epoch"] = item.captured_at.replace(tzinfo=timezone.utc).timestamp()
     elapsed = max(0.0, (datetime.now() - captured_at).total_seconds())
     next_refresh_in_seconds = max(0, int(MARKET_REFRESH_SECONDS - elapsed + 0.999))
     return {"symbols": [{"symbol": symbol, "rows": entries} for symbol, entries in groups.items()], "errors": {}, "updated_at": captured_at.strftime("%H:%M:%S"), "captured_at_epoch": captured_at.timestamp(), "next_refresh_in_seconds": next_refresh_in_seconds, "stored": True}
@@ -3424,7 +3490,7 @@ def spot_futures_snapshot():
 
     rows_by_symbol = []
     alias_rows = symbol_alias_rows()
-    symbols = sorted(item["symbol"] for item in results["futures_info"].get("symbols", []) if item.get("status") == "TRADING" and item.get("contractType") == "PERPETUAL" and item.get("quoteAsset") == "USDT")
+    symbols = sorted(item["symbol"] for item in results["futures_info"].get("symbols", []) if item.get("status") == "TRADING" and item.get("contractType") in {"PERPETUAL", "TRADIFI_PERPETUAL", "TRADFI_PERPETUAL"} and item.get("quoteAsset") == "USDT")
     refresh_binance_open_interest(symbols)
     oi_finished_at = time.perf_counter()
     for symbol in symbols:
@@ -3447,6 +3513,8 @@ def spot_futures_snapshot():
             raw_spot_symbol = spot_symbol
             spot_multiplier = 1.0
             for candidate, candidate_multiplier in market_alias_candidates(spot_symbol, exchange, "spot", alias_rows):
+                if is_rwa_stock_pair(symbol) and not verified_equity_spot_alias(spot_symbol, candidate, exchange, alias_rows):
+                    continue
                 if spot_books[exchange].get(candidate):
                     raw_spot_symbol = candidate
                     spot_multiplier = candidate_multiplier
@@ -3532,6 +3600,7 @@ def dual_futures_snapshot():
         raise RuntimeError("期多期空行情暂时未能完成同步")
 
     refresh_rwa_stock_symbols(results.get("binance_info", {}).get("symbols", []))
+    refresh_asset_classifications(results["bybit_instruments"].get("result", {}).get("list", []), "Bybit")
     binance_books = {item["symbol"]: valid_book(item.get("askPrice"), item.get("bidPrice")) for item in results["binance_books"]}
     binance_volumes = {item["symbol"]: float(item.get("quoteVolume", 0) or 0) for item in results.get("binance_24h", [])}
     binance_funding = {item["symbol"]: item for item in results["binance_funding"]}
@@ -7040,6 +7109,77 @@ def spot_futures():
     enrich_transfer_networks(page_symbols)
     payload = {**snapshot, "page": page, "pages": pages, "page_size": page_size, "total_symbols": total, "binance_spot_only": binance_spot_only, "binance_alpha_only": binance_alpha_only, "binance_alpha_catalog_updated_at": alpha_catalog_updated_at, "binance_alpha_catalog_stale": alpha_catalog_stale, "funding_interval": funding_interval, "symbol_query": symbol_query, "sort_by": sort_by, "sort_direction": sort_direction, "symbols": page_symbols}
     return jsonify(payload)
+
+
+@app.get("/api/equity-arbitrage")
+def equity_arbitrage():
+    """Separate read-only US equity workspace; never enable crypto alerts/trades."""
+    strategy = request.args.get("strategy", "all")
+    sort_by = request.args.get("sort_by", "open_spread")
+    direction = request.args.get("direction", "desc")
+    if strategy not in {"all", "spot_futures", "futures_futures"} or sort_by not in {"open_spread", "close_spread", "symbol"} or direction not in {"asc", "desc"}:
+        return jsonify({"error": "无效的美股筛选参数"}), 400
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except (ValueError, TypeError):
+        return jsonify({"error": "无效的页码"}), 400
+    query = str(request.args.get("symbol", "")).strip()[:40]
+    snapshots = {"spot_futures": load_latest_market_snapshot(), "futures_futures": load_latest_dual_futures_snapshot()}
+    if not any(snapshots.values()):
+        return jsonify({"error": "美股行情正在进行首轮同步，请稍后刷新。"}), 503
+    now, items, available = time.time(), [], {"spot_futures": 0, "futures_futures": 0}
+    aliases = symbol_alias_rows()
+    for mode, snapshot in snapshots.items():
+        for group in (snapshot or {}).get("symbols", []):
+            symbol = group["symbol"]
+            if not is_us_equity_pair(symbol):
+                continue
+            for row in group["rows"]:
+                long_exchange, short_exchange = row["long_exchange"], row["short_exchange"]
+                route = row.get("alert_stream_route", {})
+                long_raw = route.get("long_key", [None, compact_pair(symbol)])[1]
+                short_raw = route.get("short_key", [None, compact_pair(symbol)])[1]
+                if asset_category(short_raw, short_exchange) not in {"us_equity", "equity"}:
+                    continue
+                if mode == "spot_futures":
+                    if not route or not verified_equity_spot_alias(symbol, long_raw, long_exchange, aliases):
+                        continue
+                elif asset_category(long_raw, long_exchange) not in {"us_equity", "equity"}:
+                    continue
+                available[mode] += 1
+                if strategy not in ("all", mode) or (query and not symbol_matches_query(symbol, query.upper())):
+                    continue
+                captured = row.get("captured_at_epoch", snapshot.get("captured_at_epoch"))
+                fresh = isinstance(captured, (int, float)) and 0 <= now - captured <= 15 and not snapshot.get("errors")
+                items.append({"symbol": symbol, "strategy": mode, "long_exchange": long_exchange, "short_exchange": short_exchange,
+                              "long_ask": row.get("long_ask"), "short_bid": row.get("short_bid"),
+                              "long_basis": None if mode == "spot_futures" else row.get("long_basis"),
+                              "short_basis": row.get("basis") if mode == "spot_futures" else row.get("short_basis"),
+                              "long_funding_rate": None if mode == "spot_futures" else row.get("long_funding_rate"),
+                              "short_funding_rate": row.get("funding_rate") if mode == "spot_futures" else row.get("short_funding_rate"),
+                              "long_interval": row.get("long_funding_interval_hours"),
+                              "short_interval": row.get("funding_interval_hours") if mode == "spot_futures" else row.get("short_funding_interval_hours"),
+                              "long_volume": row.get("spot_volume") if mode == "spot_futures" else row.get("long_volume"),
+                              "short_volume": row.get("futures_volume") if mode == "spot_futures" else row.get("short_volume"),
+                              "open_spread": row.get("open_spread"), "close_spread": row.get("close_spread"),
+                              "captured_at_epoch": captured, "fresh": fresh})
+    key = (lambda item: item["symbol"]) if sort_by == "symbol" else (lambda item: item[sort_by] if isinstance(item.get(sort_by), (int, float)) and math.isfinite(item[sort_by]) else float('-inf') if direction == 'desc' else float('inf'))
+    items.sort(key=key, reverse=direction == "desc")
+    total, page_size = len(items), 30
+    pages = max(1, math.ceil(total / page_size))
+    page = min(page, pages)
+    selected = items[(page-1)*page_size:page*page_size]
+    transfers = load_transfer_statuses((item["symbol"], item["long_exchange"]) for item in selected if item["strategy"] == "spot_futures")
+    for item in selected:
+        if item["strategy"] == "spot_futures":
+            item["transfer_status"] = transfers[(item["symbol"], item["long_exchange"])]
+    mark_delisting_items(selected)
+    stamps = [snapshot.get("captured_at_epoch") for snapshot in snapshots.values() if snapshot and snapshot.get("captured_at_epoch")]
+    return jsonify({"items": selected, "page": page, "pages": pages, "total": total, "page_size": page_size,
+                    "available": available, "strategy": strategy, "symbol_query": query,
+                    "captured_at_epoch": min(stamps) if stamps else None,
+                    "incomplete": any(not snapshot or snapshot.get("errors") for snapshot in snapshots.values()),
+                    "execution_enabled": False})
 
 
 HEDGE_CURRENT_STATUSES = {"pending", "opening", "open", "closing", "attention"}
@@ -12668,7 +12808,7 @@ def alerts():
     by_path = {}
     for episode in episodes:
         by_path.setdefault(spot_divergence_key(episode.symbol, episode.long_exchange, episode.short_exchange), []).append(episode)
-    isolated = [item for item in episodes if item.resolved_at is None]
+    isolated = [item for item in episodes if item.resolved_at is None and not is_rwa_stock_pair(item.symbol)]
     # Read immutable scalar rows rather than 40k+ ORM entities/identity-map
     # entries per concurrent polling request. History and ordering are intact.
     columns = (AlertEvent.id, AlertEvent.symbol, AlertEvent.strategy, AlertEvent.alert_type,
@@ -14166,6 +14306,7 @@ def backfill_chat_read_times():
 
 with app.app_context():
     create_database_schema()
+    load_asset_classifications()
     chat_message_columns = {column["name"] for column in inspect(db.engine).get_columns("chat_message")}
     if "encryption_version" not in chat_message_columns:
         db.session.execute(text("ALTER TABLE chat_message ADD COLUMN encryption_version SMALLINT NOT NULL DEFAULT 0"))

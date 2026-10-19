@@ -18,8 +18,8 @@ class Element {
 }
 function harness(){const context={document:{createElement:tag=>new Element(tag)}};vm.createContext(context);vm.runInContext(metadata+'\n'+helpers,context);return {context,run:code=>vm.runInContext(code,context)}}
 
-test('all twenty existing page profiles have a dedicated layout and CSS coverage',()=>{
-  const h=harness();const ids=h.run('Object.keys(layouts)');assert.equal(ids.length,20);
+test('all twenty-one page profiles have a dedicated layout and CSS coverage',()=>{
+  const h=harness();const ids=h.run('Object.keys(layouts)');assert.equal(ids.length,21);
   const profileText=app.slice(app.indexOf('const pageRefreshProfiles='),app.indexOf('const fixedCadenceViews='));
   for(const id of ids){assert.ok(profileText.includes(id),id);assert.ok(css.includes('#'+id),id);assert.ok(h.run(`layouts['${id}'].kind`),id)}
 });
@@ -74,8 +74,8 @@ test('movers have six desktop columns and labelled mobile values rather than dro
 test('layout assets load after the existing business assets, and risk has four independent cards',()=>{
   assert.ok(html.indexOf("filename='workspace-layout.css'")>html.indexOf("filename='style.css'"));
   assert.ok(html.indexOf("filename='workspace-layout.js'")>html.indexOf("filename='app.js'"));
-  assert.ok(html.includes("filename='workspace-layout.css') }}?v=20261019-alert-screen-v3"));
-  assert.ok(html.includes("filename='workspace-layout.js') }}?v=20261018-alert-desk-v1"));
+  assert.ok(html.includes("filename='workspace-layout.css') }}?v=20261019-equity-workspace-v1"));
+  assert.ok(html.includes("filename='workspace-layout.js') }}?v=20261019-equity-workspace-v1"));
   const risk=html.slice(html.indexOf('<section id="risk"'),html.indexOf('<section id="thinking"'));
   assert.equal((risk.match(/<article>/g)||[]).length,4);assert.ok(risk.includes('真实下单尚未开放'));
 });

@@ -584,3 +584,22 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 .alert-screen-settings label {display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0}
 .alert-screen-settings p {max-width:1000px;line-height:1.6;margin:5px 0}
 @media(max-width:600px){.alert-scope-controls button{min-height:36px}.alert-screen-settings input{font-size:16px;min-height:36px}}
+/* Separate equity workspace: compact rows, full prices, scroll inside table. */
+#equity-arbitrage {min-width:0}
+#equity-arbitrage .equity-toolbar {display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px}
+#equity-arbitrage .equity-mode-switch {display:flex;gap:4px;flex-wrap:wrap}
+#equity-arbitrage .equity-mode-switch .active {background:#155e8b;color:#fff;border-color:#155e8b}
+#equity-arbitrage .equity-sort {display:flex;align-items:center;gap:6px}
+#equity-arbitrage input {width:210px;max-width:100%}
+#equity-arbitrage .equity-boundary {font-size:12px;line-height:1.55;color:#637669;margin:0 0 12px}
+#equity-arbitrage .table-wrap {max-height:calc(100dvh - 315px);min-height:160px;overflow:auto;scrollbar-gutter:stable}
+#equity-arbitrage .equity-table {min-width:940px;width:100%;font-variant-numeric:tabular-nums}
+#equity-arbitrage .equity-table th {position:sticky;top:0;z-index:2;background:#eaf1e8;white-space:nowrap}
+#equity-arbitrage .equity-table td {vertical-align:top;padding:10px 12px}
+#equity-arbitrage .equity-table td.symbol {position:sticky;left:0;z-index:1;background:#f7faf5;min-width:116px}
+#equity-arbitrage .equity-table td>span,#equity-arbitrage .equity-table td>strong,#equity-arbitrage .equity-table td>small {display:block;line-height:1.6}
+#equity-arbitrage .equity-table td>strong {font-size:13px;overflow-wrap:anywhere}
+#equity-arbitrage .equity-table small {font-size:11px;color:#6e837c}
+#equity-arbitrage .equity-table small.equity-stale {color:#a65b16}
+#equity-arbitrage .equity-notes {font-size:12px;line-height:1.6;color:#667e74}
+@media(max-width:760px){#equity-arbitrage .equity-toolbar>label {max-width:100%}#equity-arbitrage .equity-toolbar input {width:100%}#equity-arbitrage .table-wrap {max-height:65dvh}#equity-arbitrage .equity-table td {padding:8px}}

@@ -74,8 +74,8 @@ test('movers have six desktop columns and labelled mobile values rather than dro
 test('layout assets load after the existing business assets, and risk has four independent cards',()=>{
   assert.ok(html.indexOf("filename='workspace-layout.css'")>html.indexOf("filename='style.css'"));
   assert.ok(html.indexOf("filename='workspace-layout.js'")>html.indexOf("filename='app.js'"));
-  assert.ok(html.includes("filename='workspace-layout.css') }}?v=20261019-equity-workspace-v1"));
-  assert.ok(html.includes("filename='workspace-layout.js') }}?v=20261019-equity-workspace-v1"));
+  assert.ok(html.includes("filename='workspace-layout.css') }}?v=20261019-equity-spot-v1"));
+  assert.ok(html.includes("filename='workspace-layout.js') }}?v=20261019-equity-spot-v1"));
   const risk=html.slice(html.indexOf('<section id="risk"'),html.indexOf('<section id="thinking"'));
   assert.equal((risk.match(/<article>/g)||[]).length,4);assert.ok(risk.includes('真实下单尚未开放'));
 });

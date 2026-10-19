@@ -546,13 +546,20 @@ function setEquityFilter(key,value){
 }
 function toggleEquityDirection(){equityState.direction=equityState.direction==='desc'?'asc':'desc';equityState.page=1;equityState.version++;byId('equityDirection').textContent=equityState.direction==='desc'?'从高到低 ↓':'从低到高 ↑';loadEquityArbitrage(true)}
 function changeEquityPage(change){equityState.page=Math.max(1,equityState.page+change);equityState.version++;loadEquityArbitrage(true)}
-function equityRowsMarkup(items){
+function equityPairKey(item){return JSON.stringify([item.strategy,item.symbol,item.long_exchange,item.short_exchange,item.spot_symbol||''])}
+function equityPairingMarkup(item,expanded=false){
+  const links=(Array.isArray(item.pairing_sources)?item.pairing_sources:[]).flatMap(source=>{try{const url=new URL(source);return url.protocol==='https:'&&!url.username&&!url.password&&['api.gateio.ws','api.bitget.com','api.bybit.com','www.gate.com','www.bybit.com','www.bitget.com'].includes(url.hostname)?[url.href]:[]}catch{return []}});
+  const units=Number.isFinite(item.units_per_token)?String(item.units_per_token):'—',raw=Number.isFinite(item.raw_long_ask)?String(item.raw_long_ask):'—';
+  return `<details class="equity-pairing" data-equity-pair="${escapeChatHtml(equityPairKey(item))}"${expanded?' open':''}><summary>配对依据</summary><div><b>${escapeChatHtml(item.product_name||item.symbol)}</b><span>${escapeChatHtml(item.spot_symbol||'—')} → ${escapeChatHtml(item.futures_symbol||item.symbol)}</span><span>${escapeChatHtml(item.product||'')} · ${escapeChatHtml(item.unit_basis||'单位待核验')}</span><span>${item.long_exchange==='Bybit'?'每枚代币折合':'每个平台报价单位折合'} ${units} 股；原始卖一 ${raw} USDT</span><span>折股卖一 = 原始卖一 ÷ ${units}</span>${item.isin?`<span>ISIN ${escapeChatHtml(item.isin)}</span>`:''}${item.mint?`<span>SOL ${escapeChatHtml(item.mint)}</span>`:''}<span>${links.map((link,index)=>`<a href="${escapeChatHtml(link)}" target="_blank" rel="noopener noreferrer">官方依据 ${index+1}</a>`).join(' · ')}</span></div></details>`;
+}
+function equityRowsMarkup(items,expandedPairs=new Set()){
   const number=value=>Number.isFinite(value)?String(value):'—';
   const metric=value=>`<b class="${changeClass(value)}">${alertCompactMetric(value)}</b>`;
   const funding=(value,interval)=>`${metric(value)} <small>${Number.isFinite(interval)?`${interval}H`:'周期未知'}</small>`;
   return items.map(item=>{
     const spot=item.strategy==='spot_futures',symbol=escapeChatHtml(item.symbol),stamp=Number.isFinite(item.captured_at_epoch)?new Date(item.captured_at_epoch*1000).toLocaleTimeString('zh-CN',{hour12:false}):'时间未知';
-    return `<tr><td class="symbol"><b class="${delistingSymbolClass(item.symbol,item.delisting_announced)}" data-market-symbol="${symbol}">${symbol}</b><small>${spot?'现多期空':'期多期空'}</small></td><td>${exchangeName(item.long_exchange)} <small>${spot?'现货':'合约'}</small><strong>${number(item.long_ask)}</strong>${spot?transferStatusControl(item.transfer_status||{exchange:item.long_exchange,state:'unknown',chains:[]},item.symbol):''}</td><td>${exchangeName(item.short_exchange)} <small>合约</small><strong>${number(item.short_bid)}</strong></td><td><span>开 ${metric(item.open_spread)}</span><span>平 ${metric(item.close_spread)}</span></td><td><span>多 ${spot?'现货 · 无资费':funding(item.long_funding_rate,item.long_interval)}</span><span>空 ${funding(item.short_funding_rate,item.short_interval)}</span></td><td><span>多 ${spot?'—':metric(item.long_basis)}</span><span>空 ${metric(item.short_basis)}</span></td><td><time>${escapeChatHtml(stamp)}</time><small class="${item.fresh?'':'equity-stale'}">${item.fresh?'已更新':'延迟 / 待核验'}</small></td></tr>`;
+    const key=equityPairKey(item);
+    return `<tr data-render-key="${escapeChatHtml(key)}"><td class="symbol"><b class="${delistingSymbolClass(item.symbol,item.delisting_announced)}" data-market-symbol="${symbol}">${symbol}</b><small>${spot?'现多期空':'期多期空'}</small>${spot?equityPairingMarkup(item,expandedPairs.has(key)):''}</td><td>${exchangeName(item.long_exchange)} <small>${spot?`现货 · ${escapeChatHtml(item.spot_symbol||'—')}`:'合约'}</small><strong>${number(item.long_ask)}</strong>${spot?`<small>折合 USDT / 股</small>${transferStatusControl(item.transfer_status||{exchange:item.long_exchange,state:'unknown',chains:[]},item.spot_symbol||item.symbol)}`:''}</td><td>${exchangeName(item.short_exchange)} <small>合约</small><strong>${number(item.short_bid)}</strong></td><td><span>开 ${metric(item.open_spread)}</span><span>平 ${metric(item.close_spread)}</span></td><td><span>多 ${spot?'现货 · 无资费':funding(item.long_funding_rate,item.long_interval)}</span><span>空 ${funding(item.short_funding_rate,item.short_interval)}</span></td><td><span>多 ${spot?'—':metric(item.long_basis)}</span><span>空 ${metric(item.short_basis)}</span></td><td><time>${escapeChatHtml(stamp)}</time><small class="${item.fresh?'':'equity-stale'}">${item.fresh?'已更新':'延迟 / 待核验'}</small></td></tr>`;
   }).join('');
 }
 async function loadEquityArbitrage(manual=false){
@@ -564,8 +571,10 @@ async function loadEquityArbitrage(manual=false){
     if(version!==equityState.version)return false;
     if(!Array.isArray(data.items))throw new Error('美股行情格式异常');
     const empty=equityState.strategy==='spot_futures'?'暂无已核验的现货与合约配对，可切换期多期空。':'当前筛选下没有已核验的美股套利路径。';
-    replaceHtmlKeepingExchangeLogos(byId('equityRows'),data.items.length?equityRowsMarkup(data.items):`<tr><td colspan="7" class="loading">${empty}</td></tr>`);
+    const expandedPairs=new Set([...document.querySelectorAll('#equityRows details[data-equity-pair][open]')].map(node=>node.dataset.equityPair));
+    replaceHtmlKeepingExchangeLogos(byId('equityRows'),data.items.length?equityRowsMarkup(data.items,expandedPairs):`<tr><td colspan="7" class="loading">${empty}</td></tr>`);
     equityState.page=data.page;equityState.shownKey=equityRequestKey();byId('equityCount').textContent=`${data.total} 条路径`;
+    byId('equityCoverage').textContent=equityState.strategy==='futures_futures'?'':Object.entries(data.spot_coverage||{}).map(([venue,value])=>`${venue} ${value.status==='ok'?`${value.quoted_pairs} 条`:'待更新'}`).join(' · ');
     byId('equityPageInfo').textContent=`第 ${data.page} / ${data.pages} 页`;byId('equityPrevious').disabled=data.page<=1;byId('equityNext').disabled=data.page>=data.pages;
     status.textContent=data.incomplete?'部分行情未就绪或上游沿用缓存，请检查各行时间。':'';
     setPageRefreshSource('equity-arbitrage',data.captured_at_epoch,'行情',data.incomplete);return true;

@@ -602,4 +602,9 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 #equity-arbitrage .equity-table small {font-size:11px;color:#6e837c}
 #equity-arbitrage .equity-table small.equity-stale {color:#a65b16}
 #equity-arbitrage .equity-notes {font-size:12px;line-height:1.6;color:#667e74}
+#equityCoverage {display:block;margin-top:3px;color:#42695e}
+#equity-arbitrage .equity-pairing {font-size:11px;font-weight:400;white-space:normal;max-width:230px;margin-top:4px}
+#equity-arbitrage .equity-pairing summary {cursor:pointer;color:#396a86}
+#equity-arbitrage .equity-pairing div {padding:6px;background:#eef4ed;border-radius:4px;line-height:1.6;overflow-wrap:anywhere}
+#equity-arbitrage .equity-pairing div>span,#equity-arbitrage .equity-pairing div>b {display:block}
 @media(max-width:760px){#equity-arbitrage .equity-toolbar>label {max-width:100%}#equity-arbitrage .equity-toolbar input {width:100%}#equity-arbitrage .table-wrap {max-height:65dvh}#equity-arbitrage .equity-table td {padding:8px}}

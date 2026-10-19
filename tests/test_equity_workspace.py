@@ -2,9 +2,11 @@ import json
 import os
 import time
 import unittest
+from contextlib import ExitStack
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+from concurrent.futures import Future
 
 os.environ['DATABASE_URL'] = 'sqlite://'
 os.environ.setdefault('SECRET_KEY', 'equity-workspace-test')
@@ -18,6 +20,7 @@ class EquityWorkspaceTests(unittest.TestCase):
         module.app.config.update(TESTING=True)
         self.patches = [patch.object(module, name, {}) for name in ('ASSET_CLASSIFICATIONS', 'ASSET_CLASSIFICATION_SAVED')]
         self.patches.append(patch.object(module, 'RWA_STOCK_SYMBOLS', set()))
+        self.patches.append(patch.object(module, 'EQUITY_SPOT_CACHE', {'snapshot': None, 'saved_at': 0}))
         for item in self.patches:
             item.start()
         with module.app.app_context():
@@ -46,7 +49,7 @@ class EquityWorkspaceTests(unittest.TestCase):
     def request(self, groups, query='', spot=None):
         snapshot = dict(symbols=groups, errors={}, updated_at='12:00:00', captured_at_epoch=time.time())
         with patch.object(module, 'load_latest_dual_futures_snapshot', return_value=snapshot), \
-                patch.object(module, 'load_latest_market_snapshot', return_value=spot), \
+                patch.object(module, 'load_equity_spot_snapshot', return_value=spot), \
                 patch.object(module, 'get_json', side_effect=AssertionError('GET page must not fetch upstream')):
             return self.client.get('/api/equity-arbitrage' + query)
 
@@ -132,16 +135,103 @@ class EquityWorkspaceTests(unittest.TestCase):
         self.assertEqual(self.request([], '?strategy=spot_futures', spot).get_json()['total'], 0)
 
     def test_verified_spot_path_has_funding_only_on_short_leg_and_transfer_evidence(self):
-        alias = SimpleNamespace(verified=True, exchange='Gate', market_type='spot', canonical_symbol='TSLAUSDT', alias_symbol='TSLAXUSDT')
-        row = self.row(long_exchange='Gate', basis=.123, funding_rate=.03, funding_interval_hours=8, alert_stream_route=dict(long_key=['gate','TSLAX_USDT'], short_key=['bn_future','TSLAUSDT']))
+        row = self.row(long_exchange='Gate', basis=.123, funding_rate=.03, funding_interval_hours=8, verification_version=1, units_per_token=1, spot_symbol='TSLAX/USDT')
         spot = dict(symbols=[dict(symbol='TSLA/USDT', rows=[row])], captured_at_epoch=time.time(), errors={})
-        with patch.object(module, 'symbol_alias_rows', return_value=[alias]), patch.object(module, 'load_transfer_statuses', return_value={('TSLA/USDT','Gate'):dict(exchange='Gate',state='unknown',chains=[])}):
+        with patch.object(module, 'load_transfer_statuses', return_value={('TSLAX/USDT','Gate'):dict(exchange='Gate',state='unknown',chains=[])}) as transfers:
             item = self.request([], '?strategy=spot_futures', spot).get_json()['items'][0]
+            self.assertTrue(transfers.call_args.kwargs['exact_assets'])
+            self.assertEqual(list(transfers.call_args.args[0]), [('TSLAX/USDT', 'Gate')])
         self.assertIsNone(item['long_funding_rate'])
         self.assertIsNone(item['long_basis'])
         self.assertEqual(item['short_funding_rate'], .03)
         self.assertEqual(item['short_basis'], .123)
         self.assertEqual(item['transfer_status']['state'], 'unknown')
+
+    def test_exact_equity_wallet_lookup_never_uses_underlying_or_other_product(self):
+        with module.app.app_context():
+            for symbol, chain in (('AAPL/USDT','wrong'), ('AAPLX/USDT','SOL')):
+                module.db.session.add(module.TransferNetworkSnapshot(exchange='Gate', symbol=symbol, chains_json=json.dumps([dict(name=chain,deposit_open=True,withdraw_open=True)])))
+            module.db.session.commit()
+            statuses = module.load_transfer_statuses([('AAPLX/USDT','Gate'), ('RAAPL/USDT','Gate')], exact_assets=True)
+            self.assertEqual(statuses[('AAPLX/USDT','Gate')]['chains'][0]['name'], 'SOL')
+            self.assertEqual(statuses[('RAAPL/USDT','Gate')]['state'], 'unknown')
+
+    def test_new_snapshot_survives_cache_reset_without_writing_alerts_or_positions(self):
+        from tests.test_equity_spot import EquitySpotTests
+        fixture = EquitySpotTests()
+        fixture.setUp()
+        with module.app.app_context(), patch.object(module, 'market_payload_observed_at', return_value=fixture.now), patch.object(module.time, 'time', return_value=fixture.now):
+            module.refresh_equity_spot_snapshot(fixture.data, {}, {key:key for key in fixture.data})
+            original = module.load_equity_spot_snapshot()
+            module.EQUITY_SPOT_CACHE['snapshot'] = None
+            self.assertEqual(module.load_equity_spot_snapshot(), original)
+            self.assertEqual(module.EquitySpotSnapshot.query.count(), 1)
+            self.assertEqual(module.AlertEvent.query.count(), 0)
+            self.assertEqual(module.HedgePosition.query.count(), 0)
+
+    def test_raw_spot_search_and_venue_freshness_are_independent(self):
+        row = self.row(long_exchange='Gate', verification_version=1, units_per_token=1, spot_symbol='TSLAX/USDT', captured_at_epoch=time.time())
+        spot = dict(symbols=[dict(symbol='TSLA/USDT', rows=[row])], captured_at_epoch=time.time(), errors={'Bybit':'timeout'})
+        data = self.request([], '?strategy=spot_futures&symbol=tslax', spot).get_json()
+        self.assertEqual(data['total'], 1)
+        self.assertTrue(data['items'][0]['fresh'])
+        row['data_error'] = 'timeout'
+        self.assertFalse(self.request([], '?strategy=spot_futures', spot).get_json()['items'][0]['fresh'])
+
+    def test_equity_feed_failure_does_not_mark_crypto_snapshot_stale(self):
+        data = dict(futures_info={'symbols':[]}, futures_books=[], funding=[])
+        errors = {'equity_bybit_tickers':'timeout'}
+        with module.app.app_context(), ExitStack() as stack:
+            stack.enter_context(patch.object(module, 'fetch_market_payloads', return_value=(data, errors)))
+            stack.enter_context(patch.object(module, 'collect_equity_metadata', return_value=({}, {})))
+            stack.enter_context(patch.object(module, 'symbol_alias_rows', return_value=[]))
+            stack.enter_context(patch.object(module, 'SPOT_FUTURES_CACHE', {}))
+            stack.enter_context(patch.object(module, 'LAST_MARKET_DB_PERSIST_AT', {'spot':0}))
+            for name in ('sync_binance_listing_events_if_due', 'refresh_binance_open_interest', 'evaluate_alerts', 'save_latest_market_snapshot', 'capture_price_history'):
+                stack.enter_context(patch.object(module, name))
+            refresh = stack.enter_context(patch.object(module, 'refresh_equity_spot_snapshot'))
+            result = module.spot_futures_snapshot()
+            self.assertEqual(result['errors'], {})
+            self.assertEqual(refresh.call_args.args[1], errors)
+
+    def test_slow_metadata_is_nonblocking_bounded_and_preserves_fetch_time(self):
+        pending, created = {}, []
+        def submit(*_):
+            future = Future()
+            created.append(future)
+            return future
+        pool = Mock()
+        pool.submit.side_effect = submit
+        with patch.object(module, 'EQUITY_METADATA_POOL', pool), patch.object(module, 'EQUITY_METADATA_PENDING', pending), \
+                patch.object(module, 'EQUITY_METADATA_ERRORS', {}), patch.object(module, 'EQUITY_METADATA_RETRY_AT', {}), \
+                patch.object(module, 'MARKET_PAYLOAD_CACHE', {}), patch.object(module.time, 'monotonic', return_value=100):
+            result, errors = module.collect_equity_metadata()
+            self.assertEqual(result, {})
+            self.assertEqual(len(errors), 5)
+            self.assertEqual(len(created), 5)
+            module.collect_equity_metadata()  # never waits on unfinished futures, never duplicates
+            self.assertEqual(len(created), 5)
+            created[0].set_result(({'retCode':0}, 99))
+            result, errors = module.collect_equity_metadata()
+            self.assertIn('equity_bybit_instruments', result)
+            self.assertNotIn('equity_bybit_instruments', errors)
+            self.assertEqual(module.MARKET_PAYLOAD_CACHE[module.EQUITY_SPOT_URLS['equity_bybit_instruments']]['fetched_at'], 99)
+
+    def test_failed_metadata_is_rate_limited_and_retried_without_blocking(self):
+        future = Future()
+        future.set_exception(TimeoutError())
+        pool = Mock()
+        pool.submit.side_effect = lambda *_: Future()
+        now = [100]
+        with patch.object(module, 'EQUITY_METADATA_POOL', pool), patch.object(module, 'EQUITY_METADATA_PENDING', {'equity_bybit_instruments':future}), \
+                patch.object(module, 'EQUITY_METADATA_ERRORS', {}), patch.object(module, 'EQUITY_METADATA_RETRY_AT', {}), \
+                patch.object(module, 'MARKET_PAYLOAD_CACHE', {}), patch.object(module.time, 'monotonic', side_effect=lambda:now[0]):
+            _, errors = module.collect_equity_metadata()
+            self.assertEqual(errors['equity_bybit_instruments'], 'TimeoutError')
+            self.assertEqual(pool.submit.call_count, 4)
+            now[0] = 106
+            module.collect_equity_metadata()
+            self.assertEqual(pool.submit.call_count, 5)
 
     def test_filter_sort_and_page_are_applied_before_slicing(self):
         groups = [dict(symbol='TSLA/USDT', rows=[self.row(open_spread=i) for i in range(35)]), dict(symbol='AAPL/USDT', rows=[self.row(open_spread=99)])]

@@ -9,7 +9,7 @@
   <title>ArbiScope | 套利监控中心</title>
   <link rel="manifest" href="{{ url_for('web_app_manifest') }}?v=20260815-web-push">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20261018-workspace-refresh-v3">
-  <link rel="stylesheet" href="{{ url_for('static', filename='workspace-layout.css') }}?v=20261019-equity-workspace-v1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='workspace-layout.css') }}?v=20261019-equity-spot-v1">
 </head>
 <body>
   <div id="mobileNavBackdrop" class="mobile-nav-backdrop" onclick="toggleMobileNav(false)" aria-hidden="true"></div>
@@ -120,11 +120,11 @@
           <label class="equity-sort"><span>排序</span><select id="equitySort" aria-label="美股路径排序" onchange="setEquityFilter('sort_by',this.value)"><option value="open_spread">开差</option><option value="close_spread">平差</option><option value="symbol">标的</option></select><button id="equityDirection" type="button" onclick="toggleEquityDirection()">从高到低 ↓</button></label>
           <span id="equityCount"></span>
         </div>
-        <p class="equity-boundary">美股及 ETF 相关产品 · 不计入普通币报警。休市、指数更新及产品条款差异可能形成价差，不代表可成交收益。</p>
+        <p class="equity-boundary">同标的每股报价对比 · 未扣手续费 · 美股不报警。休市与产品条款差异可能形成价差，不代表可成交收益。<span id="equityCoverage"></span></p>
         <div class="table-wrap"><table class="equity-table"><thead><tr><th>标的 / 路径</th><th>做多 · 卖一</th><th>做空 · 买一</th><th>开差 / 平差</th><th>资金费率 / 周期</th><th>合约基差</th><th>行情</th></tr></thead><tbody id="equityRows"><tr><td colspan="7" class="loading">正在读取美股路径…</td></tr></tbody></table></div>
         <div class="pagination"><button id="equityPrevious" type="button" onclick="changeEquityPage(-1)">← 上一页</button><span id="equityPageInfo">第 1 页</span><button id="equityNext" type="button" onclick="changeEquityPage(1)">下一页 →</button></div>
         <p id="equityStatus" class="data-status" role="status"></p>
-        <details class="equity-notes"><summary>配对范围</summary><p>只展示已识别为美股的匹配路径；现货须有已核验的同标的映射，不按相似名称或价格强行配对。未核验、单边缺失或其他地区股票不补成美股路径。没有现多期空数据时会明确显示为空。此栏不自动下单、不新增声音或 Lark 推送。</p></details>
+        <details class="equity-notes"><summary>配对范围</summary><p>现货：Gate、Bybit 已核验的 xStocks 与 Bitget 官方映射的 rToken；只配币安同标的美股合约。Gate 使用复权后平台报价，Bybit 按实时乘数折股，Bitget 按每股单位比较。保留原代码和原始价格，不把代币数量当作股票数量；充提仅查询该交易所的实际代币。币安普通现货目前未找到对应标的，未核验的产品不强行配对。此栏只读行情，不下单、不新增声音或 Lark 推送。</p></details>
       </div>
     </section>
   </main>
@@ -132,6 +132,6 @@
   <div id="modal" class="modal hidden"><form class="dialog" onsubmit="saveStrategy(event)"><button type="button" class="close" onclick="closeModal()">×</button><p class="eyebrow">NEW STRATEGY</p><h2>创建监控策略</h2><label>策略名称<input id="name" required placeholder="例如：BTC 跨所价差"></label><label>套利类型<select id="strategyMode"><option>跨所合约套利</option><option>现货多/合约空</option><option>资金费率套利</option></select></label><label>交易对<select id="symbol"><option>BTC/USDT</option><option>ETH/USDT</option><option>SOL/USDT</option></select></label><button class="primary submit">创建策略</button></form></div>
   <section id="chatRemarkModal" class="modal hidden"><form class="dialog chat-remark-dialog" onsubmit="saveChatRemark(event)"><button type="button" class="close" onclick="closeChatRemarkEditor()">×</button><p class="eyebrow">PRIVATE CONTACT NOTE</p><h2>修改联系人备注</h2><p id="chatRemarkAccount" class="chat-remark-account"></p><label>备注名<input id="chatRemarkInput" maxlength="24" autocomplete="off" placeholder="例如：盘友小林"></label><small class="chat-remark-help">备注仅在你的账号中可见，不会修改对方真实账号名。</small><div class="chat-remark-actions"><button type="button" onclick="saveChatRemark(event,true)">清空备注</button><button class="primary" type="submit">保存备注</button></div></form></section>
   <section id="hedgePositionModal" class="modal hidden"><form class="dialog hedge-preview-dialog" onsubmit="event.preventDefault()"><button type="button" class="close" onclick="closeHedgePositionBuilder()">×</button><p class="eyebrow">TWO-LEG ORDER PREVIEW</p><h2 id="hedgePreviewTitle">建立对冲仓位</h2><p id="hedgePreviewRoute" class="hedge-preview-route"></p><div class="hedge-preview-fields"><label>投入金额（USDT）<input id="hedgeQuoteAmount" type="number" min="10" step="1" value="100" oninput="renderHedgePositionPreview()"></label><label>合约杠杆<input id="hedgeLeverage" type="number" min="1" max="10" step="1" value="1" oninput="renderHedgePositionPreview()"></label><label>最大允许滑点<input id="hedgeMaxSlippage" type="number" min="0" max="5" step="0.05" value="0.30" oninput="renderHedgePositionPreview()"><span>%</span></label></div><div id="hedgeOrderPreview" class="hedge-order-preview"></div><div class="hedge-preview-notice"><b>安全边界</b><span>价格和数量均为当前盘口估算；接入私有 API 后仍需在最终确认页核对两腿数量、实际成交、手续费和单腿失败处置。</span></div><button id="hedgeSubmitButton" class="primary submit" type="button" disabled>等待币安私有 API</button></form></section>
-  <script src="{{ url_for('static', filename='app.js') }}?v=20261019-equity-workspace-v1"></script>
-  <script src="{{ url_for('static', filename='workspace-layout.js') }}?v=20261019-equity-workspace-v1"></script>
+  <script src="{{ url_for('static', filename='app.js') }}?v=20261019-equity-spot-v1"></script>
+  <script src="{{ url_for('static', filename='workspace-layout.js') }}?v=20261019-equity-spot-v1"></script>
 </body></html>

@@ -10,7 +10,7 @@ const feature=source.slice(source.indexOf('const equityState='),source.indexOf('
 const escape=value=>String(value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
 function harness(){
   const nodes=new Map(),queued=[],requests=[];
-  const context={Date,URLSearchParams,console,
+  const context={Date,URL,URLSearchParams,console,
     document:{querySelectorAll:()=>[]},
     byId(id){if(!nodes.has(id))nodes.set(id,{innerHTML:'',textContent:'',disabled:false});return nodes.get(id)},
     setTimeout(fn){queued.push(fn);return queued.length},clearTimeout(){},
@@ -82,4 +82,32 @@ test('market panel scrolls inside its own container and does not introduce tradi
   assert.ok(css.includes('#equity-arbitrage .table-wrap'));assert.ok(css.includes('min-width:940px'));assert.ok(css.includes('overflow:auto'));
   assert.ok(html.includes('aria-label="美股套利路径"'));assert.ok(html.includes('aria-label="搜索美股标的"'));
   for(const forbidden of ['playAlarmSound','openHedgePositionBuilder','method:',"fetch('/api/alerts",'loadAlerts('])assert.ok(!feature.includes(forbidden),forbidden);
+});
+
+test('spot row shows raw asset identity, normalized price, and real wallet symbol',()=>{
+  const h=harness();let walletSymbol;
+  h.context.transferStatusControl=(_,symbol)=>{walletSymbol=symbol;return '充提正常'};
+  const item=row({strategy:'spot_futures',spot_symbol:'AAPLX/USDT',product:'xStocks',units_per_token:1.003269,raw_long_ask:123.987654321,unit_basis:'Bybit实时乘数折股'});
+  const markup=h.context.equityRowsMarkup([item]);
+  for(const value of ['AAPLX/USDT','折合 USDT / 股','123.987654321','1.003269','配对依据','xStocks'])assert.ok(markup.includes(value),value);
+  assert.equal(walletSymbol,'AAPLX/USDT');assert.ok(!markup.includes('data-equity-pair=""'));
+});
+
+test('pairing proof links are official https only and free text is escaped',()=>{
+  const h=harness(),markup=h.context.equityPairingMarkup(row({product_name:'<script>x</script>',pairing_sources:['javascript:alert(1)','https://evil.test/','https://api.bybit.com.evil.test/','https://user@www.bybit.com/','https://api.bybit.com/v5/market/instruments-info?category=spot','https://www.gate.com/help/'],raw_long_ask:null}));
+  assert.ok(!markup.includes('<script>'));assert.ok(!markup.includes('href="javascript'));
+  assert.ok(!markup.includes('evil.test'));assert.ok(!markup.includes('user@'));
+  assert.equal((markup.match(/rel="noopener noreferrer"/g)||[]).length,2);
+  assert.ok(markup.includes('原始卖一 —'));
+});
+
+test('refresh preserves expanded pairing evidence by route, coverage is compact and mode scoped',async()=>{
+  const h=harness(),item=row({strategy:'spot_futures',spot_symbol:'AAPLX/USDT'}),key=h.context.equityPairKey(item);
+  h.context.document.querySelectorAll=selector=>selector.includes('[open]')?[{dataset:{equityPair:key}}]:[];
+  h.context.fetchRefreshJson=async()=>({items:[item],page:1,pages:1,total:1,spot_coverage:{Gate:{status:'ok',quoted_pairs:12},Bybit:{status:'stale'}}});
+  await h.context.loadEquityArbitrage();
+  assert.ok(h.node('equityRows').innerHTML.includes(' open><summary>配对依据'));
+  assert.equal(h.node('equityCoverage').textContent,'Gate 12 条 · Bybit 待更新');
+  h.context.setEquityFilter('strategy','futures_futures');await h.context.loadEquityArbitrage();
+  assert.equal(h.node('equityCoverage').textContent,'');
 });

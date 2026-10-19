@@ -41,6 +41,7 @@ from anomaly_streams import AlertStreamHub, Route
 from anomaly_engine import alert_round_ids, pulse_is_actionable
 from alert_screening import DEFAULT_NOTIONAL, okx_contract_unit, pulse_has_watch_peak, screen_pulse
 from asset_catalog import NON_CRYPTO_BOOTSTRAP, bootstrap_category, compact_symbol, instrument_category
+from equity_spot import EXTRA_URLS as EQUITY_SPOT_URLS, METADATA_TTLS as EQUITY_SPOT_TTLS, build_snapshot as build_equity_spot_snapshot
 
 load_dotenv()
 
@@ -431,6 +432,13 @@ class MarketAssetClassification(db.Model):
     category = db.Column(db.String(30), nullable=False)
     observed_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
     __table_args__ = (db.UniqueConstraint("exchange", "symbol", name="uq_market_asset_classification"),)
+
+
+class EquitySpotSnapshot(db.Model):
+    """Latest public equity spot evidence; separate from crypto aliases/alarms."""
+    id = db.Column(db.Integer, primary_key=True)
+    payload = db.Column(db.JSON, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
 
 
 class LatestMarketSnapshot(db.Model):
@@ -1000,6 +1008,11 @@ MARKETS = {
 }
 EXCHANGES = ["Binance", "OKX", "Bybit"]
 SPOT_FUTURES_CACHE = {"snapshot": None, "expires_at": 0.0}
+EQUITY_SPOT_CACHE = {"snapshot": None, "saved_at": 0.0}
+EQUITY_METADATA_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix="equity-metadata")
+EQUITY_METADATA_PENDING = {}
+EQUITY_METADATA_ERRORS = {}
+EQUITY_METADATA_RETRY_AT = {}
 DUAL_FUTURES_CACHE = {"snapshot": None}
 LAST_MARKET_DB_PERSIST_AT = {"spot": 0.0, "dual": 0.0}
 MARKET_PAYLOAD_CACHE = {}
@@ -2088,13 +2101,13 @@ def transfer_symbol_candidates(symbol, exchange, aliases):
     return [pair_slash(raw) for raw, _ in market_alias_candidates(canonical, exchange, "spot", rows=aliases)]
 
 
-def load_transfer_statuses(pairs, now=None):
+def load_transfer_statuses(pairs, now=None, exact_assets=False):
     """Batch-read current wallet metadata, never fetch upstream from a page request."""
     pairs = set(pairs)
     if not pairs:
         return {}
     aliases = symbol_alias_rows()
-    candidates = {pair: transfer_symbol_candidates(pair[0], pair[1], aliases) for pair in pairs}
+    candidates = {pair: [pair_slash(compact_pair(pair[0]))] if exact_assets else transfer_symbol_candidates(pair[0], pair[1], aliases) for pair in pairs}
     symbols = {symbol for values in candidates.values() for symbol in values}
     exchanges = {exchange for _, exchange in pairs}
     records = TransferNetworkSnapshot.query.filter(func.upper(TransferNetworkSnapshot.symbol).in_(symbols), TransferNetworkSnapshot.exchange.in_(exchanges)).all()
@@ -3436,6 +3449,63 @@ def load_latest_market_snapshot():
     return {"symbols": [{"symbol": symbol, "rows": entries} for symbol, entries in groups.items()], "errors": {}, "updated_at": captured_at.strftime("%H:%M:%S"), "captured_at_epoch": captured_at.timestamp(), "next_refresh_in_seconds": next_refresh_in_seconds, "stored": True}
 
 
+def load_equity_spot_snapshot():
+    if EQUITY_SPOT_CACHE["snapshot"] is not None:
+        return EQUITY_SPOT_CACHE["snapshot"]
+    record = db.session.get(EquitySpotSnapshot, 1)
+    return record.payload if record and isinstance(record.payload, dict) else None
+
+
+def fetch_equity_metadata(url):
+    # Large identity directories must never hold up the five-second price loop.
+    payload = get_json(url, timeout=3)
+    return payload, time.monotonic()
+
+
+def collect_equity_metadata():
+    """Non-blocking, bounded public-directory cache, called only by market worker."""
+    now = time.monotonic()
+    for key, future in list(EQUITY_METADATA_PENDING.items()):
+        if not future.done():
+            continue
+        del EQUITY_METADATA_PENDING[key]
+        try:
+            payload, observed = future.result()
+            MARKET_PAYLOAD_CACHE[EQUITY_SPOT_URLS[key]] = dict(payload=payload, fetched_at=observed)
+            EQUITY_METADATA_ERRORS.pop(key, None)
+        except Exception as exc:
+            EQUITY_METADATA_ERRORS[key] = type(exc).__name__
+            EQUITY_METADATA_RETRY_AT[key] = now + 5
+    results, errors = {}, {}
+    # Refresh time-sensitive multipliers first; at most one pending job per source.
+    keys = ['equity_bybit_instruments', *[key for key in EQUITY_SPOT_TTLS if key != 'equity_bybit_instruments']]
+    for key in keys:
+        cached = MARKET_PAYLOAD_CACHE.get(EQUITY_SPOT_URLS[key])
+        if (not cached or now-cached['fetched_at'] >= EQUITY_SPOT_TTLS[key]) and key not in EQUITY_METADATA_PENDING and now >= EQUITY_METADATA_RETRY_AT.get(key, 0):
+            EQUITY_METADATA_PENDING[key] = EQUITY_METADATA_POOL.submit(fetch_equity_metadata, EQUITY_SPOT_URLS[key])
+        if cached:
+            results[key] = cached['payload']
+        if key in EQUITY_METADATA_ERRORS or not cached:
+            errors[key] = EQUITY_METADATA_ERRORS.get(key, '公开目录首轮核验中')
+    return results, errors
+
+
+def refresh_equity_spot_snapshot(results, errors, urls):
+    # Runs only in the existing market worker, never during an HTTP page read.
+    observed = {key: market_payload_observed_at(url) for key, url in urls.items()}
+    snapshot = build_equity_spot_snapshot(results, errors, observed, time.time(), load_equity_spot_snapshot())
+    EQUITY_SPOT_CACHE["snapshot"] = snapshot
+    if time.time() - EQUITY_SPOT_CACHE["saved_at"] >= MARKET_DB_PERSIST_SECONDS:
+        record = db.session.get(EquitySpotSnapshot, 1)
+        if record is None:
+            record = EquitySpotSnapshot(id=1, payload=snapshot)
+            db.session.add(record)
+        else:
+            record.payload, record.updated_at = snapshot, datetime.now()
+        db.session.commit()
+        EQUITY_SPOT_CACHE["saved_at"] = time.time()
+
+
 def spot_futures_snapshot():
     global MARKET_REFRESH_METRICS
     started_at = time.perf_counter()
@@ -3450,11 +3520,17 @@ def spot_futures_snapshot():
         "binance_spot_24h": "https://api.binance.com/api/v3/ticker/24hr",
         "gate_spot": "https://api.gateio.ws/api/v4/spot/tickers",
         "bitget_spot": "https://api.bitget.com/api/v2/spot/market/tickers",
+        **{key: url for key, url in EQUITY_SPOT_URLS.items() if key not in EQUITY_SPOT_TTLS},
     }
+    collect_equity_metadata()
     results, errors = fetch_market_payloads(urls, {
         "futures_info": 3600, "funding_info": 60, "futures_24h": 20,
         "binance_spot_24h": 20,
     })
+    metadata, metadata_errors = collect_equity_metadata()
+    results.update(metadata)
+    errors.update(metadata_errors)
+    urls.update(EQUITY_SPOT_URLS)
     network_seconds = time.perf_counter() - started_at
 
     required = {"futures_info", "futures_books", "funding"}
@@ -3544,7 +3620,7 @@ def spot_futures_snapshot():
     captured_at = datetime.now()
     live_snapshot = {
         "symbols": rows_by_symbol,
-        "errors": errors,
+        "errors": {key: value for key, value in errors.items() if key not in EQUITY_SPOT_URLS},
         "updated_at": captured_at.strftime("%H:%M:%S"),
         "captured_at_epoch": captured_at.timestamp(),
         "next_refresh_in_seconds": MARKET_REFRESH_SECONDS,
@@ -3558,6 +3634,11 @@ def spot_futures_snapshot():
     snapshot_finished_at = time.perf_counter()
     if persist_due:
         capture_price_history(rows_by_symbol)
+    try:
+        refresh_equity_spot_snapshot(results, errors, urls)
+    except Exception:
+        db.session.rollback()
+        app.logger.exception("equity_spot_snapshot_failed")
     total_seconds = time.perf_counter() - started_at
     MARKET_REFRESH_METRICS = {
         "network_seconds": round(network_seconds, 3),
@@ -7124,11 +7205,10 @@ def equity_arbitrage():
     except (ValueError, TypeError):
         return jsonify({"error": "无效的页码"}), 400
     query = str(request.args.get("symbol", "")).strip()[:40]
-    snapshots = {"spot_futures": load_latest_market_snapshot(), "futures_futures": load_latest_dual_futures_snapshot()}
+    snapshots = {"spot_futures": load_equity_spot_snapshot(), "futures_futures": load_latest_dual_futures_snapshot()}
     if not any(snapshots.values()):
         return jsonify({"error": "美股行情正在进行首轮同步，请稍后刷新。"}), 503
     now, items, available = time.time(), [], {"spot_futures": 0, "futures_futures": 0}
-    aliases = symbol_alias_rows()
     for mode, snapshot in snapshots.items():
         for group in (snapshot or {}).get("symbols", []):
             symbol = group["symbol"]
@@ -7142,15 +7222,15 @@ def equity_arbitrage():
                 if asset_category(short_raw, short_exchange) not in {"us_equity", "equity"}:
                     continue
                 if mode == "spot_futures":
-                    if not route or not verified_equity_spot_alias(symbol, long_raw, long_exchange, aliases):
+                    if row.get('verification_version') != 1 or not row.get('spot_symbol') or not row.get('units_per_token'):
                         continue
                 elif asset_category(long_raw, long_exchange) not in {"us_equity", "equity"}:
                     continue
                 available[mode] += 1
-                if strategy not in ("all", mode) or (query and not symbol_matches_query(symbol, query.upper())):
+                if strategy not in ("all", mode) or (query and not symbol_matches_query(symbol, query.upper()) and compact_symbol(query) not in compact_symbol(row.get('spot_symbol', ''))):
                     continue
                 captured = row.get("captured_at_epoch", snapshot.get("captured_at_epoch"))
-                fresh = isinstance(captured, (int, float)) and 0 <= now - captured <= 15 and not snapshot.get("errors")
+                fresh = isinstance(captured, (int, float)) and 0 <= now - captured <= 15 and not (row.get('data_error') if mode == 'spot_futures' else snapshot.get("errors"))
                 items.append({"symbol": symbol, "strategy": mode, "long_exchange": long_exchange, "short_exchange": short_exchange,
                               "long_ask": row.get("long_ask"), "short_bid": row.get("short_bid"),
                               "long_basis": None if mode == "spot_futures" else row.get("long_basis"),
@@ -7163,22 +7243,26 @@ def equity_arbitrage():
                               "short_volume": row.get("futures_volume") if mode == "spot_futures" else row.get("short_volume"),
                               "open_spread": row.get("open_spread"), "close_spread": row.get("close_spread"),
                               "captured_at_epoch": captured, "fresh": fresh})
+                if mode == 'spot_futures':
+                    items[-1].update({key: row.get(key) for key in ('spot_symbol', 'futures_symbol', 'raw_long_ask', 'raw_long_bid', 'units_per_token', 'unit_basis', 'product', 'product_name', 'isin', 'mint', 'verified_at_epoch', 'pairing_sources', 'trading_period', 'weekend_tradable', 'data_error')})
     key = (lambda item: item["symbol"]) if sort_by == "symbol" else (lambda item: item[sort_by] if isinstance(item.get(sort_by), (int, float)) and math.isfinite(item[sort_by]) else float('-inf') if direction == 'desc' else float('inf'))
     items.sort(key=key, reverse=direction == "desc")
     total, page_size = len(items), 30
     pages = max(1, math.ceil(total / page_size))
     page = min(page, pages)
     selected = items[(page-1)*page_size:page*page_size]
-    transfers = load_transfer_statuses((item["symbol"], item["long_exchange"]) for item in selected if item["strategy"] == "spot_futures")
+    transfers = load_transfer_statuses(((item["spot_symbol"], item["long_exchange"]) for item in selected if item["strategy"] == "spot_futures"), exact_assets=True)
     for item in selected:
         if item["strategy"] == "spot_futures":
-            item["transfer_status"] = transfers[(item["symbol"], item["long_exchange"])]
+            item["transfer_status"] = transfers[(item["spot_symbol"], item["long_exchange"])]
     mark_delisting_items(selected)
-    stamps = [snapshot.get("captured_at_epoch") for snapshot in snapshots.values() if snapshot and snapshot.get("captured_at_epoch")]
+    relevant = [snapshot for mode, snapshot in snapshots.items() if strategy in ('all', mode)]
+    stamps = [snapshot.get("captured_at_epoch") for snapshot in relevant if snapshot and snapshot.get("captured_at_epoch")]
     return jsonify({"items": selected, "page": page, "pages": pages, "total": total, "page_size": page_size,
                     "available": available, "strategy": strategy, "symbol_query": query,
+                    "spot_coverage": (snapshots['spot_futures'] or {}).get('coverage', {}),
                     "captured_at_epoch": min(stamps) if stamps else None,
-                    "incomplete": any(not snapshot or snapshot.get("errors") for snapshot in snapshots.values()),
+                    "incomplete": any(not snapshot or snapshot.get("errors") for snapshot in relevant) or any(not item['fresh'] for item in selected),
                     "execution_enabled": False})
 
 

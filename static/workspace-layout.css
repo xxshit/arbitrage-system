@@ -128,6 +128,58 @@ body:has(#dual-futures.active) main > header,
 .layout-view#dual-futures.active .table-wrap {flex:1 1 0;min-height:0;max-height:none;overflow:auto;overscroll-behavior:contain}
 .layout-view#dual-futures .pagination {margin:10px 0 6px;gap:8px}
 .layout-view#dual-futures .data-status {margin:0;font-size:10px;overflow-wrap:anywhere}
+
+/* Compact paired legs: every number stays visible; only duplicate labels collapse. */
+.layout-view#dual-futures .dual-redesign-table {min-width:1180px}
+.layout-view#dual-futures .dual-redesign-table th {padding:8px 6px;line-height:1.35;white-space:nowrap}
+.layout-view#dual-futures .dual-redesign-table th:nth-child(1) {width:140px}
+.layout-view#dual-futures .dual-redesign-table th:nth-child(2) {width:210px}
+.layout-view#dual-futures .dual-redesign-table :is(th:nth-child(3),th:nth-child(4),.dual-leg-cell) {min-width:270px}
+.layout-view#dual-futures .dual-redesign-table :is(th:nth-child(5),.dual-result-cell) {min-width:270px}
+.layout-view#dual-futures td {padding:5px 6px;font-size:12px;line-height:1.4;vertical-align:top}
+.layout-view#dual-futures td.symbol {min-width:134px;padding:8px 6px}
+.layout-view#dual-futures .symbol-detail-trigger {max-width:136px;white-space:normal;overflow-wrap:anywhere;text-align:left}
+.layout-view#dual-futures td.symbol > .trend-lights,
+.layout-view#dual-futures .basis-opening-empty {display:none}
+.layout-view#dual-futures td.symbol > div {flex-wrap:wrap;gap:4px}
+.layout-view#dual-futures .symbol-basis-opening {margin-top:5px}
+.layout-view#dual-futures .symbol-basis-opening .basis-opening {display:grid;grid-template-columns:max-content max-content;gap:2px 6px;padding:3px 5px;border-radius:4px}
+.layout-view#dual-futures .basis-opening > small {grid-column:1/-1}
+.layout-view#dual-futures td.price-change-cell {padding-top:8px;vertical-align:top!important}
+.layout-view#dual-futures .change-stack {grid-template-columns:repeat(2,max-content);gap:3px 9px;font-size:11px;line-height:1.35}
+.layout-view#dual-futures .change-item {grid-template-columns:36px max-content;gap:3px}
+.layout-view#dual-futures .dual-exchange-card {gap:3px;padding:3px 5px;border:0;border-radius:4px;box-shadow:none;background:rgba(255,255,255,.45)}
+.layout-view#dual-futures .dual-exchange-card header {min-height:22px;gap:5px;margin:0}
+.layout-view#dual-futures .dual-exchange-card header span {gap:3px}
+.layout-view#dual-futures .exchange-logo {width:18px;height:18px;margin-right:3px}
+.layout-view#dual-futures :is(.interval-badge,.dual-side) {padding:2px 4px;line-height:1.2}
+.layout-view#dual-futures .dual-exchange-card dl {grid-template-columns:repeat(2,minmax(0,1fr));gap:3px 8px}
+.layout-view#dual-futures .dual-exchange-card dl > div {grid-template-columns:max-content minmax(0,1fr);min-height:20px;padding:0;border:0;gap:5px}
+.layout-view#dual-futures .dual-exchange-card dl > div:first-child {grid-column:1;grid-row:1}
+.layout-view#dual-futures .dual-exchange-card dl > div:nth-child(3) {grid-column:2;grid-row:1}
+.layout-view#dual-futures .dual-exchange-card :is(dt,dd) {white-space:nowrap}
+.layout-view#dual-futures .dual-exchange-card dt {font-size:10px}
+.layout-view#dual-futures .dual-exchange-card dd {font-size:11px}
+.layout-view#dual-futures .dual-card-funding {grid-column:1/-1;grid-row:2;grid-template-columns:max-content minmax(max-content,1fr) auto auto auto auto;min-height:20px;padding:0;border:0;gap:3px;font-size:11px}
+.layout-view#dual-futures .dual-card-funding b {font-size:9px;white-space:nowrap}
+.layout-view#dual-futures .dual-card-funding .dual-cap {min-width:0;padding:0 3px;border-radius:3px}
+.layout-view#dual-futures .dual-exchange-card dl > .dual-liquidity-row {grid-column:1/-1;grid-row:3;display:block;min-height:20px}
+.layout-view#dual-futures .dual-liquidity-row > dt {display:none}
+.layout-view#dual-futures .dual-card-liquidity {gap:3px}
+.layout-view#dual-futures .dual-card-liquidity .liquidity-metric {grid-template-columns:max-content minmax(max-content,1fr);padding:1px 4px;gap:4px}
+.layout-view#dual-futures .dual-card-liquidity .liquidity-metric :is(b,i) {overflow:visible;text-overflow:clip;font-size:10px}
+.layout-view#dual-futures .dual-result-stack {gap:4px}
+.layout-view#dual-futures .dual-result-panel {grid-template-columns:repeat(3,minmax(0,1fr));gap:5px;padding:0;border:0;border-radius:0;box-shadow:none;background:none}
+.layout-view#dual-futures .dual-result-panel > div {display:flex;flex-wrap:wrap;align-items:baseline;justify-content:flex-start;gap:2px 4px;min-height:0;padding:0;background:none}
+.layout-view#dual-futures .dual-result-panel span {font-size:10px}
+.layout-view#dual-futures .dual-result-panel b {font-size:12px;white-space:nowrap}
+.layout-view#dual-futures .common-index-empty {white-space:normal;overflow-wrap:anywhere}
+.layout-view#dual-futures .dual-funding-history {gap:2px 10px;padding:3px 0 0;border:0;border-top:1px solid var(--desk-line);border-radius:0;box-shadow:none;background:none}
+.layout-view#dual-futures .dual-funding-history > span {grid-template-columns:26px minmax(max-content,1fr);align-content:start;gap:1px 4px;min-height:0;padding:0;border:0;border-radius:0;background:none}
+.layout-view#dual-futures .dual-funding-history em {font-size:11px;line-height:1.4}
+.layout-view#dual-futures .dual-funding-history small {font-size:9px;line-height:1.3;overflow-wrap:anywhere}
+.layout-view#dual-futures .dual-group-start td {box-shadow:inset 0 1px #b8cbb5}
+.layout-view#dual-futures .dual-group-divider td {height:3px!important}
 @media(max-width:760px) {
   body:has(#dual-futures.active) main {padding-top:calc(64px + env(safe-area-inset-top))!important;padding-bottom:max(8px,env(safe-area-inset-bottom))!important}
   body:has(#dual-futures.active) .header-actions {margin-top:6px;gap:5px}

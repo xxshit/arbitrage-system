@@ -20,11 +20,20 @@
   for(let i=0;i<7;i++)spot.push({symbol:`DENSITY${i+1}/USDT`,rows:[{...base,open_spread:.1-i*.05,transfer_status:wallet('Gate')}]});
   const isolatedRisk={symbol:'ISOLATED/USDT',long_exchange:'Gate',short_exchange:'Binance',state:'confirmed',long_ask:.12225,short_bid:.02814,index_price:.02804,open_spread:-76.98,basis:.36,blocked_chains:['BSC 充关','ETH 提关'],blocked_transfers:[{exchange:'Gate',chain:'BSC',deposit_open:false,withdraw_open:true},{exchange:'Gate',chain:'ETH',deposit_open:true,withdraw_open:false}],transfer_state:'fresh',stale:false,observed_at:'10-19 00:00:00 UTC'};
   spot.push({symbol:isolatedRisk.symbol,rows:[{...base,...isolatedRisk,transfer_status:wallet('Gate'),price_divergence:isolatedRisk},{...base,long_exchange:'Bitget',transfer_status:wallet('Bitget',{chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}]})}]});
-  const dual = symbols.map(symbol => ({symbol,binance_change_5m:0.42,binance_change_15m:0.7,binance_change_30m:1.2,binance_change_1h:2.1,rows:[
+  const dual = symbols.map(symbol => ({symbol,binance_change_5m:0.42,binance_change_15m:0.7,binance_change_30m:1.2,binance_change_1h:2.1,binance_change_12h:-4.6,binance_change_24h:7.9,binance_change_3d:-12.6,binance_change_7d:18.4,rows:[
     {...base,long_exchange:'Bybit',long_basis:-0.2,short_basis:0.83,long_open_interest:12000000,short_open_interest:14300000,long_volume:25000000,short_volume:37600000,
       long_funding_rate:0.01,short_funding_rate:0.025,long_funding_interval_hours:4,short_funding_interval_hours:4,long_next_funding_time:stamp,short_next_funding_time:stamp,
       funding_difference:0.015,funding_difference_previous:0.012,funding_difference_24h:0.09,funding_difference_3d:0.27,funding_difference_7d:0.6,funding_difference_30d:2.4,funding_settlement_label:'双方结算 · 12:00'},
   ]}));
+  // Single, double and triple paths plus long identifiers and missing fields.
+  // These fixtures never contact an exchange or change the live server.
+  dual[0].basis_opening=spot[0].basis_opening;
+  dual[0].rows[0]={...dual[0].rows[0],index_overlap:60,long_index_components:[{source:'binance',name:'Binance',weight:.6},{source:'gate',name:'Gate',weight:.4}],short_index_components:[{source:'binance',name:'Binance',weight:.8},{source:'okx',name:'OKX',weight:.2}]};
+  dual[1].rows.push({...dual[1].rows[0],long_exchange:'OKX',long_basis:-.1,long_funding_rate:-.02,open_spread:.65,long_funding_interval_hours:8});
+  for(let i=0;i<8;i++)dual.push({...dual[2],symbol:`DUALTEST${i+1}/USDT`,rows:[{...dual[2].rows[0],open_spread:.5-i*.1}]});
+  dual[9].rows.push({...dual[9].rows[0],long_exchange:'OKX',open_spread:.21},{...dual[9].rows[0],short_exchange:'OKX',open_spread:-.4});
+  dual[10]={...dual[10],symbol:'超长合成币种名称测试/USDT',rows:[{...dual[10].rows[0],long_bid:123456.78,long_ask:123456.9,long_funding_cap:12.34,long_open_interest:123456789012,long_volume:987654321098,funding_difference_30d:-123.4567,funding_settlement_label:'双方结算时间不同 · 12:00 / 16:00'}]};
+  dual[11].rows[0]={...dual[11].rows[0],long_basis:null,long_funding_rate:null,long_open_interest:null,short_volume:null,funding_difference_24h:null,binance_change_7d:null};
   const funding = symbols.map((symbol,index) => ({symbol,long_exchange:'Gate',score:85-index*7,level:index?'观察机会':'重点机会',funding_interval:4,
     change_24h:7.9,change_3d:12.6,funding_current:0.025,funding_previous:0.021,funding_24h:0.14,funding_3d:0.42,basis:0.83,open_spread:0.85,
     oi_change_12h:9.4,volume_change_12h:26.5,futures_open_interest:14300000,futures_volume:37600000}));
@@ -72,7 +81,7 @@
     '/api/auth/me':{user_id:1,username:'preview_admin',is_admin:true,account_level:'lv3',csrf_token:'synthetic-only',device_lock_required:false,chat_nav_hidden:false},
     '/api/market-metadata/delisted-symbols':{symbols:[]},
     '/api/spot-futures':{symbols:spot,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:spot.length,page:1,pages:1,next_refresh_in_seconds:5},
-    '/api/dual-futures':{symbols:dual,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:4,page:1,pages:1,include_bybit_okx:false,next_refresh_in_seconds:5},
+    '/api/dual-futures':{symbols:dual,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:dual.length,page:1,pages:1,include_bybit_okx:false,next_refresh_in_seconds:5},
     '/api/arbitrage-thinking/funding-trend':{items:funding,updated_at:stamp},
     '/api/arbitrage-thinking/simple':{spot_simple:simple,dual_simple:simple.map(item=>({...item,long_exchange:'Bybit',long_is_spot:false,long_interval:4,long_open_interest:12000000}))},
     '/api/onchain-opportunities':{items:onchain,updated_at:stamp,stale:false,chains:[{id:'all',label:'全部',count:4},{id:'bsc',label:'BSC',count:1},{id:'solana',label:'Solana',count:1},{id:'base',label:'Base',count:1},{id:'eth',label:'Ethereum',count:1}]},

@@ -5,6 +5,7 @@ current quote. Database commits, not these disposable checkpoints, own the facts
 """
 import json
 import math
+from collections import deque
 import threading
 import time
 from pathlib import Path
@@ -24,18 +25,26 @@ class RequestGate:
         self.spacing, self.clock, self.sleep = spacing, clock, sleep
         self.next_at = self.blocked_until = 0.
         self.lock = threading.Lock()
+        self.queue = deque()
 
     def wait(self):
-        while True:
+        ticket = object()
+        with self.lock:
+            self.queue.append(ticket)
+        try:
+            while True:
+                with self.lock:
+                    now = self.clock()
+                    if now < self.blocked_until:
+                        raise FundingHistoryError("rate_backoff")
+                    delay = self.next_at - now
+                    if self.queue[0] is ticket and delay <= 0:
+                        self.next_at = now + self.spacing
+                        return
+                self.sleep(max(.01, min(delay, .05)))
+        finally:
             with self.lock:
-                now = self.clock()
-                if now < self.blocked_until:
-                    raise FundingHistoryError("rate_backoff")
-                delay = self.next_at - now
-                if delay <= 0:
-                    self.next_at = now + self.spacing
-                    return
-            self.sleep(min(delay, 1.))
+                self.queue.remove(ticket)
 
     def pause(self, seconds):
         with self.lock:
@@ -196,11 +205,14 @@ class FundingSyncSchedule:
             if state.get("retry", 0) > now and expected == state.get("expected"):
                 continue
             missing = expected is not None and latest.get(key, 0) < expected
-            if missing or now - state.get("success", 0) >= 900:
-                hot.append((not missing, state.get("attempt", 0), key))
+            # A newly discovered leg must not spend hours displaying a two-day
+            # tail as its 30D history while waiting behind already covered coins.
+            initial_repair = not state.get("full") and target.get("earliest", 0) > now*1000 - 30*DAY_MS
+            if missing or initial_repair or now - state.get("success", 0) >= 900:
+                hot.append((0 if missing else 1 if initial_repair else 2, state.get("attempt", 0), key, initial_repair))
             if now - state.get("full", 0) >= 86400:
                 full.append((state.get("full", 0), state.get("attempt", 0), key))
-        selected = [(key, False) for _, _, key in sorted(hot)[:limit]]
+        selected = [(key, initial_repair) for _, _, key, initial_repair in sorted(hot)[:limit]]
         # One reserved repair slot prevents old interior gaps from being starved
         # by a permanently unavailable/delisted contract's latest settlement.
         if full:

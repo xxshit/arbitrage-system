@@ -15071,12 +15071,17 @@ def funding_sync_catalog(exchange):
 
 def funding_sync_latest(exchange, targets):
     model = FundingRateRecord if exchange == "Binance" else ExchangeFundingRateRecord
-    query = db.session.query(model.symbol, func.max(model.funding_time)).filter(model.funding_time <= int(time.time()*1000))
+    query = db.session.query(model.symbol, func.min(model.funding_time), func.max(model.funding_time)).filter(model.funding_time <= int(time.time()*1000))
     if exchange != "Binance":
         query = query.filter(model.exchange == exchange)
-    raw = dict(query.group_by(model.symbol).all())
-    return {key: max((raw.get(candidate, 0) for candidate in target["candidates"]), default=0)
-            if exchange == "Binance" else raw.get(key, 0) for key, target in targets.items()}
+    raw = {symbol: (earliest, latest) for symbol, earliest, latest in query.group_by(model.symbol).all()}
+    latest = {}
+    for key, target in targets.items():
+        candidates = target["candidates"] if exchange == "Binance" else [key]
+        bounds = [raw[candidate] for candidate in candidates if candidate in raw]
+        target["earliest"] = min((bound[0] for bound in bounds), default=int(time.time()*1000))
+        latest[key] = max((bound[1] for bound in bounds), default=0)
+    return latest
 
 
 def store_settled_funding(exchange, rows):

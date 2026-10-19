@@ -101,6 +101,34 @@ class FundingCollectionUnitTests(unittest.TestCase):
             self.assertTrue(schedule.plan({"DEMO": self.target}, {}, self.now, 8))
             self.assertNotIn("bad", schedule.states)
 
+    def test_new_partial_leg_gets_immediate_deep_repair_not_daily_queue_tail(self):
+        schedule = FundingSyncSchedule(self.path)
+        targets = {f"C{i:03}": {**self.target, 'earliest': (self.now-31*86400)*1000} for i in range(700)}
+        targets['NEW'] = {**self.target, 'earliest': (self.now-3600)*1000}
+        latest = {key:expected_settlement(self.target,self.now) for key in targets}
+        schedule.done('NEW', targets['NEW'], self.now-20, latest['NEW'])  # bulk fast tail already arrived
+        batch = schedule.plan(targets,latest,self.now,8)
+        self.assertIn(('NEW',True),batch)
+        schedule.done('NEW',targets['NEW'],self.now,latest['NEW'],full=True)
+        self.assertNotIn(('NEW',True),schedule.plan(targets,latest,self.now+10,8))  # newly listed short history is valid
+
+    def test_rate_gate_fifo_keeps_tail_checks_from_being_starved_by_repairs(self):
+        gate = RequestGate(.01)
+        gate.next_at = time.monotonic()+.06
+        result = []
+        workers = []
+        for index in range(4):
+            worker = threading.Thread(target=lambda item=index: (gate.wait(), result.append(item)))
+            worker.start()
+            workers.append(worker)
+            deadline = time.monotonic()+1
+            while len(gate.queue) < index+1 and time.monotonic()<deadline:
+                time.sleep(.001)
+        for worker in workers:
+            worker.join(1)
+        self.assertEqual(result,[0,1,2,3])
+        self.assertEqual(len(gate.queue),0)
+
     def test_unexpected_interval_change_found_by_periodic_safety_poll(self):
         schedule = FundingSyncSchedule(self.path)
         current = expected_settlement(self.target, self.now)

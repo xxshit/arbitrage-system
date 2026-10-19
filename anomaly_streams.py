@@ -382,6 +382,7 @@ class AlertStreamHub:
                 state["stale_frames"] = state.get("stale_frames", 0) + worker.stale_frames
                 state["last_source_at"] = max(state.get("last_source_at", 0), worker.last_source_at)
             quality, missing_by_feed, stale_by_feed, examples = Counter(), Counter(), Counter(), []
+            examples_by_feed = defaultdict(list)
             basis_fresh = 0
             for path, route in self.routes.items():
                 legs = [self.books.get(key) for key in (route.long_key, route.short_key)]
@@ -421,9 +422,14 @@ class AlertStreamHub:
                 quality[reason] += 1
                 mark = self.marks.get(route.mark_key)
                 basis_fresh += bool(mark and -2 <= now - mark["at"] <= self.MAX_AGE)
-                if reason != "fresh" and len(examples) < 24:
-                    examples.append(dict(path=list(path), reason=reason, issues=issues,
-                                         skew_seconds=round(abs(legs[0]["at"]-legs[1]["at"]), 3) if all(legs) else None))
+                if reason != "fresh":
+                    example = dict(path=list(path), reason=reason, issues=issues,
+                                   skew_seconds=round(abs(legs[0]["at"]-legs[1]["at"]), 3) if all(legs) else None)
+                    if len(examples) < 24:
+                        examples.append(example)
+                    for feed in {item["feed"] for item in issues} or {route.long_key[0], route.short_key[0]}:
+                        if len(examples_by_feed[feed]) < 6:
+                            examples_by_feed[feed].append(example)
             for feed in feeds:
                 cache = self.marks if feed == "bn_mark" else self.books
                 feed_books = [value for key, value in cache.items() if key[0] == feed]
@@ -441,6 +447,7 @@ class AlertStreamHub:
                         frame_counts={feed: dict(counts) for feed, counts in self.frame_counts.items()},
                         overloaded=self.overloaded, last_persisted_at=self.last_persisted_at, checked_at=now,
                         transport="asyncio", path_quality=dict(quality), unfresh_samples=examples,
+                        unfresh_by_feed=dict(examples_by_feed),
                         basis_fresh_paths=basis_fresh,
                         quote_refresh=self.quote_refresh.status() if self.quote_refresh else {},
                         loop_delay_max_seconds=round(max(self.loop_delays, default=0), 4))

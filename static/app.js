@@ -578,7 +578,7 @@ async function loadSpotFutures(manual=false){
     byId('nextPage').disabled=page>=data.pages;
     const failed=Object.keys(data.errors||{});
     alphaFilter.title=alphaOnly?`Binance Alpha 目录${data.binance_alpha_catalog_stale?'沿用最近有效缓存':'已同步'}`:'';
-    setPageRefreshSource('spot-futures',data.captured_at_epoch,'行情',failed.length>0||state.missing>0);
+    setPageRefreshSource('spot-futures',data.captured_at_epoch,'行情',failed.length>0||state.missing>0,data.upstream_delays?.sources||[]);
     return true;
   }catch(error){
     if(!current())return false;
@@ -734,7 +734,7 @@ async function loadDualFutures(manual=false){
     byId('dualPreviousPage').disabled=page<=1;byId('dualNextPage').disabled=page>=data.pages;
     const byOkNote=data.include_bybit_okx?'含 BY→OK':'已过滤 BY→OK',failed=Object.keys(data.errors||{});
     status.textContent=`最近更新 ${data.updated_at} · ${byOkNote} · 全部 ${data.total_symbols} 币种排序 · ${dualSortLabels[dualSort.key]||dualSort.key} ${dualSort.direction==='desc'?'↓':'↑'}${failed.length?' · 部分上游沿用缓存':''}`;
-    showDualRefreshCountdown();setPageRefreshSource('dual-futures',data.captured_at_epoch,'行情',failed.length>0||state.missing>0);return true;
+    showDualRefreshCountdown();setPageRefreshSource('dual-futures',data.captured_at_epoch,'行情',failed.length>0||state.missing>0,data.upstream_delays?.sources||[]);return true;
   }catch(error){
     if(!current())return false;
     if(!dualFuturesHasData)byId('dualFuturesRows').innerHTML=`<tr><td colspan="${emptyColspan}" class="loading">${escapeChatHtml(error.message)}</td></tr>`;
@@ -1514,7 +1514,11 @@ let pageRefreshIndicatorTimer=null;
 function pageRefreshState(viewId){if(!pageRefreshStates.has(viewId))pageRefreshStates.set(viewId,{seconds:Number(pageRefreshProfiles[viewId]?.seconds)||0,inFlight:0,completedAt:0,cycleStartedAt:Date.now()});return pageRefreshStates.get(viewId)}
 function refreshIntervalLabel(seconds){const value=Math.max(0,Number(seconds)||0);if(value>=60&&value%60===0)return `${value/60}分钟`;return `${value}秒`}
 function setPageRefreshInterval(viewId,seconds){const state=pageRefreshState(viewId),next=Math.max(0,Number(seconds)||0);if(state.seconds!==next){state.seconds=next;state.cycleStartedAt=Date.now()}if(viewId===activeViewId())renderPageRefreshIndicator(viewId)}
-function setPageRefreshSource(viewId,epoch,label='行情',incomplete=false){const state=pageRefreshState(viewId);state.sourceUpdatedAt=Number(epoch||0)*1000;state.sourceLabel=label;state.sourceIncomplete=incomplete;state.sourceStale=false;state.sourceMaxAge=Math.max(15,state.seconds*3)*1000}
+function setPageRefreshSource(viewId,epoch,label='行情',incomplete=false,sources=[]){
+  const state=pageRefreshState(viewId);state.sourceUpdatedAt=Number(epoch||0)*1000;state.sourceLabel=label;state.sourceIncomplete=incomplete;state.sourceStale=false;state.sourceMaxAge=Math.max(15,state.seconds*3)*1000;
+  state.sourceProblemLabel=sources.length?`${[...new Set(sources.map(item=>item.exchange))].join('/')}延迟`:'';
+  state.sourceProblemDetail=sources.map(item=>`${item.label}：${item.reason}${item.observed_at_epoch?`；上次成功 ${new Date(item.observed_at_epoch*1000).toLocaleTimeString('zh-CN',{hour12:false})}`:'；尚无有效数据'}\n影响 ${item.affected_paths} 条路径${item.examples?.length?'：'+item.examples.map(path=>`${path.symbol} ${path.long_exchange} → ${path.short_exchange}`).join('；'):''}`).join('\n');
+}
 function renderPageRefreshIndicator(viewId=activeViewId()){
   if(viewId!==activeViewId())return;
   const profile=pageRefreshProfiles[viewId]||{label:'当前页面',seconds:0},state=pageRefreshState(viewId),status=byId('updated'),ring=document.querySelector('main>header .status .pulse');
@@ -1522,8 +1526,9 @@ function renderPageRefreshIndicator(viewId=activeViewId()){
   const now=Date.now(),baseDuration=Math.max(0,state.seconds)*1000,duration=fixedCadenceViews.has(viewId)&&state.startedAt?Math.max(250,state.startedAt+baseDuration-state.cycleStartedAt):baseDuration,elapsed=Math.max(0,now-state.cycleStartedAt),progress=state.inFlight?1:(duration?Math.min(1,elapsed/duration):0),lastAt=fixedCadenceViews.has(viewId)?state.sourceUpdatedAt:state.completedAt,last=lastAt?new Date(lastAt).toLocaleTimeString('zh-CN',{hour12:false}):'';
   ring.classList.add('refresh-progress-ring');ring.classList.toggle('refreshing',state.inFlight>0);ring.classList.toggle('manual',!duration);ring.style.setProperty('--refresh-angle',`${progress*360}deg`);
   ring.setAttribute('role','progressbar');ring.setAttribute('aria-valuemin','0');ring.setAttribute('aria-valuemax','100');ring.setAttribute('aria-valuenow',String(Math.round(progress*100)));
-  const stale=state.sourceStale||(state.sourceUpdatedAt&&now-state.sourceUpdatedAt>(state.sourceMaxAge||15000)),label=state.sourceLabel||'行情',statusText=fixedCadenceViews.has(viewId)?`${profile.label} · ${last?`${label} ${last}`:`等待${label}`}${state.failed?' · 请求失败':stale?(label==='行情'?' · 行情延迟':' · 检查延迟'):state.sourceIncomplete?' · 部分上游延迟':''}`:!last?`${profile.label} · 等待首次刷新${duration?'':' · 手动刷新'}`:`${profile.label} · 最近刷新 ${last}${duration?'':' · 手动刷新'}`;
+  const stale=state.sourceStale||(state.sourceUpdatedAt&&now-state.sourceUpdatedAt>(state.sourceMaxAge||15000)),label=state.sourceLabel||'行情',statusText=fixedCadenceViews.has(viewId)?`${profile.label} · ${last?`${label} ${last}`:`等待${label}`}${state.failed?' · 请求失败':stale?(label==='行情'?' · 行情延迟':' · 检查延迟'):state.sourceIncomplete?` · ${state.sourceProblemLabel||'部分上游延迟'}`:''}`:!last?`${profile.label} · 等待首次刷新${duration?'':' · 手动刷新'}`:`${profile.label} · 最近刷新 ${last}${duration?'':' · 手动刷新'}`;
   if(status.textContent!==statusText)status.textContent=statusText;
+  const detail=state.sourceIncomplete?(state.sourceProblemDetail||'部分路径暂未取得新行情'):'';if(status.title!==detail)status.title=detail;
   if(typeof renderWorkspaceRefreshStatus==='function')renderWorkspaceRefreshStatus(viewId,state);
   ring.setAttribute('aria-valuetext',state.inFlight?'正在刷新':(duration?`刷新周期已进行 ${Math.round(progress*100)}%`:'手动刷新'));
   ring.title=state.inFlight?'正在刷新':(duration?`顺时针填满后刷新 · 间隔 ${refreshIntervalLabel(state.seconds)}`:'此页面只在进入或手动点击时刷新');

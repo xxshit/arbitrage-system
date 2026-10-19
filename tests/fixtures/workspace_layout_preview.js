@@ -136,6 +136,11 @@
     const url = new URL(String(input), location.origin),path=url.pathname;
     if (!(path in fixtures)) return Response.json({error:`未定义的合成接口 ${path}`}, {status:404});
     const payload = structuredClone(fixtures[path]);
+    if(new URLSearchParams(location.search).get('upstream_preview')==='1'&&['/api/spot-futures','/api/dual-futures'].includes(path)){
+      const spotView=path==='/api/spot-futures',exchange=spotView?'Gate':'Bybit';
+      payload.errors={[spotView?'gate_spot':'bybit_tickers']:'synthetic timeout'};
+      payload.upstream_delays={sources:[{exchange,label:exchange+(spotView?'现货盘口':'合约盘口/资费'),reason:'请求超时（合成预览）',observed_at_epoch:now()-20,affected_paths:2,examples:[{symbol:'DEMO/USDT',long_exchange:exchange,short_exchange:'Binance 合约'}]}]};
+    }
     if(movingRank&&['/api/spot-futures','/api/dual-futures'].includes(path)){
       const tick=rankTicks[path]=(rankTicks[path]||0)+1,seed=payload.symbols[0];
       while(payload.symbols.length<65){const index=payload.symbols.length;payload.symbols.push({...structuredClone(seed),symbol:`RANK${String(index).padStart(2,'0')}/USDT`})}

@@ -13,10 +13,13 @@ import time
 from urllib.parse import urlencode, urlsplit
 
 from anomaly_engine import finite
+from market_transport import PublicMarketHttp
 
 
 # Per-feed ceilings, not target traffic. No catch-up bursts after a slow call.
-LIMITS = {'bn_spot': 4, 'bn_future': 3, 'gate': 6, 'bybit': 4}
+LIMITS = {'bn_spot': .5, 'bn_future': 3, 'gate': 6, 'bybit': .5}
+BULK_URLS = {'bn_spot': 'https://api.binance.com/api/v3/ticker/bookTicker',
+             'bybit': 'https://api.bybit.com/v5/market/tickers?category=linear'}
 URLS = {'bn_spot': 'https://api.binance.com/api/v3/depth',
         'bn_future': 'https://fapi.binance.com/fapi/v1/depth',
         'gate': 'https://api.gateio.ws/api/v4/spot/order_book',
@@ -104,6 +107,48 @@ def parse_snapshot(feed, symbol, data, started, received, elapsed):
         return None
 
 
+def parse_bulk_snapshot(feed, data, symbols, started, received, elapsed):
+    """A new complete BBO read, never a renewal from another coin's heartbeat."""
+    if elapsed < 0 or elapsed > MAX_RTT or not 0 <= received-started <= MAX_RTT+.1:
+        return {}
+    if feed == 'bn_spot':
+        rows, stamp, source = data, started, 'request_start'
+        fields = ('bidPrice', 'askPrice', 'bidQty', 'askQty')
+    elif feed == 'bybit' and isinstance(data, dict) and data.get('retCode') == 0:
+        result = data.get('result') or {}
+        if result.get('category') != 'linear':
+            return {}
+        rows, source = result.get('list'), 'exchange_snapshot'
+        try:
+            stamp = float(data['time'])/1000
+        except (KeyError, ValueError, TypeError):
+            return {}
+        fields = ('bid1Price', 'ask1Price', 'bid1Size', 'ask1Size')
+    else:
+        return {}
+    if not isinstance(rows, list) or not finite(stamp) or not -2 <= received-stamp <= 4:
+        return {}
+    output, seen = {}, set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get('symbol') not in symbols:
+            continue
+        symbol = row['symbol']
+        if symbol in seen:
+            output.pop(symbol, None)
+            continue
+        seen.add(symbol)
+        try:
+            bid, ask, bq, aq = (float(row[key]) for key in fields)
+        except (KeyError, ValueError, TypeError):
+            continue
+        if not all(finite(value) and value > 0 for value in (bid, ask, bq, aq)) or bid > ask:
+            continue
+        output[symbol] = dict(symbol=symbol, bid=bid, ask=ask, bid_qty=bq, ask_qty=aq, at=stamp,
+                              sequence=None, sequence_kind=feed+'_rest_bulk', timestamp_source=source,
+                              last_change_at=None)
+    return output
+
+
 class PublicBookRefresh:
     def __init__(self, hub):
         self.hub = hub
@@ -187,6 +232,8 @@ class PublicBookRefresh:
             return parse_snapshot(feed, symbol, data, started, time.time(), time.monotonic()-began)
 
     def run(self, feed):
+        if feed in BULK_URLS:
+            return self.run_bulk(feed)
         session = PublicHTTP(feed)
         try:
             errors = 0
@@ -213,7 +260,52 @@ class PublicBookRefresh:
         finally:
             session.close()
 
+    def choose_bulk(self, feed, now):
+        # Select once under the same lock. A single public snapshot confirms all
+        # quiet subscribed books instead of a many-second per-coin REST queue.
+        with self.hub.lock:
+            selected = []
+            for key in self.hub.by_key:
+                if key[0] != feed:
+                    continue
+                owner, book = self.hub.owners.get(key), self.hub.books.get(key)
+                if owner and owner.connected and -2 <= now-owner.last_source_at <= 4 and (not book or now-book['at'] >= 1.5):
+                    selected.append((key, owner, book))
+            return selected
+
+    def confirm_bulk(self, client, feed, selected):
+        started, began = time.time(), time.monotonic()
+        data = client.get_json(BULK_URLS[feed], timeout=MAX_RTT, weight_limit=3000 if feed == 'bn_spot' else None)
+        received = time.time()
+        items = parse_bulk_snapshot(feed, data, {key[1] for key, _, _ in selected}, started, received, time.monotonic()-began)
+        for item in selected:
+            accepted = self.accept(item, items.get(item[0][1]), time.time())
+            self.counts[feed]['accepted' if accepted else 'rejected'] += 1
+
+    def run_bulk(self, feed):
+        client, errors = PublicMarketHttp(connections_per_host=1), 0
+        try:
+            while not self.stop.is_set():
+                began = time.monotonic()
+                if began < self.cooldown[feed]:
+                    self.stop.wait(min(1, self.cooldown[feed]-began))
+                    continue
+                selected = self.choose_bulk(feed, time.time())
+                if selected:
+                    self.counts[feed]['attempts'] += 1
+                    try:
+                        self.confirm_bulk(client, feed, selected)
+                        errors = 0
+                    except Exception as error:
+                        self.counts[feed]['errors'] += 1
+                        self.counts[feed]['last_error_type'] = type(error).__name__
+                        errors = min(5, errors+1)
+                        self.cooldown[feed] = time.monotonic()+min(30, 2**errors)
+                self.stop.wait(max(.01, 1/LIMITS[feed]-(time.monotonic()-began)))
+        finally:
+            client.close()
+
     def status(self):
         now = time.monotonic()
-        return {feed: {**dict(self.counts[feed]), 'max_requests_per_second': LIMITS[feed],
+        return {feed: {**dict(self.counts[feed]), 'max_requests_per_second': LIMITS[feed], 'mode': 'bulk_bbo' if feed in BULK_URLS else 'single_depth',
                        'cooldown_seconds': round(max(0, self.cooldown[feed]-now), 1)} for feed in LIMITS}

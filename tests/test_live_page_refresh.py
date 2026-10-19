@@ -14,6 +14,52 @@ class StopWorker(BaseException):
 
 
 class LivePageRefreshTests(unittest.TestCase):
+    def test_failed_market_read_preserves_cache_and_original_observation_time(self):
+        url='https://api.binance.com/api/v3/ticker/bookTicker'
+        cache={url:dict(payload=[{'symbol':'X'}],fetched_at=90)}
+        with patch.object(module,'MARKET_PAYLOAD_CACHE',cache), patch.object(module.MARKET_HTTP,'get_json',side_effect=TimeoutError('deadline')), \
+             patch('app.time.monotonic',return_value=100),patch('app.time.time',return_value=1000):
+            results,errors=module.fetch_market_payloads({'binance_spot':url})
+        self.assertEqual(results['binance_spot'],[{'symbol':'X'}])
+        self.assertEqual(results.observed_at['binance_spot'],990)
+        self.assertEqual(cache[url]['fetched_at'],90)
+        self.assertIn('binance_spot',errors)
+
+    def test_successful_compressed_transport_refresh_clears_failure_and_dates_at_start(self):
+        url='https://api.binance.com/api/v3/ticker/bookTicker'
+        cache={}
+        with patch.object(module,'MARKET_PAYLOAD_CACHE',cache),patch.object(module.MARKET_HTTP,'get_json',return_value=[{'symbol':'X'}]), \
+             patch('app.time.monotonic',return_value=100),patch('app.time.time',return_value=1000):
+            results,errors=module.fetch_market_payloads({'binance_spot':url})
+        self.assertEqual(errors,{})
+        self.assertEqual(results.observed_at['binance_spot'],1000)
+        self.assertEqual(cache[url]['fetched_at'],100)
+
+    def test_metadata_ttl_retains_original_timestamp_without_new_http_request(self):
+        url='https://fapi.binance.com/fapi/v1/exchangeInfo'
+        with patch.object(module,'MARKET_PAYLOAD_CACHE',{url:dict(payload={'symbols':[]},fetched_at=90)}), \
+             patch.object(module.MARKET_HTTP,'get_json',side_effect=AssertionError('no HTTP')), \
+             patch('app.time.monotonic',return_value=100),patch('app.time.time',return_value=1000):
+            results,errors=module.fetch_market_payloads({'futures_info':url},{'futures_info':3600})
+        self.assertEqual(results.observed_at['futures_info'],990)
+        self.assertEqual(errors,{})
+
+    def test_public_diagnostics_remains_authenticated(self):
+        self.assertEqual(module.app.test_client().get('/api/refresh-diagnostics').status_code,401)
+
+    def test_older_inflight_batch_never_overwrites_newer_shared_cache(self):
+        url='https://api.binance.com/api/v3/ticker/bookTicker'
+        cache={}
+        def fetched(*_args):
+            cache[url]=dict(payload=['newer'],fetched_at=101)
+            return ['older']
+        with patch.object(module,'MARKET_PAYLOAD_CACHE',cache),patch.object(module.MARKET_HTTP,'get_json',side_effect=fetched), \
+             patch('app.time.monotonic',return_value=100),patch('app.time.time',return_value=1000):
+            results,_=module.fetch_market_payloads({'binance_spot':url})
+        self.assertEqual(cache[url]['payload'],['newer'])
+        self.assertEqual(results['binance_spot'],['older'])
+        self.assertEqual(results.observed_at['binance_spot'],1000)
+
     def test_live_endpoints_are_not_browser_cached_even_when_login_expires(self):
         client = module.app.test_client()
         for path in ("dashboard", "spot-futures", "dual-futures", "alerts", "hedge-positions"):

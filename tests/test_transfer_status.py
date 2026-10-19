@@ -102,6 +102,7 @@ class TransferStatusTests(unittest.TestCase):
     def test_public_binance_request_is_get_with_no_key_cookie_or_auth_header(self):
         payload = {"code": "000000", "success": True, "data": [{"coin": "DEMO", "networkList": []}]}
         with patch.object(module, "urlopen") as opened:
+            opened.return_value.__enter__.return_value.headers = {}
             opened.return_value.__enter__.return_value.read.return_value = json.dumps(payload).encode()
             module.get_json(module.TRANSFER_PUBLIC_SOURCES["Binance"], timeout=8)
         request = opened.call_args.args[0]

@@ -45,6 +45,8 @@ from alert_screening import DEFAULT_NOTIONAL, okx_contract_unit, pulse_has_watch
 from asset_catalog import NON_CRYPTO_BOOTSTRAP, bootstrap_category, compact_symbol, instrument_category
 from equity_spot import EXTRA_URLS as EQUITY_SPOT_URLS, METADATA_TTLS as EQUITY_SPOT_TTLS, build_snapshot as build_equity_spot_snapshot
 from funding_alerts import advance as advance_funding_alert, binance_observations, event_is_active as funding_event_is_active, fresh as funding_fresh, status as funding_alert_status
+from market_transport import PublicMarketHttp, decode_json
+from market_status import snapshot_delays
 
 load_dotenv()
 
@@ -1086,6 +1088,8 @@ EQUITY_METADATA_RETRY_AT = {}
 DUAL_FUTURES_CACHE = {"snapshot": None}
 LAST_MARKET_DB_PERSIST_AT = {"spot": 0.0, "dual": 0.0}
 MARKET_PAYLOAD_CACHE = {}
+MARKET_PAYLOAD_CACHE_LOCK = threading.Lock()
+MARKET_HTTP = PublicMarketHttp()
 SPOT_VIEW_CACHE = {"key": None, "symbols": None}
 DUAL_VIEW_CACHE = {"key": None, "symbols": None}
 FUNDING_HISTORY_CACHE = {}
@@ -1510,35 +1514,49 @@ def get_json(url, timeout=4):
     request = Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ArbiScope/1.0",
         "Accept": "application/json",
+        "Accept-Encoding": "gzip",
     })
     with urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+        return decode_json(response.read(16 * 1024 * 1024 + 1), response.headers.get("Content-Encoding", ""))[0]
+
+
+class MarketPayloads(dict):
+    def __init__(self):
+        super().__init__()
+        self.observed_at = {}
 
 
 def fetch_market_payloads(urls, cache_seconds=None, live_timeout=1.5):
     """低频资料走短期缓存；行情请求失败时复用最近有效值，绝不拖慢盘口快照。"""
     cache_seconds = cache_seconds or {}
     now = time.monotonic()
-    results, errors, pending = {}, {}, {}
+    results, errors, pending = MarketPayloads(), {}, {}
+    wall = time.time()
     for name, url in urls.items():
         cached = MARKET_PAYLOAD_CACHE.get(url)
         if cached and now - cached["fetched_at"] < cache_seconds.get(name, 0):
             results[name] = cached["payload"]
+            results.observed_at[name] = wall - (now - cached["fetched_at"])
         else:
             pending[name] = url
     if pending:
         with ThreadPoolExecutor(max_workers=len(pending)) as executor:
-            futures = {executor.submit(get_json, url, live_timeout): (name, url) for name, url in pending.items()}
+            futures = {executor.submit(MARKET_HTTP.get_json, url, live_timeout): (name, url) for name, url in pending.items()}
             for future in as_completed(futures):
                 name, url = futures[future]
                 try:
                     payload = future.result()
                     results[name] = payload
-                    MARKET_PAYLOAD_CACHE[url] = {"payload": payload, "fetched_at": now}
+                    with MARKET_PAYLOAD_CACHE_LOCK:
+                        previous = MARKET_PAYLOAD_CACHE.get(url)
+                        if not previous or previous["fetched_at"] <= now:
+                            MARKET_PAYLOAD_CACHE[url] = {"payload": payload, "fetched_at": now}
+                    results.observed_at[name] = wall
                 except Exception as exc:
                     cached = MARKET_PAYLOAD_CACHE.get(url)
                     if cached:
                         results[name] = cached["payload"]
+                        results.observed_at[name] = wall - (now - cached["fetched_at"])
                         errors[name] = f"using cached payload: {exc}"
                     else:
                         errors[name] = str(exc)
@@ -3791,7 +3809,7 @@ def spot_futures_snapshot():
             stream_symbol = raw_spot_symbol[:-4] + "_USDT" if exchange == "Gate" else raw_spot_symbol
             rows[-1]["alert_stream_route"] = dict(long_key=(feed, stream_symbol), short_key=("bn_future", symbol),
                                                   long_factor=price_factor, short_factor=1, mark_key=("bn_mark", symbol))
-            rows[-1]["short_funding_observed_at"] = market_payload_observed_at("https://fapi.binance.com/fapi/v1/premiumIndex")
+            rows[-1]["short_funding_observed_at"] = getattr(results, "observed_at", {}).get("funding")
         if rows:
             for row in rows:
                 row.update(mark_price=float(funding_item["markPrice"]), index_price=float(funding_item["indexPrice"]))
@@ -3803,6 +3821,7 @@ def spot_futures_snapshot():
     live_snapshot = {
         "symbols": rows_by_symbol,
         "errors": {key: value for key, value in errors.items() if key not in EQUITY_SPOT_URLS},
+        "upstream_delays": snapshot_delays(rows_by_symbol, {key: value for key, value in errors.items() if key not in EQUITY_SPOT_URLS}, getattr(results, "observed_at", {}), "spot_futures"),
         "updated_at": captured_at.strftime("%H:%M:%S"),
         "captured_at_epoch": captured_at.timestamp(),
         "next_refresh_in_seconds": MARKET_REFRESH_SECONDS,
@@ -3917,9 +3936,9 @@ def dual_futures_snapshot():
         contract.update({key: cached_funding.get(key) for key in ("funding_rate", "funding_interval_hours", "next_funding_time")})
         contract["funding_observed_at"] = cached_funding.get("updated_at")
     for contract in binance.values():
-        contract["funding_observed_at"] = market_payload_observed_at(urls["binance_funding"])
+        contract["funding_observed_at"] = getattr(results, "observed_at", {}).get("binance_funding")
     for contract in bybit.values():
-        contract["funding_observed_at"] = market_payload_observed_at(urls["bybit_tickers"])
+        contract["funding_observed_at"] = getattr(results, "observed_at", {}).get("bybit_tickers")
 
     alias_rows = symbol_alias_rows()
     contracts = {
@@ -3977,6 +3996,7 @@ def dual_futures_snapshot():
     live_snapshot = {
         "symbols": groups,
         "errors": errors,
+        "upstream_delays": snapshot_delays(groups, errors, getattr(results, "observed_at", {}), "futures_futures"),
         "updated_at": captured_at.strftime("%H:%M:%S"),
         "captured_at_epoch": captured_at.timestamp(),
         "next_refresh_in_seconds": MARKET_REFRESH_SECONDS,
@@ -7717,7 +7737,10 @@ def data_integrity():
 
 @app.get("/api/refresh-diagnostics")
 def refresh_diagnostics():
-    return jsonify({"target_seconds": MARKET_REFRESH_SECONDS, **MARKET_REFRESH_METRICS})
+    return jsonify({"target_seconds": MARKET_REFRESH_SECONDS, **MARKET_REFRESH_METRICS,
+                    "public_http": MARKET_HTTP.status(),
+                    "spot_delays": (SPOT_FUTURES_CACHE.get("snapshot") or {}).get("upstream_delays", {}),
+                    "dual_delays": (DUAL_FUTURES_CACHE.get("snapshot") or {}).get("upstream_delays", {})})
 
 
 def percent_delta(current, previous):

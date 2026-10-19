@@ -171,6 +171,37 @@ test('background alert refresh never overwrites another page indicator',()=>{
   h.context.renderPageRefreshIndicator('alerts');assert.equal(status.textContent,'spot status');
 });
 
+test('upstream warning identifies venue and hover explains field and exact path',()=>{
+  const h=harness();h.context.active='spot-futures';
+  h.context.document.querySelector=()=>({classList:{add(){},toggle(){}},style:{setProperty(){}},setAttribute(){}});
+  h.run(source.slice(source.indexOf('function renderPageRefreshIndicator('),source.indexOf('function beginPageRefresh(')));
+  h.context.setPageRefreshSource('spot-futures',100,'行情',true,[{exchange:'Gate',label:'Gate现货盘口',reason:'请求超时',observed_at_epoch:90,affected_paths:1,examples:[{symbol:'GUA/USDT',long_exchange:'Gate',short_exchange:'Binance 合约'}]}]);
+  h.context.renderPageRefreshIndicator();
+  assert.match(h.context.byId('updated').textContent,/Gate延迟/);
+  assert.match(h.context.byId('updated').title,/Gate现货盘口：请求超时/);
+  assert.match(h.context.byId('updated').title,/GUA\/USDT Gate → Binance 合约/);
+  assert.equal(h.run('pageRefreshState("spot-futures").sourceUpdatedAt'),100000);
+});
+
+test('recovered source clears the previous exchange warning and hover detail',()=>{
+  const h=harness();h.context.active='dual-futures';
+  h.context.document.querySelector=()=>({classList:{add(){},toggle(){}},style:{setProperty(){}},setAttribute(){}});
+  h.run(source.slice(source.indexOf('function renderPageRefreshIndicator('),source.indexOf('function beginPageRefresh(')));
+  h.context.setPageRefreshSource('dual-futures',100,'行情',true,[{exchange:'OKX',label:'OKX合约持仓量',reason:'请求超时',affected_paths:2}]);
+  h.context.renderPageRefreshIndicator();assert.match(h.context.byId('updated').title,/持仓量/);
+  h.context.setPageRefreshSource('dual-futures',100,'行情',false,[]);h.context.renderPageRefreshIndicator();
+  assert.equal(h.context.byId('updated').title,'');assert.doesNotMatch(h.context.byId('updated').textContent,/延迟/);
+});
+
+test('missing watched path still warns even when no exchange error was returned',()=>{
+  const h=harness();h.context.active='spot-futures';
+  h.context.document.querySelector=()=>({classList:{add(){},toggle(){}},style:{setProperty(){}},setAttribute(){}});
+  h.run(source.slice(source.indexOf('function renderPageRefreshIndicator('),source.indexOf('function beginPageRefresh(')));
+  h.context.setPageRefreshSource('spot-futures',100,'行情',true);h.context.renderPageRefreshIndicator();
+  assert.match(h.context.byId('updated').textContent,/部分上游延迟/);
+  assert.match(h.context.byId('updated').title,/路径暂未取得新行情/);
+});
+
 for(const [name,start,end,lock,hasData,rowId] of [
   ['loadSpotFutures','async function loadSpotFutures(','function hedgeMetric(','spotFuturesLoading','spotFuturesHasData','spotFuturesRows'],
   ['loadDualFutures','async function loadDualFutures(','function addDualLiquidityHeader(','dualFuturesLoading','dualFuturesHasData','dualFuturesRows'],

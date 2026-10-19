@@ -33,6 +33,7 @@
     });
     if(index===0){Object.assign(timeline[91],{open_spread:10.1234,basis:2.277});Object.assign(timeline[92],{open_spread:-50.5678,basis:-7.8047})}
     if(index===0)timeline.slice(0,8).forEach((item,i)=>{item.type='rapid_spread';item.pulse={id:`synthetic-pulse-${i}`,metric:'spread',ordinal:i<2?2:1,state:i%2?'retraced':'watch',baseline:.03,baseline_at:now()-25,peak:i%2?1.02:.4,peak_at:now()-15,current:i%2?.11:.4,current_at:now(),retrace_at:i%2?now()-10:undefined,notice_version:1}});
+    if(index===0){const start=now()-25;Object.assign(timeline[0],{open_spread:-1.2,pulse:{id:'synthetic-pulse-fall',metric:'spread',ordinal:1,direction:-1,state:'settled',baseline:.04,baseline_at:start,peak:-1.2,peak_at:start+12.8,current:-1.2,current_at:start+13,ended_at:start+13}})}
     const value_ranges=Object.fromEntries(['open_spread','basis'].map(field=>{const values=timeline.map(item=>item[field]);return [field,{max:Math.max(...values),min:Math.min(...values)}]}));
     const move_peaks=Object.fromEntries(Object.entries(value_ranges).map(([field,{max,min}])=>[field,Math.abs(max)>=Math.abs(min)?max:min]));
     const transfer_statuses=[wallet('Gate',{chains:[{name:'BSC',deposit_open:index===1,withdraw_open:true},{name:'ETH',deposit_open:true,withdraw_open:false}]}),wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC',chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}],reason:'快照已过期'}),wallet('Binance',{state:'unknown',chains:[],captured_at:null,reason:'尚未接入账户只读充提接口'})];

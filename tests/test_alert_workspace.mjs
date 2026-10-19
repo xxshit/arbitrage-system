@@ -20,7 +20,7 @@ const detail=(symbol='DEMO/USDT',page=1,path_id=pathKey())=>({symbol,strategy:JS
 
 function harness(fetcher=async url=>{const params=new URL(url,'https://example.test').searchParams;return detail(params.get('symbol'),Number(params.get('page')),params.get('path'))}){
   const nodes=new Map(),scroll={scrollTop:0},transferScroll={scrollTop:0};
-  const node=id=>{if(!nodes.has(id))nodes.set(id,{id,textContent:'',innerHTML:'',scrollTop:0,dataset:{},querySelector:selector=>selector==='#alertPathSelect'?null:selector==='.alert-transfer-panel'?transferScroll:scroll,scrollIntoView(){}});return nodes.get(id)};
+  const node=id=>{if(!nodes.has(id))nodes.set(id,{id,textContent:'',innerHTML:'',scrollTop:0,dataset:{},querySelectorAll:()=>[],querySelector:selector=>selector==='#alertPathSelect'?null:selector==='.alert-transfer-panel'?transferScroll:scroll,scrollIntoView(){}});return nodes.get(id)};
   const context={URLSearchParams,console,clearTimeout(){},window:{innerWidth:1280},byId:node,escapeChatHtml:escape,delistingSymbolClass:()=>'',changeClass:value=>value<0?'negative':'positive',percent:value=>(value>=0?'+':'')+Number(value).toFixed(4)+'%',intervalClass:()=>'',exchangeName:escape,fetchRefreshJson:fetcher,renderTipsItems(){},
     replaceHtmlKeepingExchangeLogos:(target,markup)=>{if(target.innerHTML!==markup)target.innerHTML=markup}};
   vm.createContext(context);
@@ -38,7 +38,7 @@ test('pulse trace retains peak after retracement and identifies a restart below 
 
 test('gap and ended pulse never present their last quote as a live current value',()=>{
   const h=harness(),pulse={metric:'basis',state:'data_gap',baseline:0,baseline_at:0,peak:1,peak_at:1,current:.2,current_at:2};
-  assert.ok(h.context.alertPulseTrace({pulse}).includes('末次 +0.20%'));
+  assert.ok(h.context.alertPulseTrace({pulse}).includes('<dt>末次</dt><dd>+0.20%'));
   assert.ok(h.context.alertPulseLabel({pulse}).includes('数据中断'));
 });
 
@@ -52,13 +52,82 @@ test('restart and negative pulses use unambiguous labels',()=>{
   assert.ok(h.context.alertPulseLabel({pulse:{metric:'spread',state:'watch',ordinal:2}}).includes('再次启动'));
   const pulse={metric:'spread',state:'retraced',direction:-1,baseline:0,baseline_at:0,peak:-1,peak_at:1,current:-.1,retrace_at:2};
   assert.ok(h.context.alertPulseLabel({pulse}).includes('已反弹'));
-  assert.ok(h.context.alertPulseTrace({pulse}).includes('低点 -1.00%'));
+  assert.ok(h.context.alertPulseTrace({pulse}).includes('<dt>低点</dt><dd>-1.00%'));
   assert.ok(h.context.alertPulseTrace({pulse}).includes('1.0秒反弹'));
 });
 
 test('price trace converts log prices into relative moves instead of showing a log-price as percent',()=>{
   const h=harness(),pulse={metric:'price',baseline:100*Math.log(100),baseline_at:0,peak:100*Math.log(102),peak_at:1,current:100*Math.log(101)};
   const markup=h.context.alertPulseTrace({pulse});assert.ok(markup.includes('+2.00%'));assert.ok(markup.includes('+1.00%'));
+});
+
+test('screenshot case emphasizes a 1.24 percentage-point fall and hides the three-value trace by default',()=>{
+  const h=harness(),pulse={metric:'spread',direction:-1,state:'settled',baseline:.04,baseline_at:100,peak:-1.2,peak_at:112.8,current:-1.2,ended_at:114},original=JSON.stringify(pulse);
+  const markup=h.context.alertPulseTrace({id:42,pulse}),summary=markup.match(/<summary[^>]*>(.*?)<\/summary>/s)[1].replace(/<[^>]+>/g,'');
+  for(const text of ['↓','开差下降','1.24','个百分点','12.8秒内','详情'])assert.ok(summary.includes(text),text);
+  for(const text of ['起点','低点','末次','+0.04%','-1.20%','→'])assert.ok(!summary.includes(text),text);
+  assert.ok(markup.includes('pulse-fall'));assert.ok(!markup.match(/<details[^>]*\sopen/));
+  for(const text of ['<dt>起点</dt><dd>+0.04%','<dt>低点</dt><dd>-1.20%','<dt>末次</dt><dd>-1.20%','非实时报价'])assert.ok(markup.includes(text),text);
+  assert.equal(JSON.stringify(pulse),original);
+});
+
+test('direction describes the change, not the sign of the final spread or a claim about coin prices',()=>{
+  const h=harness(),markup=h.context.alertPulseTrace({pulse:{metric:'spread',baseline:-1.2,peak:-.4,current:-.5,baseline_at:1,peak_at:3}});
+  assert.ok(markup.includes('pulse-rise'));assert.ok(markup.includes('开差上升'));assert.ok(markup.includes('0.80'));
+  assert.ok(markup.includes('开差变化，不代表币价涨跌'));assert.ok(!markup.includes('开差上涨'));
+});
+
+test('basis and relative price summaries keep distinct names and units',()=>{
+  const h=harness(),basis=h.context.alertPulseTrace({pulse:{metric:'basis',baseline:.2,peak:.7,current:.5}});
+  assert.ok(basis.includes('币安基差上升'));assert.ok(basis.includes('0.50'));assert.ok(basis.includes('个百分点'));
+  for(const ratio of [1.02,.98]){
+    const price=h.context.alertPulseTrace({pulse:{metric:'price',baseline:100*Math.log(100),peak:100*Math.log(100*ratio),current:100*Math.log(100)}});
+    assert.ok(price.includes(ratio>1?'双端价格上涨':'双端价格下跌'));assert.ok(price.includes('2.00<span class="alert-pulse-unit">%'));assert.ok(!price.includes('个百分点'));
+  }
+});
+
+test('missing or reversed timestamps and current values are not rendered as fabricated zeroes',()=>{
+  const h=harness();
+  for(const [baseline_at,peak_at] of [[undefined,12],[2,1],[NaN,1],[0,Infinity]]){
+    const markup=h.context.alertPulseTrace({pulse:{metric:'spread',baseline:0,peak:1,current:null,baseline_at,peak_at,retrace_at:0}});
+    assert.ok(markup.includes('耗时未知'));assert.ok(markup.includes('<dt>当前</dt><dd>—'));assert.ok(!markup.includes('NaN'));assert.ok(!markup.includes('Infinity'));assert.ok(!markup.includes('0.0秒'));
+  }
+});
+
+test('invalid metrics and non-finite changes are omitted, identifiers cannot inject attributes',()=>{
+  const h=harness();
+  for(const pulse of [undefined,...['<img>','constructor','__proto__'].map(metric=>({metric,baseline:0,peak:1})),{metric:'spread',baseline:null,peak:1},{metric:'spread',baseline:0,peak:Infinity},{metric:'price',baseline:-1e8,peak:1e8}])assert.equal(h.context.alertPulseTrace({pulse}),'');
+  const markup=h.context.alertPulseTrace({id:'" onclick="bad()',pulse:{metric:'spread',id:'<img>',baseline:0,peak:1,current:1}},true);
+  assert.ok(markup.includes(' open>'));assert.ok(!markup.includes(' onclick="bad()'));assert.ok(!markup.includes('<img>'));
+});
+
+test('pulse details preserve expansion and keyboard focus only for the matching record',()=>{
+  const h=harness(),focus={},key='same-record';let focused=0;
+  const row={open:true,dataset:{alertPulse:key},contains:node=>node===focus,querySelector:()=>({focus:options=>{assert.ok(options.preventScroll);focused++}})},root={ownerDocument:{activeElement:focus},querySelectorAll:()=>[row]};
+  const state=h.context.alertPulseViewState(root);assert.ok(state.expanded.has(key));assert.equal(state.focused,key);
+  h.context.restoreAlertPulseFocus(root,key);assert.equal(focused,1);h.context.restoreAlertPulseFocus(root,'another-record');assert.equal(focused,1);
+  const cleared=h.context.alertPulseViewState(root,false);assert.equal(cleared.expanded.size,0);assert.equal(cleared.focused,undefined);
+});
+
+test('detail refresh keeps expanded values, while changing coin does not reuse the expansion',async()=>{
+  const payload=detail();payload.items[0].pulse={id:'sample',metric:'spread',baseline:.04,peak:-1.2,current:-1.2,baseline_at:0,peak_at:12.8};
+  const h=harness(async()=>payload);h.context.renderAlertMasterDetail([group(),group('OTHER/USDT')]);await h.context.loadSelectedAlertHistory();
+  const key=h.context.alertPulseKey(payload.items[0]);h.node('alertDetailPane').querySelectorAll=()=>[{open:true,dataset:{alertPulse:key},contains:()=>false}];
+  h.context.renderAlertDetailPane();assert.ok(h.node('alertDetailPane').innerHTML.match(/<details[^>]*\sopen/));
+  h.run("selectedAlertSymbol='OTHER/USDT'");h.context.renderAlertMasterDetail([group(),group('OTHER/USDT')]);assert.ok(!h.node('alertDetailPane').innerHTML.match(/<details[^>]*\sopen/));
+});
+
+test('tips use the same simplified summary and retain open details across updates',()=>{
+  const h=harness(),item={id:42,symbol:'DEMO/USDT',strategy:'spot_futures',type:'rapid_spread',attention:{tier:'candidate'},pulse:{metric:'spread',baseline:0,peak:1,current:1}},key=h.context.alertPulseKey(item);
+  h.node('tipsItems').querySelectorAll=()=>[{open:true,dataset:{alertPulse:key},contains:()=>false}];
+  vm.runInContext(source.slice(source.indexOf('function renderTipsItems('),source.indexOf('async function loadAlerts(')),h.context);
+  h.context.renderTipsItems([item]);assert.ok(h.node('tipsItems').innerHTML.includes('开差上升'));assert.ok(h.node('tipsItems').innerHTML.match(/<details[^>]*\sopen/));
+});
+
+test('pulse summaries have readable emphasis, explicit direction and native keyboard disclosure',()=>{
+  assert.ok(css.includes('summary:focus-visible'));assert.ok(css.includes('.alert-pulse-move > b {white-space:nowrap;font-size:14px'));
+  for(const text of ['.pulse-fall','.pulse-rise','flex-wrap:wrap','grid-template-columns:repeat(3,minmax(0,1fr))'])assert.ok(css.includes(text));
+  assert.ok(html.includes('20261019-alert-pulse-clear-v1'));
 });
 
 test('pulse labels do not interpolate untrusted backend strings',()=>{

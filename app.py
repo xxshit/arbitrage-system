@@ -45,6 +45,7 @@ from alert_screening import DEFAULT_NOTIONAL, okx_contract_unit, pulse_has_watch
 from asset_catalog import NON_CRYPTO_BOOTSTRAP, bootstrap_category, compact_symbol, instrument_category
 from equity_spot import EXTRA_URLS as EQUITY_SPOT_URLS, METADATA_TTLS as EQUITY_SPOT_TTLS, build_snapshot as build_equity_spot_snapshot
 from funding_alerts import advance as advance_funding_alert, binance_observations, event_is_active as funding_event_is_active, fresh as funding_fresh, status as funding_alert_status
+from funding_history import DAY_MS, FundingHistoryClient, FundingHistoryError, FundingSyncSchedule, expected_settlement
 from market_transport import PublicMarketHttp, decode_json
 from market_status import snapshot_delays
 
@@ -1219,13 +1220,13 @@ RUNTIME_RULE_DEFAULTS = [
     {"rule_key": "early_trend_scan", "category": "趋势筛选", "label": "全市场五根 30MIN 扫描", "schedule_type": "interval", "value": "1800", "unit": "秒", "min_value": 900, "max_value": 7200, "description": "每根 30MIN K线收盘后扫描全市场；只使用已收盘K线，识别启动前蓄势和五根强启动。"},
     {"rule_key": "daily_trend_push", "category": "每日任务", "label": "日报趋势汇总与推送", "schedule_type": "daily_time", "value": "08:00", "unit": "北京时间", "description": "汇总最新趋势结果并推送确定性最强的三个币；不承担首次发现信号。"},
     {"rule_key": "announcement_scan", "category": "每日任务", "label": "上下架公告抓取", "schedule_type": "daily_time", "value": "08:00", "unit": "北京时间", "description": "读取五家交易所公告，解析公告时间和具体执行时间并保存 MySQL。"},
-    {"rule_key": "funding_history_sync", "category": "历史数据", "label": "历史资费补充", "schedule_type": "interval", "value": "60", "unit": "秒", "min_value": 30, "max_value": 3600, "description": "分批补充 Binance 资金费历史，历史固定数据直接从 MySQL 读取。"},
+    {"rule_key": "funding_history_sync", "category": "历史数据", "label": "结算资费同步", "schedule_type": "policy", "value": "20秒批量 / 10秒调度", "unit": "结算优先", "editable": False, "description": "Binance每20秒检查最新已结算批量记录，三所独立队列每10秒调度到期标的；失败退避重试，未到期15分钟复查，每天复查31天完整历史。入库立即失效累计缓存；交易所未公布的不以预估代替。"},
     {"rule_key": "price_history_backfill", "category": "历史数据", "label": "价格历史自检补充", "schedule_type": "interval", "value": "120", "unit": "秒", "min_value": 60, "max_value": 3600, "description": "检查价格历史是否缺口并补充，用于涨跌幅与趋势图。"},
     {"rule_key": "index_component_sync", "category": "静态资料", "label": "指数成分同步", "schedule_type": "interval", "value": "300", "unit": "秒", "min_value": 300, "max_value": 86400, "description": "补充缺失的合约指数成分；已有且未变化的数据从 MySQL 读取。"},
     {"rule_key": "transfer_network_sync", "category": "静态资料", "label": "充提网络同步", "schedule_type": "interval", "value": "900", "unit": "秒", "min_value": 300, "max_value": 86400, "description": "更新现货交易所充提链路状态，关闭充提时醒目标记。"},
     {"rule_key": "alarm_threshold", "category": "报警规则", "label": "基差追踪记录", "schedule_type": "policy", "value": "1% / 扩大0.2%", "unit": "规则", "editable": False, "description": "仅用于基差追踪及扩张日志，不再以绝对水平额外生成报警；报警使用独立实时异动规则。"},
     {"rule_key": "rapid_move_threshold", "category": "报警规则", "label": "实时异动报警", "schedule_type": "policy", "value": "15秒0.20 / 30秒0.30 / 120秒0.50", "unit": "百分点", "editable": False, "description": "有效对齐报价首次越线即记录；保留瞬时极值与回落，回落后再变动0.20个百分点独立记录，不要求超过旧峰值。小偏离冻结起点、300秒内累计0.50个百分点也记录。双端价格另用1%/1.5%/3%对数变化阈值。只在网页提醒，不新增Lark。"},
-    {"rule_key": "funding_retention", "category": "数据保留", "label": "资费历史保留", "schedule_type": "retention", "value": "30", "unit": "天", "editable": False, "description": "最近一个月资金费率留库，超过一个月自动清理。"},
+    {"rule_key": "funding_retention", "category": "数据保留", "label": "资费历史保留", "schedule_type": "retention", "value": "31", "unit": "天", "editable": False, "description": "保留31天真实结算，给最近720小时滚动累计留一天缓冲；超过31天清理。"},
     {"rule_key": "price_retention", "category": "数据保留", "label": "价格快照保留", "schedule_type": "retention", "value": "8", "unit": "天", "editable": False, "description": "涨跌幅计算所需的 Binance 价格快照滚动保留 8 天。"},
     {"rule_key": "chat_retention", "category": "数据保留", "label": "协作记录保留", "schedule_type": "retention", "value": str(CHAT_RETENTION_DAYS), "unit": "天", "editable": False, "description": f"文字消息、图片消息和私有图片文件仅保留最近 {CHAT_RETENTION_DAYS} 天，过期后自动物理清理。"},
 ]
@@ -2298,6 +2299,16 @@ def funding_history_sync_start(earliest, latest, now):
     return full_start
 
 
+def invalidate_funding_statistics(binance=True):
+    # Serialize with in-flight aggregation: it must not publish an old result
+    # *after* this invalidation. Never hold both aggregate locks simultaneously.
+    if binance:
+        with FUNDING_STATISTICS_LOCK:
+            FUNDING_STATISTICS_CACHE.update({"ts": 0.0, "symbols": frozenset(), "data": {}})
+    with DUAL_FUNDING_STATISTICS_LOCK:
+        DUAL_FUNDING_STATISTICS_CACHE.update({"ts": 0.0, "key": frozenset(), "data": {}})
+
+
 def sync_funding_history(symbols):
     if not symbols:
         return {}
@@ -2350,8 +2361,7 @@ def sync_funding_history(symbols):
                     pass
     FundingRateRecord.query.filter(FundingRateRecord.funding_time < start_time).delete(synchronize_session=False)
     db.session.commit()
-    FUNDING_STATISTICS_CACHE.update({"ts": 0.0, "symbols": frozenset(), "data": {}})
-    DUAL_FUNDING_STATISTICS_CACHE.update({"ts": 0.0, "key": frozenset(), "data": {}})
+    invalidate_funding_statistics()
     # Share the page's bounded SQL aggregation, including empty-window semantics.
     return funding_statistics(symbols)
 
@@ -2582,7 +2592,7 @@ def sync_dual_funding_history(targets):
             inserted += 1
     ExchangeFundingRateRecord.query.filter(ExchangeFundingRateRecord.funding_time < full_start).delete(synchronize_session=False)
     db.session.commit()
-    DUAL_FUNDING_STATISTICS_CACHE.update({"ts": 0.0, "key": frozenset(), "data": {}})
+    invalidate_funding_statistics(binance=False)
     return inserted
 
 
@@ -7460,10 +7470,11 @@ def spot_futures():
     global SPOT_VIEW_CACHE
     snapshot_key = snapshot["updated_at"]
     if SPOT_VIEW_CACHE["key"] != snapshot_key:
-        enrich_funding_statistics(snapshot["symbols"])
         enrich_price_changes(snapshot["symbols"])
         enrich_basis_openings(snapshot["symbols"], "spot_futures")
         SPOT_VIEW_CACHE = {"key": snapshot_key, "symbols": snapshot["symbols"]}
+    # Settlement facts can change even if the upstream quote snapshot does not.
+    enrich_funding_statistics(SPOT_VIEW_CACHE["symbols"])
     mark_announced_delistings(SPOT_VIEW_CACHE["symbols"])
     symbols = [group for group in SPOT_VIEW_CACHE["symbols"] if not is_rwa_stock_pair(group["symbol"])]
     if funding_interval != "ALL":
@@ -15007,46 +15018,190 @@ def background_funding_alerts():
         time.sleep(5)
 
 
-def background_funding_history_sync():
-    global FUNDING_SYNC_CURSOR
-    time.sleep(5)
-    while True:
-        try:
-            with app.app_context():
-                snapshot = load_latest_market_snapshot()
-                if snapshot:
-                    symbols = [group["symbol"].replace("/", "") for group in snapshot["symbols"]]
-                    priority = funding_alert_priority_symbols()
-                    capacity = 60 - len(priority)
-                    batch = symbols[FUNDING_SYNC_CURSOR:FUNDING_SYNC_CURSOR + capacity]
-                    if not batch:
-                        FUNDING_SYNC_CURSOR = 0
-                        batch = symbols[:capacity]
-                    FUNDING_SYNC_CURSOR = (FUNDING_SYNC_CURSOR + len(batch)) % len(symbols)
-                    batch = list(dict.fromkeys(priority + batch))[:60]
-                    sync_funding_history(batch)
-        except Exception:
-            db.session.rollback()
-        time.sleep(runtime_interval("funding_history_sync", FUNDING_HISTORY_SYNC_SECONDS))
+FUNDING_HISTORY_CLIENT = FundingHistoryClient(lambda url, timeout: get_json(url, timeout=timeout))
 
 
-def background_dual_funding_history_sync():
-    time.sleep(20)
-    while True:
-        try:
-            with app.app_context():
-                targets = dual_funding_history_targets(load_latest_dual_futures_snapshot())
-                if targets:
-                    batch = dual_funding_history_batch(targets)
-                    try:
-                        sync_dual_funding_history(batch)
-                    finally:
-                        # A failed target must not keep later venues from running.
-                        save_dual_funding_history_cursor(batch[-1])
-        except Exception:
-            with app.app_context():
+def funding_sync_catalog(exchange):
+    """Union of both strategies, mapped to verified actual contract symbols."""
+    spot = (load_latest_market_snapshot() or {}).get("symbols", [])
+    dual = (load_latest_dual_futures_snapshot() or {}).get("symbols", [])
+    aliases = symbol_alias_rows()
+    known = {group["symbol"].replace("/", "") for group in spot} if exchange == "Binance" else set()
+    urls = {"Binance": "https://fapi.binance.com/fapi/v1/premiumIndex",
+            "Bybit": "https://api.bybit.com/v5/market/tickers?category=linear",
+            "OKX": "https://www.okx.com/api/v5/public/instruments?instType=SWAP"}
+    payload = MARKET_PAYLOAD_CACHE.get(urls[exchange], {}).get("payload")
+    if exchange == "Binance" and isinstance(payload, list):
+        known.update(item.get("symbol") for item in payload)
+    elif exchange == "Bybit" and isinstance(payload, dict):
+        known.update(item.get("symbol") for item in payload.get("result", {}).get("list", []))
+    elif exchange == "OKX" and isinstance(payload, dict):
+        known.update(item.get("instId", "").replace("-USDT-SWAP", "USDT") for item in payload.get("data", []))
+    targets = {}
+
+    def add(symbol, interval, next_at, raw_hint=None):
+        candidates = [raw for raw, _ in market_alias_candidates(symbol, exchange, "contract", aliases)]
+        matched = [raw for raw in candidates if raw in known]
+        if raw_hint and raw_hint in candidates:
+            matched = [raw_hint]
+        candidates = matched or candidates
+        key = candidates[0] if exchange == "Binance" else symbol
+        target = {"candidates": candidates, "interval": interval}
+        # Only a scheduling hint. Actual timestamps/rates always come from history.
+        parsed = parse_funding_time(next_at)
+        if parsed:
+            target["next_at"] = parsed.timestamp()
+        targets[key] = target
+
+    if exchange == "Binance":
+        for group in spot:
+            if group.get("rows"):
+                row = group["rows"][0]
+                # The spot snapshot uses the real Binance contract name already.
+                add(group["symbol"], row.get("funding_interval_hours"), None, group["symbol"].replace("/", ""))
+    for group in dual:
+        for row in group.get("rows", []):
+            for side in ("long", "short"):
+                if row.get(side + "_exchange") == exchange:
+                    route = row.get("alert_stream_route", {}).get(side + "_key")
+                    raw = route[1].replace("-USDT-SWAP", "USDT") if route else None
+                    add(group["symbol"], row.get(side + "_funding_interval_hours"), row.get(side + "_next_funding_time"), raw)
+    return targets
+
+
+def funding_sync_latest(exchange, targets):
+    model = FundingRateRecord if exchange == "Binance" else ExchangeFundingRateRecord
+    query = db.session.query(model.symbol, func.max(model.funding_time)).filter(model.funding_time <= int(time.time()*1000))
+    if exchange != "Binance":
+        query = query.filter(model.exchange == exchange)
+    raw = dict(query.group_by(model.symbol).all())
+    return {key: max((raw.get(candidate, 0) for candidate in target["candidates"]), default=0)
+            if exchange == "Binance" else raw.get(key, 0) for key, target in targets.items()}
+
+
+def store_settled_funding(exchange, rows):
+    """Idempotent commits allow the fast Binance tail and deep repairs to overlap."""
+    if not rows:
+        return 0
+    model = FundingRateRecord if exchange == "Binance" else ExchangeFundingRateRecord
+    table = model.__table__
+    end = int(time.time()*1000)
+    values = {(symbol, int(stamp)): float(rate) for symbol, stamp, rate in rows
+              if end - 31*DAY_MS <= stamp <= end and math.isfinite(rate)}
+    if not values:
+        return 0
+    records = [{"symbol": symbol, "funding_time": stamp, "funding_rate": rate,
+                **({"exchange": exchange} if exchange != "Binance" else {})}
+               for (symbol, stamp), rate in values.items()]
+    existing_query = db.session.query(model.symbol, model.funding_time).filter(
+        model.symbol.in_({record["symbol"] for record in records}),
+        model.funding_time >= min(record["funding_time"] for record in records),
+        model.funding_time <= max(record["funding_time"] for record in records))
+    if exchange != "Binance":
+        existing_query = existing_query.filter(model.exchange == exchange)
+    existing = set(existing_query.all())
+    records = [row for row in records if (row["symbol"], row["funding_time"]) not in existing]
+    # End an old repeatable-read view before doing the commit/invalidation.
+    db.session.rollback()
+    if not records:
+        return 0
+    if db.engine.dialect.name == "mysql":
+        from sqlalchemy.dialects.mysql import insert
+        statement = insert(table).on_duplicate_key_update(id=table.c.id)
+    else:
+        from sqlalchemy.dialects.sqlite import insert
+        statement = insert(table).on_conflict_do_nothing()
+    db.session.execute(statement, records)
+    db.session.commit()
+    invalidate_funding_statistics(binance=exchange == "Binance")
+    return len(records)
+
+
+def run_funding_sync_batch(exchange, schedule):
+    now = time.time()
+    targets = funding_sync_catalog(exchange)
+    latest = funding_sync_latest(exchange, targets)
+    plans = schedule.plan(targets, latest, now, {"Binance": 8, "Bybit": 64, "OKX": 48}[exchange])
+    # No ORM/session or metadata lookups in the HTTP threads, and no long-lived
+    # MySQL read transaction while waiting for upstream publication.
+    db.session.rollback()
+    inserted = errors = 0
+
+    def fetch(key, full):
+        end = int(time.time()*1000)
+        start = end - (31 if full else 2)*DAY_MS
+        return FUNDING_HISTORY_CLIENT.fetch(exchange, targets[key]["candidates"], start, end)
+
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="settled-" + exchange.lower()) as executor:
+        pending = {executor.submit(fetch, key, full): (key, full) for key, full in plans}
+        for future in as_completed(pending):
+            key, full = pending[future]
+            try:
+                raw, rows = future.result()
+                inserted += store_settled_funding(exchange, [(raw if exchange == "Binance" else key, stamp, rate) for stamp, rate in rows])
+                actual_latest = max([latest.get(key, 0)] + [stamp for stamp, _ in rows])
+                latest[key] = actual_latest
+                schedule.done(key, targets[key], time.time(), actual_latest, full=full)
+            except Exception as exc:
                 db.session.rollback()
-        time.sleep(runtime_interval("funding_history_sync", FUNDING_HISTORY_SYNC_SECONDS))
+                errors += 1
+                schedule.done(key, targets[key], time.time(), latest.get(key, 0), error=type(exc).__name__)
+                code = str(exc) if isinstance(exc, FundingHistoryError) else type(exc).__name__
+                app.logger.warning("funding_history_target_failed exchange=%s symbol=%s error=%s", exchange, key, code)
+    # Bounded cleanup once per hour, not a table-wide DELETE per HTTP response.
+    if now - getattr(schedule, "last_cleanup", 0) >= 3600:
+        model = FundingRateRecord if exchange == "Binance" else ExchangeFundingRateRecord
+        query = model.query.filter(model.funding_time < int((now-31*86400)*1000))
+        if exchange != "Binance":
+            query = query.filter(model.exchange == exchange)
+        query.delete(synchronize_session=False)
+        db.session.commit()
+        schedule.last_cleanup = now
+    status = {"at": time.time(), "exchange": exchange, "targets": len(targets), "attempted": len(plans),
+              "inserted": inserted, "errors": errors, "elapsed_seconds": round(time.time()-now, 3),
+              "pending": sum((expected_settlement(target, now) or 0) > latest.get(key, 0) for key, target in targets.items())}
+    try:
+        schedule.save(status)
+    except OSError:
+        app.logger.warning("funding_history_checkpoint_failed exchange=%s", exchange)
+    return status
+
+
+def background_funding_history_sync(exchange="Binance"):
+    time.sleep(5)
+    schedule = FundingSyncSchedule(Path(app.instance_path) / ("funding-sync-" + exchange.lower() + ".json"))
+    while True:
+        started = time.monotonic()
+        with app.app_context():
+            try:
+                run_funding_sync_batch(exchange, schedule)
+            except Exception:
+                db.session.rollback()
+                app.logger.exception("funding_history_batch_failed exchange=%s", exchange)
+            finally:
+                db.session.remove()
+        time.sleep(max(.25, 10 - (time.monotonic()-started)))
+
+
+def background_binance_settlement_tail():
+    time.sleep(3)
+    while True:
+        started = time.monotonic()
+        with app.app_context():
+            try:
+                targets = funding_sync_catalog("Binance")
+                allowed = {raw for target in targets.values() for raw in target["candidates"]}
+                db.session.rollback()
+                rows = FUNDING_HISTORY_CLIENT.binance_recent(int(time.time()*1000))
+                inserted = store_settled_funding("Binance", [row for row in rows if row[0] in allowed])
+                if inserted:
+                    app.logger.info("funding_binance_tail inserted=%s", inserted)
+            except Exception:
+                db.session.rollback()
+                app.logger.warning("funding_binance_tail_failed")
+            finally:
+                db.session.remove()
+        time.sleep(max(.25, 20 - (time.monotonic()-started)))
 
 
 def background_price_history_backfill():
@@ -15425,9 +15580,11 @@ def start_background_workers():
         threading.Thread(target=background_dashboard_cache_refresh, args=(refresh, seconds, rule_key, rule_key is None, requires_metadata), daemon=True, name=f"dashboard-{name}").start()
     threading.Thread(target=background_spot_market_refresh, daemon=True, name="spot-market-refresh").start()
     threading.Thread(target=background_dual_market_refresh, daemon=True, name="dual-market-refresh").start()
-    threading.Thread(target=background_funding_history_sync, daemon=True, name="funding-history-sync").start()
+    for exchange in ("Binance", "Bybit", "OKX"):
+        threading.Thread(target=background_funding_history_sync, args=(exchange,), daemon=True,
+                         name="funding-history-" + exchange.lower()).start()
+    threading.Thread(target=background_binance_settlement_tail, daemon=True, name="binance-settlement-tail").start()
     threading.Thread(target=background_funding_alerts, daemon=True, name="funding-alerts").start()
-    threading.Thread(target=background_dual_funding_history_sync, daemon=True, name="dual-funding-history-sync").start()
     threading.Thread(target=background_price_history_backfill, daemon=True, name="price-history-backfill").start()
     threading.Thread(target=background_index_component_sync, daemon=True, name="index-component-sync").start()
     threading.Thread(target=background_onchain_opportunity_refresh, daemon=True, name="onchain-opportunity-refresh").start()

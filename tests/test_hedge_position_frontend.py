@@ -11,7 +11,7 @@ INDEX_HTML = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
 class HedgePositionFrontendContractTests(unittest.TestCase):
     def test_every_spot_route_has_a_hedge_builder_action(self):
         start = APP_JS.index("function spotRows")
-        end = APP_JS.index("function showMarketRefreshCountdown", start)
+        end = APP_JS.index("async function loadSpotFutures", start)
         source = APP_JS[start:end]
         self.assertIn("建立对冲仓位", source)
         self.assertIn("openHedgePositionBuilder", source)

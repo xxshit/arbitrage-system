@@ -133,7 +133,6 @@ body:has(#spot-futures.active) main > header .status {width:auto;min-height:20px
 .layout-view#spot-futures .spot-group-start td {box-shadow:inset 0 1px #b8cbb5}
 .layout-view#spot-futures .spot-group-divider td {height:3px!important}
 .layout-view#spot-futures .pagination {margin:10px 0 6px;gap:8px}
-.layout-view#spot-futures .data-status {margin:0;font-size:10px}
 
 /* 05 Hedge ledger: risk summary, two legs, then realized history. */
 .layout-view#my-positions .position-summary {grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}

@@ -5,7 +5,7 @@ import test from 'node:test';
 
 const source=readFileSync(new URL('../static/app.js',import.meta.url),'utf8');
 const css=readFileSync(new URL('../static/workspace-layout.css',import.meta.url),'utf8');
-const renderer=source.slice(source.indexOf('function spotRows('),source.indexOf('function showMarketRefreshCountdown('));
+const renderer=source.slice(source.indexOf('function spotRows('),source.indexOf('async function loadSpotFutures('));
 const columns=source.slice(source.indexOf('function configureSpotColumns('),source.indexOf('function configureSpotLayoutShell('));
 function harness(){
   const context={encodeURIComponent,exchangeName:name=>`EXCHANGE:${name}`,signClass:n=>n<0?'negative':'positive',percent:n=>`${n}%`,

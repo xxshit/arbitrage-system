@@ -70,7 +70,6 @@ let spotFuturesSearchTimer;
 let suggestionRequest = 0;
 let thoughtWatchSuggestionRequest = 0;
 let onchainOpportunityState = {items:[],chains:[],network:'all',query:'',updated_at:null,stale:false};
-let marketRefreshCountdownTimer;
 let dualMarketRefreshCountdownTimer;
 let dualFuturesPage = 1;
 let dualFuturesLoading = false;
@@ -429,14 +428,12 @@ function spotRows(symbols){
     }).join('');
   }).join('');
 }
-function showMarketRefreshCountdown(){clearInterval(marketRefreshCountdownTimer);const target=byId('spotFuturesCountdown');if(target)target.textContent=''}
 async function loadSpotFutures(manual=false){
   if(spotFuturesLoading)return false;
   spotFuturesLoading=true;
-  const status=byId('spotFuturesUpdated'),alphaOnly=byId('binanceAlphaOnly').checked;
+  const alphaFilter=byId('binanceAlphaOnly'),alphaOnly=alphaFilter.checked;
   const requestUrl=()=>'/api/spot-futures?page='+spotFuturesPage+'&binance_spot_only='+(byId('binanceSpotOnly').checked?'1':'0')+'&binance_alpha_only='+(byId('binanceAlphaOnly').checked?'1':'0')+'&funding_interval='+encodeURIComponent(spotFundingInterval)+'&symbol='+encodeURIComponent(spotFuturesSearch)+'&sort_by='+spotSort.key+'&sort_direction='+spotSort.direction;
   const url=requestUrl();
-  if(manual)status.textContent='正在读取已缓存的行情数据…';
   try{
     const data=await fetchRefreshJson(url);
     if(url!==requestUrl())return false;
@@ -449,16 +446,12 @@ async function loadSpotFutures(manual=false){
     byId('previousPage').disabled=data.page<=1;
     byId('nextPage').disabled=data.page>=data.pages;
     const failed=Object.keys(data.errors||{});
-    const alphaDetail=alphaOnly?` · Binance Alpha 目录${data.binance_alpha_catalog_stale?'沿用最近有效缓存':'已同步'}`:'';
-    const detail=(failed.length?failed.join('、')+' 行情暂不可用':`已对全部 ${data.total_symbols} 个币种排序后分页 · 当前按 ${spotSortLabels[spotSort.key]} ${spotSort.direction==='desc'?'↓':'↑'} 排序`)+alphaDetail;
-    status.textContent=`最近更新 ${data.updated_at} · ${detail}`;
-    showMarketRefreshCountdown(data.next_refresh_in_seconds);
+    alphaFilter.title=alphaOnly?`Binance Alpha 目录${data.binance_alpha_catalog_stale?'沿用最近有效缓存':'已同步'}`:'';
     setPageRefreshSource('spot-futures',data.captured_at_epoch,'行情',failed.length>0);
     return true;
   }catch(error){
     if(url!==requestUrl())return false;
     if(!spotFuturesHasData)byId('spotFuturesRows').innerHTML=`<tr><td colspan="12" class="loading">${escapeChatHtml(error.message)}</td></tr>`;
-    status.textContent=spotFuturesHasData?`${error.message}，已保留上一组有效数据。`:error.message;
     return false;
   }finally{spotFuturesLoading=false;if(url!==requestUrl())setTimeout(()=>loadSpotFutures(true),0)}
 }

@@ -90,7 +90,7 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertIn("row.dataset.renderKey", keyed_sync)
         self.assertIn("currentRows.filter(row=>!row.dataset.renderKey)", keyed_sync)
         self.assertIn("currentParent.insertBefore(row,cursor)", keyed_sync)
-        spot_rows = function_source("spotRows", "showMarketRefreshCountdown")
+        spot_rows = function_source("spotRows", "loadSpotFutures")
         dual_rows = function_source("dualRowsCompact", "positionFloatingPopup")
         self.assertIn('data-render-key="spot|${group.symbol}|${row.long_exchange}"', spot_rows)
         self.assertIn('data-render-key="dual|${group.symbol}|${row.long_exchange}|${row.short_exchange}"', dual_rows)

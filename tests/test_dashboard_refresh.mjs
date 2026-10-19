@@ -184,10 +184,15 @@ for(const [name,start,end,lock,hasData,rowId] of [
 
 function spotLoaderHarness(){
   const h=harness(),requests=[],renders=[];
+  const getElement=h.context.byId;
+  h.context.byId=id=>{
+    assert.ok(!['spotFuturesUpdated','spotFuturesCountdown'].includes(id),'removed footer must not be accessed');
+    return getElement(id);
+  };
   Object.assign(h.context,{active:'spot-futures',spotFuturesLoading:false,spotFuturesHasData:true,
     spotFuturesPage:1,spotFuturesSearch:'',spotFundingInterval:'all',spotSort:{key:'open_spread',direction:'desc'},
     spotSortLabels:{open_spread:'开差',close_spread:'平差'},spotRows:groups=>groups.map(group=>group.symbol).join(','),
-    destroyFloatingPopup(){},updateSortHeaders(){},showMarketRefreshCountdown(){},escapeChatHtml:String,
+    destroyFloatingPopup(){},updateSortHeaders(){},escapeChatHtml:String,
     replaceHtmlKeepingExchangeLogos(target,markup){target.innerHTML=markup;renders.push(markup)}});
   h.context.byId('spotFuturesRows').innerHTML='previous rows';
   h.context.fetch=url=>new Promise((resolve,reject)=>requests.push({url,resolve:data=>resolve({ok:true,json:async()=>data}),reject}));
@@ -205,7 +210,7 @@ test('spot direction switch discards pending old order and immediately requests 
   assert.deepEqual(h.renders,[]);await h.advance(0);
   assert.equal(h.requests.length,2);assert.ok(h.requests[1].url.endsWith('sort_direction=asc'));
   h.requests[1].resolve(h.payload('new-asc'));await h.flush();
-  assert.deepEqual(h.renders,['new-asc']);assert.ok(h.context.byId('spotFuturesUpdated').textContent.includes('开差 ↑'));
+  assert.deepEqual(h.renders,['new-asc']);assert.equal(h.run('pageRefreshState("spot-futures").sourceUpdatedAt'),100000);
   assert.equal(h.run('pageRefreshState("spot-futures").inFlight'),0);
 });
 
@@ -222,9 +227,9 @@ test('spot rapid sort and filter changes coalesce to the latest complete request
 
 test('spot superseded failure cannot overwrite current status or block a fresh sort request',async()=>{
   const h=spotLoaderHarness(),first=h.context.loadSpotFutures();
-  h.context.spotSort.direction='asc';h.context.byId('spotFuturesUpdated').textContent='new filter requested';
+  h.context.spotSort.direction='asc';h.run('pageRefreshState("spot-futures").sourceUpdatedAt=85000');
   h.requests[0].reject(new Error('old request failed'));assert.equal(await first,false);
-  assert.equal(h.context.byId('spotFuturesUpdated').textContent,'new filter requested');
+  assert.equal(h.run('pageRefreshState("spot-futures").sourceUpdatedAt'),85000);
   await h.advance(0);assert.equal(h.requests.length,2);
   h.requests[1].resolve(h.payload('recovered'));await h.flush();assert.deepEqual(h.renders,['recovered']);
 });
@@ -241,7 +246,38 @@ test('spot current request failure retains previous rows without automatic retry
   const h=spotLoaderHarness(),first=h.context.loadSpotFutures();
   h.requests[0].reject(new Error('network failed'));assert.equal(await first,false);await h.advance(0);
   assert.equal(h.context.byId('spotFuturesRows').innerHTML,'previous rows');assert.equal(h.requests.length,1);
-  assert.ok(h.context.byId('spotFuturesUpdated').textContent.includes('已保留上一组有效数据'));
+  assert.equal(h.run('pageRefreshState("spot-futures").failed'),true);
+});
+
+function enableSpotHeader(h){
+  const ring={classList:{add(){},toggle(){}},style:{setProperty(){}},setAttribute(){}};
+  h.context.document.querySelector=()=>ring;
+  h.run(source.slice(source.indexOf('function renderPageRefreshIndicator('),source.indexOf('function beginPageRefresh(')));
+  return ring;
+}
+
+test('spot header retains real source time, partial-source warnings and the five-second ring without a footer',async()=>{
+  const h=spotLoaderHarness(),ring=enableSpotHeader(h);
+  h.context.byId('binanceAlphaOnly').checked=true;
+  const pending=h.context.loadSpotFutures(true),data=h.payload('fresh');
+  data.errors={gate_spot:'timeout'};data.binance_alpha_catalog_stale=true;
+  h.requests[0].resolve(data);assert.equal(await pending,true);
+  const status=h.context.byId('updated').textContent;
+  assert.ok(status.includes('现多期空 · 行情'));assert.ok(status.includes('部分上游延迟'));
+  assert.ok(!status.includes('排序后分页'));assert.ok(ring.title.includes('间隔 5秒'));
+  assert.ok(h.context.byId('binanceAlphaOnly').title.includes('沿用最近有效缓存'));
+  const refresh=h.context.loadSpotFutures();h.requests[1].resolve(h.payload('recovered'));assert.equal(await refresh,true);
+  assert.ok(!h.context.byId('updated').textContent.includes('延迟'));assert.ok(h.context.byId('binanceAlphaOnly').title.includes('已同步'));
+});
+
+test('spot request failure is visible in the header and retains good rows and source time after footer removal',async()=>{
+  const h=spotLoaderHarness();enableSpotHeader(h);
+  h.run('pageRefreshState("spot-futures").sourceUpdatedAt=95000');
+  const pending=h.context.loadSpotFutures(true);h.requests[0].reject(new Error('network failed'));
+  assert.equal(await pending,false);assert.ok(h.context.byId('updated').textContent.includes('请求失败'));
+  assert.equal(h.context.byId('spotFuturesRows').innerHTML,'previous rows');assert.equal(h.run('pageRefreshState("spot-futures").sourceUpdatedAt'),95000);
+  const refresh=h.context.loadSpotFutures();h.requests[1].resolve(h.payload('recovered'));assert.equal(await refresh,true);
+  assert.ok(!h.context.byId('updated').textContent.includes('请求失败'));assert.equal(h.run('pageRefreshState("spot-futures").sourceUpdatedAt'),100000);
 });
 
 test('qualified candidates notify once while low-level retracement observations stay silent',async()=>{

@@ -570,3 +570,17 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 .divergence-transfer-note {color:#a83b2b;white-space:normal;overflow-wrap:anywhere}
 .spot-divergence-warning {display:inline-flex;flex-direction:column;align-items:flex-start;vertical-align:middle;max-width:230px;white-space:normal}
 .spot-divergence-warning .divergence-transfer-note {padding:0 3px;font-size:10px;line-height:1.5}
+.alert-scope-controls {display:flex;gap:4px;margin:0 0 7px;flex:0 0 auto}
+.alert-scope-controls button {flex:1;min-width:0;padding:6px 5px;font-size:11px;white-space:nowrap}
+.alert-scope-controls button.active {background:#155f90;color:#fff;border-color:#155f90}
+.alert-scope-controls b {font-variant-numeric:tabular-nums}
+.alert-attention {display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;padding:5px 8px;margin:5px 0;background:#f2f5ef;color:#5d726e;border-radius:4px;font-size:11px;line-height:1.45}
+.alert-attention.candidate {background:#e8f7ee;color:#08734e}
+.alert-attention.watch {background:#fff7e7;color:#896119}
+.alert-attention span {overflow-wrap:anywhere}
+.alert-screen-settings {font-size:11px;margin:6px 0 10px;color:#5d726e}
+.alert-screen-settings summary {cursor:pointer;padding:4px 0}
+.alert-screen-settings input {width:105px;max-width:100%;font-size:14px}
+.alert-screen-settings label {display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:8px 0}
+.alert-screen-settings p {max-width:1000px;line-height:1.6;margin:5px 0}
+@media(max-width:600px){.alert-scope-controls button{min-height:36px}.alert-screen-settings input{font-size:16px;min-height:36px}}

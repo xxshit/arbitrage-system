@@ -221,7 +221,7 @@ class PriceDivergenceTests(unittest.TestCase):
             self.assertEqual(group['move_peaks']['open_spread'], 2.1)
             self.assertEqual(group['value_ranges']['open_spread'], {'max': 2.1, 'min': -1.4})
             self.assertEqual(len(group['paths']), 2)
-            self.assertEqual(summary['active_events'][0]['strategy'], 'futures_futures')
+            self.assertEqual(summary['active_events'], [])  # legacy rows have no current screening evidence
             for strategy, venue, expected in [('spot_futures', 'Gate', 0), ('spot_futures', 'Bitget', 1), ('futures_futures', 'Gate', 1)]:
                 detail = self.client.get('/api/alerts', query_string={'view': 'detail', 'symbol': 'GUA/USDT', 'path': json.dumps([strategy, venue, 'Binance'])}).get_json()
                 self.assertEqual(detail['total'], expected)

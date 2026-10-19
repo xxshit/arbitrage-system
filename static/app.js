@@ -97,6 +97,9 @@ let latestActiveAlertEvents = [];
 let mutedAlertSymbols = new Set();
 let alertListQuery = '';
 let alertListSort = 'latest';
+let alertScope = 'candidate';
+let alertNotional = 1000;
+let alertSummaryVersion = 0;
 let alertDetailVersion = 0;
 let alertDetailRequest = null;
 let alertDetailState = {symbol:'',strategy:'',pathId:'',data:null,loading:false,error:''};
@@ -625,6 +628,15 @@ function alertMetricRange(range){
   return `<b class="alert-metric-range" aria-label="最高 ${alertCompactMetric(range.max)}，最低 ${alertCompactMetric(range.min)}"><span class="${changeClass(range.max)}">${alertCompactMetric(range.max)}</span><span class="alert-range-separator" aria-hidden="true">～</span><span class="${changeClass(range.min)}">${alertCompactMetric(range.min)}</span></b>`;
 }
 function alertPaths(group){return (Array.isArray(group?.paths)?group.paths:[]).filter(path=>path&&typeof path.id==='string'&&typeof path.strategy==='string')}
+function alertAttentionMarkup(assessment){
+  if(!assessment)return '';
+  const label={candidate:'条件候选',watch:'提前关注',record:'仅记录'}[assessment.tier]||'仅记录';
+  const edge=Number.isFinite(assessment.net_edge)?` · 估算净空间 ${alertCompactMetric(assessment.net_edge)}`:'';
+  const opening=assessment.live&&Number.isFinite(assessment.entry_spread)?` · 当前开差 ${alertCompactMetric(assessment.entry_spread)}`:'';
+  const reverse=assessment.direction==='reverse'?` · 反向：${assessment.long_exchange}多 → ${assessment.short_exchange}空`:'';
+  const explanation=`${assessment.reason||''}。${reverse} 按${assessment.notional||alertNotional} USDT多腿名义金额、等标的数量估算；首档数量仅使用50%，不足不猜深档。平仓假设取冲击前平差75分位并留10%名义价格缓冲，非保证回归；四笔保守费用预算、0.10%滑点预留、8小时不利资费已扣，不计正资费收入，实际费率与成交须另核验。`;
+  return `<div class="alert-attention ${assessment.tier==='candidate'?'candidate':assessment.tier==='watch'?'watch':''}" title="${escapeChatHtml(explanation)}"><b>${label}</b><span>${escapeChatHtml(assessment.reason||'')}${escapeChatHtml(reverse)}${opening}${edge}</span></div>`;
+}
 function alertSelectedPath(group){return alertPaths(group).find(path=>path.id===alertDetailState.pathId)||null}
 function alertStrategyLabel(strategy){return ['spot_futures','futures_futures'].includes(strategy)?strategyLabel(strategy):'未分类'}
 function alertPathLegLabel(exchange,market){return exchange?`${exchange==='Binance'?'币安':exchange}${market||''}`:`${market==='现货'?'现货所':market==='合约'?'合约所':'交易所'}未记录`}
@@ -632,7 +644,7 @@ function alertPathLabel(path){return `${alertPathLegLabel(path.long_exchange,pat
 function alertPathDisplay(path){return `<span class="alert-path-display" aria-hidden="true"><span class="alert-path-leg">${exchangeName(path.long_exchange,alertPathLegLabel(path.long_exchange,path.long_market))}</span><span class="alert-path-arrow">→</span><span class="alert-path-leg">${exchangeName(path.short_exchange,alertPathLegLabel(path.short_exchange,path.short_market))}</span></span>`}
 function syncAlertDetailSelection(group){
   const paths=alertPaths(group),state=alertDetailState,symbol=group?.symbol||'',sameCoin=state.symbol===symbol;
-  const path=(sameCoin&&paths.find(item=>item.id===state.pathId))||(sameCoin&&paths.find(item=>item.strategy===state.strategy))||paths.find(item=>item.id===group?.latest?.path_id)||paths[0];
+  const path=(sameCoin&&paths.find(item=>item.id===state.pathId))||(sameCoin&&paths.find(item=>item.strategy===state.strategy))||(alertScope!=='history'&&paths.find(item=>item.attention?.tier===alertScope&&item.attention.live))||paths.find(item=>item.id===group?.latest?.path_id)||paths[0];
   if(!sameCoin||state.pathId!==(path?.id||'')){alertDetailVersion++;alertDetailState={symbol,strategy:path?.strategy||'',pathId:path?.id||'',data:null,loading:false,error:''}}
 }
 function alertPathControls(group,path){
@@ -656,7 +668,7 @@ function alertTransferPanel(group,path=alertSelectedPath(group)||alertPaths(grou
 }
 function alertDetailCard(group){
   const state=alertDetailState,path=alertSelectedPath(group),data=state.symbol===group.symbol&&state.data?.path_id===path?.id?state.data:null;
-  return `<article class="alert-detail-card ${alertClass(path?.latest?.type||group.latest.type)}" aria-label="${escapeChatHtml(group.symbol)} 报警明细">${alertPathControls(group,path)}${alertTransferPanel(group,path)}<div class="alert-detail-metrics"><span title="所选策略及路径最近24小时已记录报警样本的最高值～最低值，不混合其他交易所路径">24H开差范围 ${alertMetricRange(path?.value_ranges?.open_spread)}</span><span title="仅所选路径最近24小时已记录报警样本中的币安合约标记价/指数基差；无币安端或缺失时不补零">24H币安基差范围 ${alertMetricRange(path?.basis_exchange==='Binance'?path.value_ranges?.basis:null)}</span></div><div class="alert-detail-status" role="status">${state.error?escapeChatHtml(state.error):''}</div><div class="alert-timeline-scroll" tabindex="0" role="region" aria-label="${escapeChatHtml(group.symbol)} 报警明细，可滚动"><div class="alert-timeline-head"><span>时间（UTC）</span><span>报警类型</span><span>开差</span><span>币安基差</span></div><ol class="alert-timeline">${data?.items?.length?data.items.map(alertTimelineNode).join(''):`<li class="empty-alert">${state.error?'读取失败，可重试；已有记录不会被清除。':!path?'暂无可用路径记录。':data?'最近24小时没有该路径的报警。':'正在读取该路径的报警时间线…'}</li>`}</ol></div><div class="alert-detail-pagination"><button type="button" onclick="loadSelectedAlertHistory(${Math.max(1,(data?.page||1)-1)},true)" ${!data||data.page<=1||state.loading?'disabled':''}>上一页</button><span>${data?`第 ${data.page} / ${data.pages} 页 · ${data.page_size}条/页`:'每页40条，全部可翻页'}</span><button type="button" onclick="loadSelectedAlertHistory(${(data?.page||1)+1},true)" ${!data||data.page>=data.pages||state.loading?'disabled':''}>下一页</button>${state.error?'<button type="button" onclick="loadSelectedAlertHistory()">重试</button>':''}</div></article>`;
+  return `<article class="alert-detail-card ${alertClass(path?.latest?.type||group.latest.type)}" aria-label="${escapeChatHtml(group.symbol)} 报警明细">${alertPathControls(group,path)}${alertTransferPanel(group,path)}${alertAttentionMarkup(path?.attention)}<div class="alert-detail-metrics"><span title="所选策略及路径最近24小时已记录报警样本的最高值～最低值，不混合其他交易所路径">24H开差范围 ${alertMetricRange(path?.value_ranges?.open_spread)}</span><span title="仅所选路径最近24小时已记录报警样本中的币安合约标记价/指数基差；无币安端或缺失时不补零">24H币安基差范围 ${alertMetricRange(path?.basis_exchange==='Binance'?path.value_ranges?.basis:null)}</span></div><div class="alert-detail-status" role="status">${state.error?escapeChatHtml(state.error):''}</div><div class="alert-timeline-scroll" tabindex="0" role="region" aria-label="${escapeChatHtml(group.symbol)} 报警明细，可滚动"><div class="alert-timeline-head"><span>时间（UTC）</span><span>报警类型</span><span>开差</span><span>币安基差</span></div><ol class="alert-timeline">${data?.items?.length?data.items.map(alertTimelineNode).join(''):`<li class="empty-alert">${state.error?'读取失败，可重试；已有记录不会被清除。':!path?'暂无可用路径记录。':data?'最近24小时没有该路径的报警。':'正在读取该路径的报警时间线…'}</li>`}</ol></div><div class="alert-detail-pagination"><button type="button" onclick="loadSelectedAlertHistory(${Math.max(1,(data?.page||1)-1)},true)" ${!data||data.page<=1||state.loading?'disabled':''}>上一页</button><span>${data?`第 ${data.page} / ${data.pages} 页 · ${data.page_size}条/页`:'每页40条，全部可翻页'}</span><button type="button" onclick="loadSelectedAlertHistory(${(data?.page||1)+1},true)" ${!data||data.page>=data.pages||state.loading?'disabled':''}>下一页</button>${state.error?'<button type="button" onclick="loadSelectedAlertHistory()">重试</button>':''}</div></article>`;
 }
 function alertSymbolCard(group){
   const symbol=escapeChatHtml(group.symbol),peaks=group.move_peaks||{};
@@ -664,22 +676,26 @@ function alertSymbolCard(group){
 }
 function visibleAlertGroups(groups=latestAlertGroups){
   const query=alertListQuery.toUpperCase().replace(/[\s/_-]/g,'');
-  return groups.filter(group=>!query||group.symbol.toUpperCase().replace(/[/_-]/g,'').includes(query)).slice().sort((a,b)=>{
+  return groups.filter(group=>(alertScope==='history'||(group.attention?.live&&group.attention.tier===alertScope))&&(!query||group.symbol.toUpperCase().replace(/[/_-]/g,'').includes(query))).slice().sort((a,b)=>{
     if(alertListSort==='count')return b.alert_count-a.alert_count;
     if(['open_spread','basis'].includes(alertListSort))return Math.abs(b.move_peaks?.[alertListSort]??0)-Math.abs(a.move_peaks?.[alertListSort]??0);
-    return 0;
+    return alertScope==='candidate'?(b.attention?.net_edge??0)-(a.attention?.net_edge??0):0;
   });
 }
 function alertRosterColumnsMarkup(){return '<div class="alert-roster-columns" aria-hidden="true"><span>币种</span><span>轮次</span><span>开差峰值</span><span>基差峰值</span><span>静音</span></div>'}
 function renderAlertRoster(){
   const groups=visibleAlertGroups(),list=byId('alertSymbolList');if(!list)return;
   const top=list.scrollTop;
-  replaceHtmlKeepingExchangeLogos(list,alertRosterColumnsMarkup()+(groups.length?groups.map(alertSymbolCard).join(''):`<p class="empty-alert">${latestAlertGroups.length?'没有匹配的币种，清空搜索可查看全部。':'最近24小时暂无确认后的报警。'}</p>`));list.scrollTop=top;
-  byId('alertRosterCount').textContent=alertListQuery?`${groups.length} / ${latestAlertGroups.length} 币`:`全部 ${latestAlertGroups.length} 币`;
+  replaceHtmlKeepingExchangeLogos(list,alertRosterColumnsMarkup()+(groups.length?groups.map(alertSymbolCard).join(''):`<p class="empty-alert">${alertListQuery?'没有匹配的币种，清空搜索可查看全部。':alertScope==='candidate'?'暂无通过成本与深度筛选的候选。可切换观察或24H历史。':alertScope==='watch'?'暂无提前关注信号，历史异动仍保留。':'最近24小时暂无确认后的报警。'}</p>`));list.scrollTop=top;
+  byId('alertRosterCount').textContent=alertListQuery?`${groups.length} / ${latestAlertGroups.length} 币`:`${alertScope==='history'?'全部':'当前'} ${groups.length} 币`;
+  const scopes=byId('alertScopeControls');if(scopes)scopes.innerHTML=[['candidate','候选'],['watch','观察'],['history','24H历史']].map(([scope,label])=>`<button type="button" aria-pressed="${alertScope===scope}" class="${alertScope===scope?'active':''}" onclick="setAlertScope('${scope}')">${label} <b>${scope==='history'?latestAlertGroups.length:latestAlertGroups.filter(group=>group.attention?.live&&group.attention.tier===scope).length}</b></button>`).join('');
   byId('alertTotalSymbols').textContent=latestAlertGroups.length;
   byId('alertTotalEvents').textContent=latestAlertGroups.reduce((sum,group)=>sum+group.alert_count,0);
   byId('alertActiveCount').textContent=latestActiveAlertEvents.length;
 }
+function setAlertScope(scope){if(!['candidate','watch','history'].includes(scope))return;alertScope=scope;selectedAlertSymbol='';renderAlertMasterDetail(latestAlertGroups);loadSelectedAlertHistory(1,true)}
+function setAlertNotional(value){const amount=Number(value);if(!Number.isFinite(amount)||amount<100||amount>1000000){byId('alertNotional').value=alertNotional;return false}alertNotional=amount;alertDetailVersion++;alertDetailState.data=null;clearAlertCurrent('正在重新核验参考金额');loadAlerts(true);return true}
+function clearAlertCurrent(reason){latestActiveAlertEvents=[];latestAlertGroups=latestAlertGroups.map(group=>({...group,attention:{tier:'record',live:false,reason},paths:(group.paths||[]).map(path=>({...path,attention:{tier:'record',live:false,reason}}))}));renderAlertMasterDetail(latestAlertGroups);renderTipsItems([]);byId('tipsCount').textContent=0}
 function filterAlertSymbols(value){alertListQuery=String(value||'');if(byId('alertSymbolList'))byId('alertSymbolList').scrollTop=0;renderAlertRoster()}
 function sortAlertSymbols(value){alertListSort=['latest','count','open_spread','basis'].includes(value)?value:'latest';if(byId('alertSymbolList'))byId('alertSymbolList').scrollTop=0;renderAlertRoster()}
 function renderAlertDetailPane(){
@@ -695,7 +711,8 @@ function renderAlertDetailPane(){
 }
 function renderAlertMasterDetail(groups){
   latestAlertGroups=groups;
-  if(!groups.some(group=>group.symbol===selectedAlertSymbol))selectedAlertSymbol=groups[0]?.symbol||'';
+  const visible=visibleAlertGroups(groups);
+  if(!visible.some(group=>group.symbol===selectedAlertSymbol))selectedAlertSymbol=visible[0]?.symbol||'';
   syncAlertDetailSelection(groups.find(group=>group.symbol===selectedAlertSymbol));
   renderAlertRoster();renderAlertDetailPane();
 }
@@ -705,12 +722,12 @@ function selectAlertSymbol(symbol){
   if(window.innerWidth<1100)byId('alertDetailPane')?.scrollIntoView({block:'start',behavior:'smooth'});
 }
 async function loadSelectedAlertHistory(page=alertDetailState.data?.page||1,resetScroll=false){
-  const symbol=selectedAlertSymbol,{strategy,pathId}=alertDetailState;if(!symbol||!pathId)return false;
-  const key=JSON.stringify([symbol,strategy,pathId,page]);if(alertDetailRequest?.key===key)return alertDetailRequest.promise;
+  const symbol=selectedAlertSymbol,{strategy,pathId}=alertDetailState,notional=alertNotional;if(!symbol||!pathId)return false;
+  const key=JSON.stringify([symbol,strategy,pathId,page,notional]);if(alertDetailRequest?.key===key)return alertDetailRequest.promise;
   const version=++alertDetailVersion;alertDetailState.loading=true;alertDetailState.error='';renderAlertDetailPane();
   const promise=(async()=>{try{
-    const data=await fetchRefreshJson(`/api/alerts?${new URLSearchParams({view:'detail',symbol,strategy,path:pathId,page:String(page),page_size:'40'})}`);
-    if(version!==alertDetailVersion||symbol!==selectedAlertSymbol||pathId!==alertDetailState.pathId)return false;
+    const data=await fetchRefreshJson(`/api/alerts?${new URLSearchParams({view:'detail',symbol,strategy,path:pathId,page:String(page),page_size:'40',notional:String(notional)})}`);
+    if(version!==alertDetailVersion||symbol!==selectedAlertSymbol||pathId!==alertDetailState.pathId||notional!==alertNotional)return false;
     if(data.symbol!==symbol||data.path_id!==pathId||data.strategy!==strategy||!Array.isArray(data.items)||data.items.some(item=>item.symbol!==symbol||item.path_id!==pathId||item.strategy!==strategy))throw new Error('明细币种或路径不一致');
     alertDetailState.data=data;alertDetailState.loading=false;renderAlertDetailPane();
     if(resetScroll){const scroll=byId('alertDetailPane')?.querySelector('.alert-timeline-scroll');if(scroll)scroll.scrollTop=0}return true;
@@ -718,15 +735,17 @@ async function loadSelectedAlertHistory(page=alertDetailState.data?.page||1,rese
   finally{if(alertDetailRequest?.version===version)alertDetailRequest=null}})();
   alertDetailRequest={key,version,promise};return promise;
 }
-function renderTipsItems(activeEvents){const target=byId('tipsItems');if(!target)return;target.innerHTML=activeEvents.length?activeEvents.map(item=>`<article class="tips-item ${alertClass(item.type)} ${isAlertMuted(item.symbol)?'muted-alert':''}"><div class="tips-item-head"><b class="${delistingSymbolClass(item.symbol)}" data-market-symbol="${item.symbol}">${item.symbol} · ${strategyLabel(item.strategy)} · ${alertPulseLabel(item)}${isAlertMuted(item.symbol)?' · 已静音':''}</b>${alertSpeakerButton(item.symbol)}</div>${alertExchangePair(item)}<span>开差 ${alertMetric(item.open_spread)} · 基差 ${alertMetric(item.basis)}</span>${alertPulseTrace(item)}${alertDeathMarkup(item)}</article>`).join(''):'<p class="empty-alert">当前没有处于 120 秒有效期的报警。</p>'}
+function renderTipsItems(activeEvents){const target=byId('tipsItems');if(!target)return;target.innerHTML=activeEvents.length?activeEvents.map(item=>`<article class="tips-item ${alertClass(item.type)} ${isAlertMuted(item.symbol)?'muted-alert':''}"><div class="tips-item-head"><b class="${delistingSymbolClass(item.symbol)}" data-market-symbol="${item.symbol}">${item.symbol} · ${strategyLabel(item.strategy)} · ${alertPulseLabel(item)}${isAlertMuted(item.symbol)?' · 已静音':''}</b>${alertSpeakerButton(item.symbol)}</div>${alertExchangePair(item)}${alertAttentionMarkup(item.attention)}<span>触发开差 ${alertMetric(item.open_spread)} · 基差 ${alertMetric(item.basis)}</span>${alertPulseTrace(item)}${item.attention?.tier==='candidate'?'':alertDeathMarkup(item)}</article>`).join(''):'<p class="empty-alert">当前没有通过筛选的提醒，已发生的异动保留在24H历史。</p>'}
 async function loadAlerts(force=false){
+  const version=++alertSummaryVersion,requestedNotional=alertNotional;
   try{
-    const data=await fetchRefreshJson('/api/alerts?view=summary'),activeEvents=data.active_events||[],groups=data.events||[],tracking=data.basis_tracking||[];
+    const data=await fetchRefreshJson(`/api/alerts?view=summary&notional=${requestedNotional}`),activeEvents=data.active_events||[],groups=data.events||[],tracking=data.basis_tracking||[];
+    if(version!==alertSummaryVersion||requestedNotional!==alertNotional)return false;
     renderAlertStreamStatus(data.realtime);
     pruneAlertMutes(groups,activeEvents);latestActiveAlertEvents=activeEvents;
     renderDivergenceRegister(data.isolated_paths);
     const signature=JSON.stringify({groups,tracking,activeEvents},(key,value)=>key==='remaining_seconds'?undefined:value);
-    const audibleKeys=activeEvents.filter(item=>!isAlertMuted(item.symbol)&&!['data_gap','isolated','settled'].includes(item.pulse?.state)).map(item=>item.notice_key||(item.pulse?`${item.id}-${item.pulse.notice_version}`:`${item.symbol}-${item.type}-${item.open_spread}-${item.basis}-${item.created_at}`)),audibleSignature=audibleKeys.join('|');
+    const audibleKeys=activeEvents.filter(item=>item.audible===true&&!isAlertMuted(item.symbol)&&!['data_gap','isolated','settled'].includes(item.pulse?.state)).map(item=>item.notice_key||(item.pulse?`${item.id}-${item.pulse.notice_version}`:`${item.symbol}-${item.type}-${item.open_spread}-${item.basis}-${item.created_at}`)),audibleSignature=audibleKeys.join('|');
     const noticeNow=Date.now();
     for(const [key,seenAt] of alertNoticeMemory)if(noticeNow-seenAt>86400000)alertNoticeMemory.delete(key);
     const hasNewAlert=alertsInitialized&&audibleKeys.some(key=>!alertNoticeMemory.has(key));
@@ -740,6 +759,8 @@ async function loadAlerts(force=false){
     alertSignature=signature;alertAudibleSignature=audibleSignature;alertsInitialized=true;
     if(hasNewAlert)playAlarmSound();return true;
   }catch(error){
+    if(version!==alertSummaryVersion||requestedNotional!==alertNotional)return false;
+    if(alertsInitialized)clearAlertCurrent('行情读取失败');
     if(!alertsInitialized){const list=byId('alertSymbolList');if(list)list.innerHTML='<p class="empty-alert">报警记录暂时无法读取，将自动重试。</p>';byId('tipsItems').innerHTML='<p class="empty-alert">报警暂时无法读取。</p>'}
     return false;
   }

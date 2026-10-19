@@ -9,7 +9,7 @@
   <title>ArbiScope | 套利监控中心</title>
   <link rel="manifest" href="{{ url_for('web_app_manifest') }}?v=20260815-web-push">
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20261018-workspace-refresh-v3">
-  <link rel="stylesheet" href="{{ url_for('static', filename='workspace-layout.css') }}?v=20261019-alert-quality-v2">
+  <link rel="stylesheet" href="{{ url_for('static', filename='workspace-layout.css') }}?v=20261019-alert-screen-v3">
 </head>
 <body>
   <div id="mobileNavBackdrop" class="mobile-nav-backdrop" onclick="toggleMobileNav(false)" aria-hidden="true"></div>
@@ -80,11 +80,13 @@
       <details id="alertDivergenceRegister" class="divergence-register" hidden><summary>⚠ 脱钩路径 · <b id="alertDivergenceCount">0</b> 条 <small>仅所列路径不计入报警</small></summary><div id="alertDivergenceList" class="divergence-register-list"></div></details>
       <div class="panel alert-timeline-panel"><div id="alertEvents" class="alert-master-detail">
         <section class="alert-roster" aria-label="24小时完整报警币种">
+          <div id="alertScopeControls" class="alert-scope-controls" role="group" aria-label="报警筛选"><button type="button" class="active" aria-pressed="true">候选</button><button type="button" onclick="setAlertScope('watch')">观察</button><button type="button" onclick="setAlertScope('history')">24H历史</button></div>
           <div class="alert-roster-toolbar"><label><input id="alertSymbolSearch" type="search" placeholder="搜索币种" aria-label="搜索报警币种" oninput="filterAlertSymbols(this.value)"></label><select id="alertSymbolSort" aria-label="报警币种排序" onchange="sortAlertSymbols(this.value)"><option value="latest">最新报警</option><option value="count">轮次最多</option><option value="open_spread">开差峰值</option><option value="basis">基差峰值</option></select><span id="alertRosterCount">全部币种</span></div>
           <div id="alertSymbolList" class="alert-symbol-list" tabindex="0" role="region" aria-label="24小时报警币种列表，可滚动"><div class="alert-roster-columns" aria-hidden="true"><span>币种</span><span>轮次</span><span>开差峰值</span><span>基差峰值</span><span>静音</span></div><p class="loading">正在读取24小时报警…</p></div>
         </section>
         <section id="alertDetailPane" class="alert-detail-pane" aria-label="选中币种报警详情"><p class="empty-alert">选择左侧币种查看报警明细。</p></section>
       </div></div>
+      <details class="alert-screen-settings"><summary>筛选设置 · 净空间≥0.30%</summary><label>多腿参考金额 <input id="alertNotional" type="number" min="100" max="1000000" step="100" value="1000" onchange="setAlertNotional(this.value)"> USDT · 两腿等标的数量</label><p>候选不是收益保证：只用首档数量的50%，不足不猜深档；现货每笔0.20%、合约每笔0.10%为费用预算（不是账户费率），计入开平共四笔和10%名义金额缓冲，再扣0.10%滑点与8小时不利资费。平仓按冲击前平差75分位估算，正值另留10%价格缓冲，不假设必然归零。资费收入另看资金费率栏目，不用于放宽此门槛。</p><p>先积累约75秒基线；提前关注不响铃，只有通过筛选的候选可触发网页声音。冲高回落、再次启动均保留历史，不发Lark。参考金额只用于本页估算，不创建订单。</p></details>
       <details class="alert-tools"><summary>基差追踪与静音管理 <small>基差±1%起，每扩大0.2%记录</small></summary><div class="basis-side-grid"><section><h3>基差扩展追踪</h3><div id="basisTracking" class="alert-list"><p class="loading">正在读取基差记录…</p></div></section><section><h3>静音列表</h3><div id="alertMuteList" class="alert-mute-list"><p class="empty-alert">暂无静音币种。</p></div></section></div></details>
     </section>
 
@@ -110,6 +112,6 @@
   <div id="modal" class="modal hidden"><form class="dialog" onsubmit="saveStrategy(event)"><button type="button" class="close" onclick="closeModal()">×</button><p class="eyebrow">NEW STRATEGY</p><h2>创建监控策略</h2><label>策略名称<input id="name" required placeholder="例如：BTC 跨所价差"></label><label>套利类型<select id="strategyMode"><option>跨所合约套利</option><option>现货多/合约空</option><option>资金费率套利</option></select></label><label>交易对<select id="symbol"><option>BTC/USDT</option><option>ETH/USDT</option><option>SOL/USDT</option></select></label><button class="primary submit">创建策略</button></form></div>
   <section id="chatRemarkModal" class="modal hidden"><form class="dialog chat-remark-dialog" onsubmit="saveChatRemark(event)"><button type="button" class="close" onclick="closeChatRemarkEditor()">×</button><p class="eyebrow">PRIVATE CONTACT NOTE</p><h2>修改联系人备注</h2><p id="chatRemarkAccount" class="chat-remark-account"></p><label>备注名<input id="chatRemarkInput" maxlength="24" autocomplete="off" placeholder="例如：盘友小林"></label><small class="chat-remark-help">备注仅在你的账号中可见，不会修改对方真实账号名。</small><div class="chat-remark-actions"><button type="button" onclick="saveChatRemark(event,true)">清空备注</button><button class="primary" type="submit">保存备注</button></div></form></section>
   <section id="hedgePositionModal" class="modal hidden"><form class="dialog hedge-preview-dialog" onsubmit="event.preventDefault()"><button type="button" class="close" onclick="closeHedgePositionBuilder()">×</button><p class="eyebrow">TWO-LEG ORDER PREVIEW</p><h2 id="hedgePreviewTitle">建立对冲仓位</h2><p id="hedgePreviewRoute" class="hedge-preview-route"></p><div class="hedge-preview-fields"><label>投入金额（USDT）<input id="hedgeQuoteAmount" type="number" min="10" step="1" value="100" oninput="renderHedgePositionPreview()"></label><label>合约杠杆<input id="hedgeLeverage" type="number" min="1" max="10" step="1" value="1" oninput="renderHedgePositionPreview()"></label><label>最大允许滑点<input id="hedgeMaxSlippage" type="number" min="0" max="5" step="0.05" value="0.30" oninput="renderHedgePositionPreview()"><span>%</span></label></div><div id="hedgeOrderPreview" class="hedge-order-preview"></div><div class="hedge-preview-notice"><b>安全边界</b><span>价格和数量均为当前盘口估算；接入私有 API 后仍需在最终确认页核对两腿数量、实际成交、手续费和单腿失败处置。</span></div><button id="hedgeSubmitButton" class="primary submit" type="button" disabled>等待币安私有 API</button></form></section>
-  <script src="{{ url_for('static', filename='app.js') }}?v=20261019-alert-quality-v2"></script>
+  <script src="{{ url_for('static', filename='app.js') }}?v=20261019-alert-screen-v3"></script>
   <script src="{{ url_for('static', filename='workspace-layout.js') }}?v=20261018-alert-desk-v1"></script>
 </body></html>

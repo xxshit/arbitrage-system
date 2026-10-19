@@ -7,14 +7,15 @@ are applied only after a connection-local full snapshot.
 """
 from collections import defaultdict
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 import random
 import threading
 import time
 
-from anomaly_engine import PulseDetector, finite
+from anomaly_engine import POLICY_VERSION, PulseDetector, finite
+from alert_screening import NoiseWindow
 
 
 ENDPOINTS = {
@@ -126,6 +127,17 @@ class Route:
     short_factor: float = 1
     mark_key: tuple | None = None
     divergence_threshold: float = 10
+    long_qty_factor: float | None = 1
+    short_qty_factor: float | None = 1
+    # Refreshing funding/transfer metadata must NOT reset a price episode.
+    long_funding: float | None = field(default=None, compare=False)
+    short_funding: float | None = field(default=None, compare=False)
+    long_interval: float | None = field(default=None, compare=False)
+    short_interval: float | None = field(default=None, compare=False)
+    long_funding_at: float | None = field(default=None, compare=False)
+    short_funding_at: float | None = field(default=None, compare=False)
+    metadata_at: float = field(default=0, compare=False)
+    transfer_state: str = field(default="unknown", compare=False)
 
 
 class AlertStreamHub:
@@ -138,6 +150,7 @@ class AlertStreamHub:
         self.detector = PulseDetector()
         self.pending, self.workers, self.fresh = {}, {}, {}
         self.evaluated_at, self.dirty = {}, set()
+        self.noise, self.live_quotes = {}, {}
         self.running = False
         self.rejected = 0
         self.frame_counts = defaultdict(lambda: defaultdict(int))
@@ -157,6 +170,8 @@ class AlertStreamHub:
                 self._updates(self.detector.reset(path, now, "isolated" if path not in incoming else "data_gap"))
                 self.routes.pop(path)
                 self.fresh.pop(path, None)
+                self.noise.pop(path, None)
+                self.live_quotes.pop(path, None)
                 self.dirty.discard(path)
             self.routes.update(incoming)
             self.by_key = defaultdict(set)
@@ -176,6 +191,8 @@ class AlertStreamHub:
                 affected.update(self.by_key.get(key, ()))
             for path in affected:
                 self.fresh.pop(path, None)
+                self.noise.pop(path, None)
+                self.live_quotes.pop(path, None)
                 self.dirty.add(path)
                 self._updates(self.detector.reset(path, now))
 
@@ -260,13 +277,47 @@ class AlertStreamHub:
                     if path[0] == "spot_futures" and context["open_spread"] * context["close_spread"] > 0 and abs(context["open_spread"] - context["close_spread"]) < .6 and min(abs(context["open_spread"]), abs(context["close_spread"])) >= route.divergence_threshold and abs(context["basis"]) <= 1 and abs(100 * (sm / (mark["index"] * route.short_factor) - 1)) <= 2:
                         self._updates(self.detector.reset(path, now, "isolated"))
                         self.fresh.pop(path, None)
+                        self.noise.pop(path, None)
+                        self.live_quotes.pop(path, None)
                         continue
                 self.fresh[path] = now
                 self.dirty.discard(path)
+                context["screen_reference"] = self.noise.setdefault(path, NoiseWindow()).observe(now, context)
+                self.live_quotes[path] = context
                 # Public, aligned books are observations, NOT a bullish claim.
                 for metric, value in (("spread", context["open_spread"]), ("basis", context["basis"]), ("price", 50 * (math.log(lm) + math.log(sm)))):
                     if finite(value):
                         self._updates(self.detector.observe(path, metric, value, now, context))
+
+    def screening_quotes(self, paths, now=None):
+        """Small read-only snapshots. Quantity-only updates are read directly
+        from validated books, not a delayed pulse JSON. No network under lock.
+        """
+        now = time.time() if now is None else now
+        with self.lock:
+            output = {}
+            if self.overloaded:
+                return output
+            for path in paths:
+                route = self.routes.get(path)
+                if not route or path not in self.live_quotes or path in self.dirty:
+                    continue
+                legs = [self.books.get(key) for key in (route.long_key, route.short_key)]
+                if any(not leg or not -2 <= now-leg["at"] <= self.MAX_AGE for leg in legs):
+                    continue
+                if abs(legs[0]["at"]-legs[1]["at"]) > self.MAX_SKEW:
+                    continue
+                def leg_payload(leg, factor, quantity_factor, funding, interval, funding_at):
+                    qty = quantity_factor / factor if finite(quantity_factor) and quantity_factor > 0 else None
+                    return dict(bid=leg["bid"]*factor, ask=leg["ask"]*factor,
+                                bid_qty=leg["bid_qty"]*qty if qty else None,
+                                ask_qty=leg["ask_qty"]*qty if qty else None,
+                                funding=funding, interval=interval, funding_at=funding_at)
+                output[path] = dict(long=leg_payload(legs[0], route.long_factor, route.long_qty_factor, route.long_funding, route.long_interval, route.long_funding_at),
+                                    short=leg_payload(legs[1], route.short_factor, route.short_qty_factor, route.short_funding, route.short_interval, route.short_funding_at),
+                                    long_at=legs[0]["at"], short_at=legs[1]["at"], metadata_at=route.metadata_at,
+                                    transfer_state=route.transfer_state)
+            return output
 
     def batch(self, limit=500):
         with self.lock:
@@ -299,6 +350,7 @@ class AlertStreamHub:
                     state["last_error_type"] = worker.last_error_type
             fresh = sum(now - value <= self.MAX_AGE for path, value in self.fresh.items() if path in self.routes)
             return dict(running=self.running, paths=len(self.routes), fresh_paths=fresh, feeds=dict(feeds),
+                        policy_version=POLICY_VERSION, screening_ready_paths=sum(bool(window.cached.get("ready")) for window in self.noise.values()),
                         rejected_frames=self.rejected, pending=len(self.pending), persistence_error=self.persistence_error,
                         frame_counts={feed: dict(counts) for feed, counts in self.frame_counts.items()},
                         overloaded=self.overloaded, last_persisted_at=self.last_persisted_at, checked_at=now)

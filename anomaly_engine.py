@@ -12,7 +12,7 @@ import math
 import uuid
 
 
-POLICY_VERSION = 2
+POLICY_VERSION = 3
 RULES = {"spread": ((15, .50), (30, .75), (120, 1.0)),
          "basis": ((15, .50), (30, .75), (120, 1.0)),
          "price": ((15, 1.5), (30, 2.5), (120, 4.0))}
@@ -194,6 +194,8 @@ class PulseDetector:
                 updates.append(deepcopy(track.pulse))
             track = self.tracks[key] = Track()
         sample = Sample(at, value, dict(context))
+        screen_reference = sample.context.pop("screen_reference", {})
+        context = sample.context
         pulse = track.pulse
         baseline = None
         threshold = RULES[metric][0][1]
@@ -290,6 +292,9 @@ class PulseDetector:
             if track.anchor and cumulative is not None and abs(value - track.anchor.value) >= cumulative - 1e-9 and self.supported(metric, track.anchor, sample, cumulative) and (baseline is None or abs(value - track.anchor.value) / cumulative > abs(value - baseline.value) / threshold):
                 baseline, threshold = track.anchor, cumulative
         if baseline:
+            old_reference = pulse.get("screen_reference", {}) if pulse else {}
+            if old_reference and finite(old_reference.get("to_at")) and 0 <= at-old_reference["to_at"] <= 300:
+                screen_reference = old_reference
             track.ordinal += 1
             track.episode = track.episode or uuid.uuid4().hex
             ranges = {name: {"min": context[name], "max": context[name]} for name in ("open_spread", "basis") if finite(context.get(name))}
@@ -301,6 +306,7 @@ class PulseDetector:
                          current_at=at, current_context=dict(context), threshold=threshold,
                          state="expanded" if abs(value - baseline.value) >= (1 if metric != "price" else 3) else "watch",
                          policy_version=POLICY_VERSION,
+                         screen_reference=deepcopy(screen_reference),
                          ranges=ranges, version=1, notice_version=1, noticed_at=at, quality="aligned_book" if metric != "basis" else "mark_index")
             track.pulse, track.turning = pulse, None
             track.anchor = None

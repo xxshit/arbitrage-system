@@ -39,6 +39,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from anomaly_streams import AlertStreamHub, Route
 from anomaly_engine import alert_round_ids, pulse_is_actionable
+from alert_screening import DEFAULT_NOTIONAL, okx_contract_unit, pulse_has_watch_peak, screen_pulse
 
 load_dotenv()
 
@@ -1453,6 +1454,16 @@ def valid_book(ask, bid):
         return {"ask": ask, "bid": bid} if ask > 0 and bid > 0 and ask >= bid else None
     except (TypeError, ValueError):
         return None
+
+
+def market_payload_observed_at(url):
+    """Preserve upstream fetch age; reusing a REST cache is not a new quote."""
+    cached = MARKET_PAYLOAD_CACHE.get(url, {})
+    stamp = cached.get("fetched_at")
+    if not isinstance(stamp, (int, float)) or not math.isfinite(stamp):
+        return None
+    age = time.monotonic() - stamp
+    return time.time() - age if age >= 0 else None
 
 
 def refresh_rwa_stock_symbols(instruments):
@@ -3186,6 +3197,15 @@ def register_alert_routes(groups, strategy, isolated=()):
             if spec:
                 spec = dict(spec)
                 transfer = transfers.get((symbol, row["long_exchange"]), {})
+                chains = transfer.get("chains", [])
+                restricted = any(chain.get("deposit_open") is False or chain.get("withdraw_open") is False or chain.get("withdraw_delayed") is True for chain in chains)
+                normal = bool(chains) and all(chain.get("deposit_open") is True and chain.get("withdraw_open") is True and chain.get("withdraw_delayed") is not True for chain in chains)
+                spec.update(metadata_at=time.time(),
+                            long_funding_at=row.get("long_funding_observed_at"),
+                            short_funding_at=row.get("short_funding_observed_at"),
+                            transfer_state=("restricted" if restricted else "normal" if normal else "unknown") if transfer.get("state") == "fresh" else "unknown",
+                            long_funding=row.get("long_funding_rate"), short_funding=row.get("funding_rate") if strategy == "spot_futures" else row.get("short_funding_rate"),
+                            long_interval=row.get("long_funding_interval_hours"), short_interval=row.get("funding_interval_hours") if strategy == "spot_futures" else row.get("short_funding_interval_hours"))
                 if transfer.get("state") == "fresh" and any(chain.get("deposit_open") is False or chain.get("withdraw_open") is False for chain in transfer.get("chains", [])):
                     spec["divergence_threshold"] = 5
                 routes.append(Route((strategy, symbol, row["long_exchange"], "Binance" if strategy == "spot_futures" else row["short_exchange"]), **spec))
@@ -3445,6 +3465,7 @@ def spot_futures_snapshot():
             stream_symbol = raw_spot_symbol[:-4] + "_USDT" if exchange == "Gate" else raw_spot_symbol
             rows[-1]["alert_stream_route"] = dict(long_key=(feed, stream_symbol), short_key=("bn_future", symbol),
                                                   long_factor=price_factor, short_factor=1, mark_key=("bn_mark", symbol))
+            rows[-1]["short_funding_observed_at"] = market_payload_observed_at("https://fapi.binance.com/fapi/v1/premiumIndex")
         if rows:
             for row in rows:
                 row.update(mark_price=float(funding_item["markPrice"]), index_price=float(funding_item["indexPrice"]))
@@ -3539,6 +3560,7 @@ def dual_futures_snapshot():
             continue
         bybit[symbol] = {**book, "mark": float(item.get("markPrice", 0) or 0), "index": float(item.get("indexPrice", 0) or 0), "volume": float(item.get("turnover24h", 0) or 0), "open_interest": float(item.get("openInterestValue", 0) or 0), "funding_rate": float(item.get("fundingRate", 0) or 0) * 100, "funding_interval_hours": bybit_intervals.get(symbol, 8), "next_funding_time": format_funding_time(item.get("nextFundingTime"))}
 
+    okx_units = {item.get("instId"): okx_contract_unit(item) for item in results["okx_instruments"].get("data", [])}
     okx_allowed = {
         item.get("instId") for item in results["okx_instruments"].get("data", [])
         if item.get("state") == "live" and item.get("settleCcy") == "USDT" and item.get("instId", "").endswith("-USDT-SWAP")
@@ -3555,11 +3577,16 @@ def dual_futures_snapshot():
         symbol = inst_id.replace("-", "").replace("SWAP", "")
         cached_funding = OKX_FUNDING_CACHE.get(inst_id, {})
         mark_price = okx_marks.get(inst_id)
-        okx[symbol] = {**book, "mark": mark_price, "index": okx_indexes.get(inst_id.replace("-SWAP", "").replace("-", "")), "volume": okx_turnover_usd(item, mark_price), "open_interest": okx_open_interest.get(inst_id), "funding_rate": cached_funding.get("funding_rate"), "funding_interval_hours": cached_funding.get("funding_interval_hours"), "next_funding_time": cached_funding.get("next_funding_time"), "okx_inst_id": inst_id}
+        okx[symbol] = {**book, "mark": mark_price, "index": okx_indexes.get(inst_id.replace("-SWAP", "").replace("-", "")), "volume": okx_turnover_usd(item, mark_price), "open_interest": okx_open_interest.get(inst_id), "funding_rate": cached_funding.get("funding_rate"), "funding_interval_hours": cached_funding.get("funding_interval_hours"), "next_funding_time": cached_funding.get("next_funding_time"), "okx_inst_id": inst_id, "book_qty_unit": okx_units.get(inst_id)}
     refresh_okx_funding([item["okx_inst_id"] for item in okx.values()])
     for contract in okx.values():
         cached_funding = OKX_FUNDING_CACHE.get(contract["okx_inst_id"], {})
         contract.update({key: cached_funding.get(key) for key in ("funding_rate", "funding_interval_hours", "next_funding_time")})
+        contract["funding_observed_at"] = cached_funding.get("updated_at")
+    for contract in binance.values():
+        contract["funding_observed_at"] = market_payload_observed_at(urls["binance_funding"])
+    for contract in bybit.values():
+        contract["funding_observed_at"] = market_payload_observed_at(urls["bybit_tickers"])
 
     alias_rows = symbol_alias_rows()
     contracts = {
@@ -3594,6 +3621,7 @@ def dual_futures_snapshot():
                 "long_open_interest": long_contract.get("open_interest"), "short_open_interest": short_contract.get("open_interest"),
                 "funding_difference": None,
                 "long_funding_rate": long_funding, "short_funding_rate": short_funding,
+                "long_funding_observed_at": long_contract.get("funding_observed_at"), "short_funding_observed_at": short_contract.get("funding_observed_at"),
                 "long_funding_interval_hours": long_contract.get("funding_interval_hours"), "short_funding_interval_hours": short_contract.get("funding_interval_hours"),
                 "long_next_funding_time": long_contract.get("next_funding_time"), "short_next_funding_time": short_contract.get("next_funding_time"),
                 "open_spread": (short_contract["bid"] - long_contract["ask"]) / long_contract["ask"] * 100,
@@ -3605,6 +3633,8 @@ def dual_futures_snapshot():
             bn_contract = long_contract if long_exchange == "Binance" else short_contract if short_exchange == "Binance" else None
             rows[-1]["alert_stream_route"] = dict(long_key=stream_key(long_exchange, long_contract), short_key=stream_key(short_exchange, short_contract),
                                                   long_factor=1 / long_contract["alias_multiplier"], short_factor=1 / short_contract["alias_multiplier"],
+                                                  long_qty_factor=long_contract.get("book_qty_unit") if long_exchange == "OKX" else 1,
+                                                  short_qty_factor=short_contract.get("book_qty_unit") if short_exchange == "OKX" else 1,
                                                   mark_key=("bn_mark", bn_contract["source_symbol"]) if bn_contract else None)
         if rows:
             groups.append({"symbol": pair_slash(symbol), "rows": rows})
@@ -12582,11 +12612,13 @@ def alert_pulse_read_payload(evidence, *, qualified_only=False):
     """Retain only UI/range fields after one parse; full evidence stays in DB."""
     fields = ("id", "episode", "ordinal", "metric", "direction", "baseline", "baseline_at",
               "triggered_at", "peak", "peak_at", "current", "current_at", "state",
-              "retrace_at", "ended_at", "quality", "notice_version", "noticed_at", "ranges")
+              "retrace_at", "ended_at", "quality", "notice_version", "noticed_at", "ranges", "path", "screen_reference")
     parsed = json.loads(evidence)
     if qualified_only and not pulse_is_actionable(parsed):
         return None
-    return {key: parsed[key] for key in fields if parsed.get(key) is not None}
+    compact = {key: parsed[key] for key in fields if parsed.get(key) is not None}
+    compact["peak_close"] = parsed.get("peak_context", {}).get("close_spread")
+    return compact
 
 
 @app.get("/api/alerts")
@@ -12598,6 +12630,12 @@ def alerts():
         return jsonify(ALERT_STREAM_HUB.status())
     if view not in {"legacy", "summary", "detail"}:
         return jsonify({"error": "无效的报警查询类型"}), 400
+    try:
+        notional = float(request.args.get("notional", DEFAULT_NOTIONAL))
+        if not math.isfinite(notional) or not 100 <= notional <= 1_000_000:
+            raise ValueError("invalid amount")
+    except (ValueError, TypeError):
+        return jsonify({"error": "参考金额须为100至1,000,000 USDT"}), 400
     query = AlertEvent.query.filter(AlertEvent.created_at >= window_start, AlertEvent.created_at <= now)
     # 旧版拉升报警没有连续采样确认凭证，不能再作为可靠信号展示。
     query = query.filter(or_(AlertEvent.alert_type == "basis_threshold", AlertEvent.alert_type.startswith("rapid_", autoescape=True), AlertEvent.message.contains("确认后的")))
@@ -12631,7 +12669,12 @@ def alerts():
     for episode in episodes:
         by_path.setdefault(spot_divergence_key(episode.symbol, episode.long_exchange, episode.short_exchange), []).append(episode)
     isolated = [item for item in episodes if item.resolved_at is None]
-    all_events = [item for item in query.order_by(AlertEvent.created_at.desc(), AlertEvent.id.desc()).all() if not is_rwa_stock_pair(item.symbol) and not alert_is_divergent(item, by_path)]
+    # Read immutable scalar rows rather than 40k+ ORM entities/identity-map
+    # entries per concurrent polling request. History and ordering are intact.
+    columns = (AlertEvent.id, AlertEvent.symbol, AlertEvent.strategy, AlertEvent.alert_type,
+               AlertEvent.message, AlertEvent.open_spread, AlertEvent.close_spread, AlertEvent.basis,
+               AlertEvent.funding_rate, AlertEvent.created_at, AlertEvent.long_exchange, AlertEvent.short_exchange)
+    all_events = [item for item in query.with_entities(*columns).order_by(AlertEvent.created_at.desc(), AlertEvent.id.desc()).yield_per(500) if not is_rwa_stock_pair(item.symbol) and not alert_is_divergent(item, by_path)]
     pulse_rows = AlertPulse.query.join(AlertEvent, AlertPulse.alert_event_id == AlertEvent.id).filter(AlertEvent.created_at >= window_start, AlertEvent.created_at <= now)
     if view == "detail":
         pulse_rows = pulse_rows.filter(AlertEvent.symbol == symbol)
@@ -12646,8 +12689,30 @@ def alerts():
         grouped_events.setdefault(item.symbol, []).append(item)
     def notice_epoch(item):
         return pulses.get(item.id, {}).get("noticed_at", item.created_at.replace(tzinfo=timezone.utc).timestamp())
-    latest_events = [max(items, key=notice_epoch) for items in grouped_events.values()]
-    active_events = [item for item in latest_events if 0 <= now.replace(tzinfo=timezone.utc).timestamp() - notice_epoch(item) <= 120]
+    screening_now = time.time()
+    paths = {tuple(pulse["path"]) for pulse in pulses.values() if pulse and pulse.get("path")}
+    live_quotes = ALERT_STREAM_HUB.screening_quotes(paths, screening_now)
+    attention = {item.id: screen_pulse(pulses[item.id], live_quotes.get(tuple(pulses[item.id].get("path", []))), screening_now, notional)
+                 if pulses.get(item.id) else {"tier": "record", "reason": "历史记录，未核验当前盘口", "live": False}
+                 for item in all_events}
+    def priority(item):
+        assessment = attention[item.id]
+        return ({"candidate": 2, "watch": 1}.get(assessment["tier"], 0), assessment.get("net_edge") or 0, notice_epoch(item))
+    active_events = []
+    for items in grouped_events.values():
+        active = []
+        for item in items:
+            assessment, pulse = attention[item.id], pulses.get(item.id)
+            age = screening_now-notice_epoch(item)
+            if assessment["live"] and (assessment["tier"] == "candidate" or 0 <= age <= 120):
+                active.append(item)
+            elif pulse and pulse.get("state") == "retraced" and not pulse.get("ended_at") and 0 <= age <= 30 and pulse_has_watch_peak(pulse):
+                # A whole spike can happen between two page polls. Retain one
+                # SILENT phase notice, explicitly not a currently open entry.
+                attention[item.id] = {**assessment, "transient": True, "reason": "冲击已回落，非当前机会"}
+                active.append(item)
+        if active:
+            active_events.append(max(active, key=priority))
     tracking = [item for item in BasisTracking.query.filter_by(resolved_at=None).order_by(BasisTracking.max_abs_basis.desc()).limit(50).all() if not is_rwa_stock_pair(item.symbol)] if view != "detail" else []
     if isolated and tracking:
         isolated_keys = {spot_divergence_key(item.symbol, item.long_exchange, item.short_exchange) for item in isolated}
@@ -12730,7 +12795,12 @@ def alerts():
             if pulse.get("ordinal", 1) > 1:
                 phase = "restart:" + phase
             notice_key = f"{round_ids[item.id]}:{phase}"
-        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "pulse": pulse, "round_id": round_ids[item.id], "notice_key": notice_key, "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int(120 - (now.replace(tzinfo=timezone.utc).timestamp() - notice_epoch(item)))), **alert_context(item)}
+        assessment = attention[item.id]
+        # Candidate promotion is a different notice from early observation;
+        # falling out and back in at the same stage must not ring repeatedly.
+        if notice_key:
+            notice_key += ":" + assessment["tier"]
+        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "pulse": pulse, "round_id": round_ids[item.id], "notice_key": notice_key, "attention": assessment, "audible": assessment["tier"] == "candidate" and assessment["live"], "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int((30 if assessment.get("transient") else 120) - (screening_now - notice_epoch(item)))), **alert_context(item)}
 
     if view == "detail":
         filtered = [item for item in all_events if (not selected_strategy or alert_context(item)["strategy"] == selected_strategy) and (selected_path is None or path_key(item) == selected_path)]
@@ -12766,9 +12836,10 @@ def alerts():
         paths = []
         for key, samples in path_items.items():
             context = alert_context(samples[0])
-            paths.append({"id": key, **context, "alert_count": len({round_ids[item.id] for item in samples}), "observation_count": len(samples), "latest": event_payload(samples[0]), "value_ranges": value_ranges(samples), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
+            paths.append({"id": key, **context, "attention": attention[max(samples, key=priority).id], "alert_count": len({round_ids[item.id] for item in samples}), "observation_count": len(samples), "latest": event_payload(samples[0]), "value_ranges": value_ranges(samples), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
         return {
             "symbol": symbol,
+            "attention": attention[max(items, key=priority).id],
             "latest": latest,
             "first_at": items[-1].created_at.strftime("%m-%d %H:%M:%S"),
             "alert_count": len({round_ids[item.id] for item in items}),
@@ -12790,6 +12861,7 @@ def alerts():
         "checked_at_epoch": time.time(),
         "realtime": ALERT_STREAM_HUB.status(),
         "window_hours": 24,
+        "screening": {"notional": notional, "min_net_edge": .30, "version": 3},
         "total_symbols": len(grouped_events),
         "total_alerts": len(set(round_ids.values())),
         "total_observations": len(all_events),

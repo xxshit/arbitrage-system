@@ -43,7 +43,9 @@
     timeline.forEach(item=>{item.binance_basis=item.short_exchange==='Binance'?item.basis:null;item.basis_exchange=item.binance_basis===null?null:'Binance'});
     const buckets=new Map();timeline.forEach(item=>{if(!buckets.has(item.path_id))buckets.set(item.path_id,[]);buckets.get(item.path_id).push(item)});
     const paths=[...buckets].map(([id,items])=>({id,strategy:items[0].strategy,long_exchange:items[0].long_exchange,short_exchange:items[0].short_exchange,long_market:items[0].long_market,short_market:'合约',alert_count:items.length,latest:items[0],basis_exchange:items[0].basis_exchange,value_ranges:Object.fromEntries(['open_spread','basis'].map(field=>{const values=items.map(item=>field==='basis'?item.binance_basis:item[field]).filter(value=>value!==null);return [field,{max:values.length?Math.max(...values):null,min:values.length?Math.min(...values):null}]}))}));
-    return {symbol,alert_count:timeline.length,latest:timeline[0],timeline,move_peaks,value_ranges,basis_exchange:'Binance',transfer_statuses,paths};
+    const attention={tier:index<2?'candidate':index<4?'watch':'record',live:index<4,reason:index<2?'合成条件候选，非真实信号':index<4?'首档深度不足参考金额':'仅异动记录',notional:1000,net_edge:index<2?.48:null};
+    paths.forEach(path=>path.attention=attention);timeline[0].attention=attention;timeline[0].audible=false;
+    return {symbol,alert_count:timeline.length,latest:timeline[0],timeline,move_peaks,value_ranges,basis_exchange:'Binance',transfer_statuses,paths,attention};
   });
   const plans = symbols.slice(0,2).map((symbol,index) => ({id:index+1,symbol,direction:index?'short':'long',status:'open',horizon:'short',pnl:1.8,
     leverage:1,entry_price:1.23,current_price:1.25,stop_price:1.16,take_profit_1:1.35,take_profit_2:1.42,max_hold_minutes:60,thesis:'合成样本，用于检查长说明、多腿数值和详细记录的布局。'}));

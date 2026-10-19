@@ -206,9 +206,10 @@ class AlertHistoryTests(unittest.TestCase):
         self.assertEqual(coin["observation_count"], 2)
         self.assertEqual(coin["move_peaks"]["open_spread"], 1.02)
         self.assertEqual(coin["paths"][0]["value_ranges"]["open_spread"], {"max": 1.02, "min": .1})
-        self.assertEqual(data["active_events"][0]["pulse"]["ordinal"], 2)
-        self.assertTrue(data["active_events"][0]["notice_key"].endswith(":restart:start"))
+        self.assertEqual(data["active_events"], [])  # no baseline/size evidence: history only
         detail = self.get(view="detail", symbol="DEMO/USDT")["items"]
+        self.assertEqual(detail[0]["pulse"]["ordinal"], 2)
+        self.assertTrue(detail[0]["notice_key"].endswith(":restart:start:record"))
         self.assertEqual(detail[1]["pulse"]["state"], "retraced")
         self.assertEqual(detail[1]["pulse"]["peak"], 1.02)
         self.assertNotEqual(detail[0]["notice_key"], detail[1]["notice_key"])
@@ -236,7 +237,7 @@ class AlertHistoryTests(unittest.TestCase):
             module.persist_alert_pulses(pulses)
         data = self.get(view="summary")
         self.assertEqual([item["symbol"] for item in data["events"]], ["REAL/USDT"])
-        self.assertEqual([item["symbol"] for item in data["active_events"]], ["REAL/USDT"])
+        self.assertEqual(data["active_events"], [])  # old peak retained, no invented screening baseline
         self.assertEqual(self.get(view="detail", symbol="NOISE/USDT")["total"], 0)
         self.assertEqual(self.get(view="detail", symbol="REAL/USDT")["items"][0]["pulse"]["peak"], 1.02)
         with module.app.app_context():
@@ -270,11 +271,80 @@ class AlertHistoryTests(unittest.TestCase):
         empty = self.get(view="detail", symbol="NONE/USDT")
         self.assertEqual((empty["items"], empty["total"], empty["pages"], empty["page"]), ([], 0, 1, 1))
 
-    def test_active_events_keep_120_second_lifetime_and_existing_latest_per_coin_rule(self):
+    def test_legacy_events_are_history_not_unverified_current_entries(self):
         self.insert([self.event("LIVE/USDT", created_at=self.now - timedelta(seconds=120)), self.event("EXPIRED/USDT", created_at=self.now - timedelta(seconds=121)), self.event("LIVE/USDT", created_at=self.now - timedelta(hours=1))])
         data = self.get(view="summary")
-        self.assertEqual([item["symbol"] for item in data["active_events"]], ["LIVE/USDT"])
-        self.assertEqual(data["active_events"][0]["remaining_seconds"], 0)
+        self.assertEqual(data["active_events"], [])
+        self.assertEqual(data["total_symbols"], 2)
+        self.assertTrue(all(group["attention"]["tier"] == "record" for group in data["events"]))
+
+    def screening_pulses(self, retraced=False, other_path=False):
+        from tests.test_alert_screening import reference
+        engine, updates = PulseDetector(), {}
+        epoch = self.now.replace(tzinfo=timezone.utc).timestamp()
+        screen_clock = patch.object(module.time, "time", return_value=epoch)
+        screen_clock.start()
+        self.addCleanup(screen_clock.stop)
+        for venue, values in [("Gate", (0, 1.5, .1) if retraced else (0, 1.5))] + ([("Bitget", (-.8, .01))] if other_path else []):
+            for index, value in enumerate(values):
+                context = dict(open_spread=value, close_spread=value+.04, mid_spread=value+.02,
+                               basis=0, funding_rate=.01, screen_reference={**reference(), "to_at":epoch-20, "from_at":epoch-100})
+                for pulse in engine.observe(("spot_futures", "DEMO/USDT", venue, "Binance"), "spread", value, epoch-3+index, context):
+                    updates[pulse["id"]] = pulse
+        with module.app.app_context():
+            module.persist_alert_pulses(list(updates.values()))
+        return epoch
+
+    def test_current_candidate_cost_and_amount_recheck_without_any_history_mutation(self):
+        from tests.test_alert_screening import quotes, PATH
+        epoch = self.screening_pulses()
+        live = quotes(quantity=20, long_at=epoch, short_at=epoch, metadata_at=epoch)
+        with patch.object(module.ALERT_STREAM_HUB, "screening_quotes", return_value={PATH: live}):
+            data = self.get(view="summary")
+            self.assertEqual(data["events"][0]["attention"]["tier"], "candidate")
+            self.assertTrue(data["active_events"][0]["audible"])
+            self.assertEqual(self.get(view="summary", notional=2000)["events"][0]["attention"]["tier"], "watch")
+            live["short"]["bid"] = 100.08
+            live["short"]["ask"] = 100.09
+            narrowed = self.get(view="summary")
+            self.assertEqual(narrowed["active_events"], [])
+            self.assertEqual(narrowed["events"][0]["attention"]["tier"], "record")
+            self.assertEqual(narrowed["events"][0]["value_ranges"]["open_spread"]["max"], 1.5)
+        with module.app.app_context():
+            self.assertEqual(module.AlertEvent.query.count(), 1)
+            self.assertEqual(module.AlertPulse.query.count(), 1)
+
+    def test_strong_path_is_not_hidden_by_later_narrowing_on_another_exchange(self):
+        from tests.test_alert_screening import quotes, PATH
+        epoch = self.screening_pulses(other_path=True)
+        good = quotes(long_at=epoch, short_at=epoch, metadata_at=epoch)
+        weak = quotes(.01, long_at=epoch, short_at=epoch, metadata_at=epoch)
+        with patch.object(module.ALERT_STREAM_HUB, "screening_quotes", return_value={PATH:good, ("spot_futures", "DEMO/USDT", "Bitget", "Binance"):weak}):
+            data = self.get(view="summary")
+        self.assertEqual(len(data["active_events"]), 1)
+        self.assertEqual(data["active_events"][0]["long_exchange"], "Gate")
+        paths = {path["long_exchange"]:path for path in data["events"][0]["paths"]}
+        self.assertEqual(paths["Gate"]["attention"]["tier"], "candidate")
+        self.assertEqual(paths["Bitget"]["attention"]["tier"], "record")
+
+    def test_whole_spike_between_polls_is_silent_phase_notice_not_current_candidate(self):
+        self.screening_pulses(retraced=True)
+        data = self.get(view="summary")
+        self.assertEqual(len(data["active_events"]), 1)
+        event = data["active_events"][0]
+        self.assertEqual(event["pulse"]["peak"], 1.5)
+        self.assertTrue(event["attention"]["transient"])
+        self.assertFalse(event["audible"])
+        self.assertFalse(event["attention"]["live"])
+
+    def test_bad_notional_is_rejected_without_writes(self):
+        for value in ("NaN", "inf", "0", "99", "1000001", "hello"):
+            self.assertEqual(self.client.get("/api/alerts", query_string={"view":"summary", "notional":value}).status_code, 400)
+
+    def test_cached_funding_preserves_original_age_instead_of_becoming_fresh_on_reuse(self):
+        with patch.dict(module.MARKET_PAYLOAD_CACHE, {"synthetic": {"fetched_at":100}}, clear=True), patch.object(module.time, "monotonic", return_value=900), patch.object(module.time, "time", return_value=2000):
+            self.assertEqual(module.market_payload_observed_at("synthetic"), 1200)
+            self.assertIsNone(module.market_payload_observed_at("absent"))
 
     def test_summary_has_current_wallet_status_for_all_distinct_path_exchanges(self):
         self.insert([self.event(message="Gate 确认后的报警"), self.event(message="Bitget 确认后的报警"), self.event(strategy="futures_futures", long_exchange="Bybit", short_exchange="Binance")])

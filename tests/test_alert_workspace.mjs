@@ -24,7 +24,7 @@ function harness(fetcher=async url=>{const params=new URL(url,'https://example.t
   const context={URLSearchParams,console,clearTimeout(){},window:{innerWidth:1280},byId:node,escapeChatHtml:escape,delistingSymbolClass:()=>'',changeClass:value=>value<0?'negative':'positive',percent:value=>(value>=0?'+':'')+Number(value).toFixed(4)+'%',intervalClass:()=>'',exchangeName:escape,fetchRefreshJson:fetcher,renderTipsItems(){},
     replaceHtmlKeepingExchangeLogos:(target,markup)=>{if(target.innerHTML!==markup)target.innerHTML=markup}};
   vm.createContext(context);
-  vm.runInContext("let mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+exchangeHelpers+'\n'+transferHelpers+'\n'+helpers+'\n'+functions,context);
+  vm.runInContext("let mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertScope='history',alertNotional=1000,alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+exchangeHelpers+'\n'+transferHelpers+'\n'+helpers+'\n'+functions,context);
   return {context,node,scroll,transferScroll,run:code=>vm.runInContext(code,context)};
 }
 
@@ -104,6 +104,54 @@ test('all 168 coins are rendered without an 80-coin list or viewport limit',()=>
   assert.equal(h.node('alertTotalSymbols').textContent,168);assert.equal(h.node('alertTotalEvents').textContent,504);
 });
 
+test('default candidate scope is separate from watch and uncapped 24h history',()=>{
+  const h=harness(),candidate={...group('GOOD/USDT'),attention:{tier:'candidate',live:true,net_edge:.5}},watch={...group('EARLY/USDT'),attention:{tier:'watch',live:true}},old=group('OLD/USDT');
+  h.run("alertScope='candidate'");h.context.renderAlertMasterDetail([old,watch,candidate]);
+  assert.deepEqual(Array.from(h.context.visibleAlertGroups(),g=>g.symbol),['GOOD/USDT']);
+  assert.equal(h.run('selectedAlertSymbol'),'GOOD/USDT');
+  h.context.setAlertScope('watch');assert.equal(h.context.visibleAlertGroups()[0].symbol,'EARLY/USDT');
+  h.context.setAlertScope('history');assert.equal(h.context.visibleAlertGroups().length,3);
+  assert.ok(source.includes("let alertScope = 'candidate'"));
+});
+
+test('no qualifying candidate is honestly empty and does not hide history',()=>{
+  const h=harness();h.run("alertScope='candidate'");h.context.renderAlertMasterDetail([group()]);
+  assert.equal(h.context.visibleAlertGroups().length,0);assert.equal(h.run('selectedAlertSymbol'),'');
+  assert.ok(h.node('alertSymbolList').innerHTML.includes('暂无通过成本与深度筛选'));
+  h.context.setAlertScope('history');assert.equal(h.context.visibleAlertGroups().length,1);
+});
+
+test('candidate detail starts on qualifying path and does not borrow another path status',()=>{
+  const h=harness(),coin=group();coin.attention={tier:'candidate',live:true};
+  coin.paths[0].attention={tier:'record',live:false,reason:'仅异动记录'};
+  coin.paths.push({...coin.paths[0],id:pathKey('spot_futures','Bitget'),long_exchange:'Bitget',attention:{tier:'candidate',live:true,net_edge:.51,reason:'条件候选'}});
+  h.run("alertScope='candidate'");h.context.renderAlertMasterDetail([coin]);
+  assert.equal(h.run('alertDetailState.pathId'),pathKey('spot_futures','Bitget'));
+  assert.ok(h.node('alertDetailPane').innerHTML.includes('估算净空间 +0.51%'));
+  h.context.setAlertPath(pathKey());assert.ok(!h.node('alertDetailPane').innerHTML.includes('估算净空间 +0.51%'));
+});
+
+test('clearing failed live checks preserves history but removes actionable status and tips',()=>{
+  const h=harness(),coin={...group(),attention:{tier:'candidate',live:true}};h.context.renderAlertMasterDetail([coin]);
+  h.context.clearAlertCurrent('行情读取失败');
+  assert.equal(h.run('latestAlertGroups.length'),1);assert.equal(h.run('latestAlertGroups[0].attention.live'),false);
+  assert.equal(h.run('latestActiveAlertEvents.length'),0);assert.equal(h.node('tipsCount').textContent,0);
+});
+
+test('model assumptions are compact and escaped, reversal never silently changes history path',()=>{
+  const h=harness(),markup=h.context.alertAttentionMarkup({tier:'candidate',net_edge:.3333,notional:1000,reason:'<img src=x>',direction:'reverse',long_exchange:'Binance',short_exchange:'Bybit'});
+  assert.ok(!markup.includes('<img src=x>'));assert.ok(markup.includes('反向：Binance多 → Bybit空'));
+  for(const text of ['+0.33%','50%','非保证回归','四笔','8小时'])assert.ok(markup.includes(text));
+});
+
+test('amount changes cannot reuse an old in-flight detail response',async()=>{
+  const pending=[],h=harness(()=>new Promise(resolve=>pending.push(resolve)));
+  h.context.renderAlertMasterDetail([group()]);const first=h.context.loadSelectedAlertHistory();
+  h.run('alertNotional=2000');const second=h.context.loadSelectedAlertHistory();assert.equal(pending.length,2);
+  pending[1](detail());await second;pending[0]({...detail(),page:99});await first;
+  assert.equal(h.run('alertDetailState.data.page'),1);
+});
+
 test('coin search normalizes case and separators and supports existing Chinese coin names',()=>{
   const h=harness();h.context.renderAlertMasterDetail([group(),group('哈基米/USDT')]);
   h.context.filterAlertSymbols('demo-usdt');assert.equal(h.context.visibleAlertGroups().length,1);assert.ok(h.node('alertRosterCount').textContent.includes('1 / 2'));
@@ -180,7 +228,7 @@ test('the roster and details have separate keyboard-scrollable containers and co
   assert.ok(css.includes('.alert-symbol-list {display:block;flex:1 1 auto;min-height:0'));assert.ok(css.includes('.alert-timeline-scroll {min-height:0;flex:1 1 auto;overflow:auto'));
   assert.ok(css.includes('min-height:39px'));assert.equal((source.match(/function renderAlertMasterDetail\(/g)||[]).length,1);
   assert.ok(css.includes('grid-template-columns:minmax(345px,390px) minmax(0,1fr)!important'));
-  assert.ok(source.includes("fetchRefreshJson('/api/alerts?view=summary')"));
+  assert.ok(source.includes('fetchRefreshJson(`/api/alerts?view=summary&notional=${requestedNotional}`)'));
 });
 
 test('sticky roster header shares the data scroll gutter, grid and horizontal padding',()=>{

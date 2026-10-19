@@ -89,7 +89,84 @@ class ShardTests(unittest.TestCase):
         self.assertNotIn(('gate', 'X'), hub.books)
 
 
+class FreshnessDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        self.hub = AlertStreamHub()
+        self.path = ('spot_futures', 'DEMO/USDT', 'Gate', 'Binance')
+        self.route = Route(self.path, ('gate', 'DEMO_USDT'), ('bn_future', 'DEMOUSDT'), mark_key=('bn_mark', 'DEMOUSDT'))
+        self.hub.register('spot_futures', [self.route])
+
+    def book(self, feed, at):
+        symbol = 'DEMO_USDT' if feed == 'gate' else 'DEMOUSDT'
+        self.hub.ingest(feed, dict(symbol=symbol, bid=100, ask=100.01, bid_qty=20, ask_qty=20, at=at), at)
+
+    def test_recent_evaluation_does_not_make_an_old_leg_fresh(self):
+        self.book('gate', 1000)
+        self.book('bn_future', 1002)
+        self.assertEqual(self.hub.fresh[self.path], 1002)
+        status = self.hub.status(1004.01)
+        self.assertEqual(status['fresh_paths'], 0)
+        self.assertEqual(status['path_quality'], {'stale_quote':1})
+        self.assertEqual(status['unfresh_samples'][0]['issues'][0]['feed'], 'gate')
+        self.assertEqual(status['unfresh_samples'][0]['issues'][0]['age_seconds'], 4.01)
+
+    def test_fresh_but_unsynchronized_legs_are_separate_from_stale_quotes(self):
+        self.book('gate', 1000)
+        self.book('bn_future', 1003)
+        status = self.hub.status(1003)
+        self.assertEqual(status['path_quality'], {'leg_skew':1})
+        self.assertEqual(status['unfresh_samples'][0]['skew_seconds'], 3)
+        self.assertEqual(status['unfresh_samples'][0]['issues'], [])
+
+    def test_quiet_symbol_is_not_mislabeled_as_a_lagging_entire_source(self):
+        worker = PublicWorker('gate', ('DEMO_USDT',), self.hub)
+        worker.connected, worker.last_message, worker.last_source_at = True, 1006, 1006
+        self.hub.workers[('gate', 0)] = worker
+        self.hub.owners[self.route.long_key] = worker
+        self.hub.ingest('gate', dict(symbol='DEMO_USDT',bid=100,ask=100.01,bid_qty=20,ask_qty=20,at=1000),1000,owner=worker)
+        self.book('bn_future', 1006)
+        status = self.hub.status(1006)
+        self.assertEqual(status['unfresh_samples'][0]['issues'][0]['reason'], 'symbol_quote_quiet')
+        worker.last_source_at = 1000
+        self.assertEqual(self.hub.status(1006)['unfresh_samples'][0]['issues'][0]['reason'], 'source_lag')
+        worker.connected = False
+        self.assertEqual(self.hub.status(1006)['unfresh_samples'][0]['issues'][0]['reason'], 'disconnected')
+
+    def test_health_has_exact_causes_and_does_not_mutate_detection(self):
+        self.assertEqual(self.hub.status(1000)['path_quality'], {'missing_quote':1})
+        self.book('gate', 1000); self.book('bn_future', 1000)
+        tracks = dict(self.hub.detector.tracks)
+        self.assertEqual(self.hub.status(1000)['path_quality'], {'fresh':1})
+        self.assertEqual(self.hub.status(1000)['fresh_paths'], 1)
+        self.assertEqual(self.hub.detector.tracks, tracks)
+        self.assertFalse(self.hub.pending)
+
+
 class AsyncTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_disconnect_invalidates_books_before_slow_close_handshake(self):
+        from unittest.mock import AsyncMock
+        hub = AlertStreamHub()
+        route = Route(('spot_futures','X/USDT','Gate','Binance'), ('gate','X_USDT'), ('bn_future','XUSDT'))
+        hub.register('spot_futures', [route])
+        worker = PublicWorker('gate', ('X_USDT',), hub)
+        hub.owners[route.long_key] = worker
+        hub.books[route.long_key] = dict(at=time.time(),bid=1,ask=1.01,bid_qty=1,ask_qty=1)
+        closing = asyncio.Event()
+        async def slow_close():
+            closing.set()
+            await asyncio.Event().wait()
+        socket = AsyncMock()
+        socket.recv.return_value = '{"event":"error"}'
+        socket.close.side_effect = slow_close
+        with patch('websockets.asyncio.client.connect', new=AsyncMock(return_value=socket)):
+            task = asyncio.create_task(worker.run())
+            await asyncio.wait_for(closing.wait(), 1)
+            self.assertNotIn(route.long_key, hub.books)
+            self.assertFalse(worker.connected)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
     async def test_real_compressed_socket_preserves_spike_retrace_and_restart_order(self):
         from websockets.asyncio.server import serve
         hub = AlertStreamHub()
@@ -139,5 +216,5 @@ class AsyncTransportTests(unittest.IsolatedAsyncioTestCase):
             hub._start_worker(PublicWorker('gate',('X',),hub))
             hub._start_worker(PublicWorker('gate',('Y',),hub))
             self.assertEqual(thread.call_count,1)
-            self.assertEqual(schedule.call_count,2)
+            self.assertEqual(schedule.call_count,3)  # two sockets + one loop-delay observer
             hub.loop.close()

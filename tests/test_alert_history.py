@@ -220,6 +220,63 @@ class AlertHistoryTests(unittest.TestCase):
         self.assertEqual(detail[0]["pulse"]["baseline"], .1)
         self.assertNotIn("trigger_context", detail[0]["pulse"])
 
+    def test_committed_projection_reuses_history_and_updates_within_same_second(self):
+        self.screening_pulses()
+        with patch.object(module, 'alert_pulse_read_payload', wraps=module.alert_pulse_read_payload) as decode:
+            self.get(view='summary')
+            self.assertEqual(decode.call_count, 1)
+            self.get(view='summary')
+            self.get(view='detail', symbol='DEMO/USDT')
+            self.assertEqual(decode.call_count, 1)
+            with module.app.app_context():
+                row = module.AlertPulse.query.one()
+                payload = json.loads(row.evidence_json)
+                payload['peak'] = 2.5
+                payload['ranges']['open_spread']['max'] = 2.5
+                row.evidence_json = json.dumps(payload)
+                # Deliberately leave updated_at unchanged: MySQL seconds are
+                # insufficient to identify successive commits in one second.
+                module.db.session.commit()
+            self.assertEqual(self.get(view='summary')['events'][0]['value_ranges']['open_spread']['max'], 2.5)
+            self.assertEqual(decode.call_count, 2)
+
+    def test_projection_respects_rollback_bulk_change_and_schema_reset(self):
+        self.insert([self.event(open_spread=1)])
+        self.assertEqual(self.get(view='summary')['events'][0]['move_peaks']['open_spread'], 1)
+        with module.app.app_context():
+            row = module.AlertEvent.query.one()
+            row.open_spread = 9
+            module.db.session.flush()
+            module.db.session.rollback()
+        self.assertEqual(self.get(view='summary')['events'][0]['move_peaks']['open_spread'], 1)
+        with module.app.app_context():
+            module.AlertEvent.query.update({module.AlertEvent.open_spread: 3}, synchronize_session=False)
+            module.db.session.commit()
+        self.assertEqual(self.get(view='summary')['events'][0]['move_peaks']['open_spread'], 3)
+        with module.app.app_context():
+            module.AlertEvent.query.delete(synchronize_session=False)
+            module.db.session.commit()
+        self.assertEqual(self.get(view='summary')['total_observations'], 0)
+
+    def test_nested_transaction_only_publishes_after_outer_commit(self):
+        self.insert([self.event(open_spread=1)])
+        self.get(view='summary')
+        with module.app.app_context():
+            with module.db.session.begin_nested():
+                module.AlertEvent.query.one().open_spread = 4
+            self.assertFalse(module.ALERT_HISTORY_INDEX.dirty)
+            module.db.session.commit()
+        self.assertEqual(self.get(view='summary')['events'][0]['move_peaks']['open_spread'], 4)
+
+    def test_projection_does_not_cache_quarantine_or_rwa_decisions(self):
+        self.insert([self.event()])
+        self.assertEqual(self.get(view='summary')['total_symbols'], 1)
+        with patch.object(module, 'is_rwa_stock_pair', return_value=True):
+            self.assertEqual(self.get(view='summary')['total_symbols'], 0)
+        with patch.object(module, 'alert_is_divergent', return_value=True):
+            self.assertEqual(self.get(view='summary')['total_symbols'], 0)
+        self.assertEqual(self.get(view='summary')['total_symbols'], 1)
+
     def test_tied_timestamps_have_stable_id_order_and_page_bounds(self):
         self.insert([self.event() for _ in range(4)])
         data = self.get(view="detail", symbol="DEMO/USDT", page_size=2)

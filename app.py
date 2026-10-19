@@ -15,7 +15,7 @@ import base64
 import struct
 import ipaddress
 from html.parser import HTMLParser
-from functools import wraps
+from functools import lru_cache, wraps
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -33,12 +33,13 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from flask import Flask, g, has_app_context, jsonify, redirect, render_template, request, send_file, session, url_for
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import and_, case, func, inspect, or_, text, tuple_
-from sqlalchemy.orm import deferred
+from sqlalchemy import and_, case, event as sa_event, func, inspect, or_, text, tuple_
+from sqlalchemy.orm import Session as ORMSession, deferred
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from anomaly_streams import AlertStreamHub, Route
 from anomaly_engine import alert_round_ids, pulse_is_actionable
+from alert_history_index import AlertHistoryIndex
 from alert_reminders import admit_pulse, current_notice, reminder_count, reminder_state_id
 from alert_screening import DEFAULT_NOTIONAL, okx_contract_unit, pulse_has_watch_peak, screen_pulse
 from asset_catalog import NON_CRYPTO_BOOTSTRAP, bootstrap_category, compact_symbol, instrument_category
@@ -59,6 +60,7 @@ app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0").st
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
 ALERT_STREAM_HUB = AlertStreamHub()
+ALERT_HISTORY_INDEX = AlertHistoryIndex()
 
 
 @app.after_request
@@ -305,6 +307,53 @@ class AlertPulse(db.Model):
     alert_event_id = db.Column(db.Integer, db.ForeignKey("alert_event.id"), nullable=False, unique=True)
     evidence_json = db.Column(db.Text, nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.now, nullable=False, index=True)
+
+
+@sa_event.listens_for(ORMSession, "after_flush")
+def collect_alert_history_changes(session, flush_context):
+    identities = session.info.setdefault("alert_history_changes", set())
+    for item in session.new | session.dirty | session.deleted:
+        if isinstance(item, AlertEvent) and item.id is not None:
+            identities.add(item.id)
+        elif isinstance(item, AlertPulse) and item.alert_event_id is not None:
+            identities.add(item.alert_event_id)
+
+
+@sa_event.listens_for(ORMSession, "after_commit")
+def publish_alert_history_changes(session):
+    # Savepoints are not durable commits; retain invalidation until outer commit.
+    if not session.in_nested_transaction():
+        if session.info.pop("alert_history_full_reset", False):
+            ALERT_HISTORY_INDEX.reset()
+        ALERT_HISTORY_INDEX.invalidate(session.info.pop("alert_history_changes", ()))
+
+
+@sa_event.listens_for(ORMSession, "after_soft_rollback")
+def rollback_alert_history_changes(session, previous_transaction):
+    # A nested rollback may discard an earlier queued ID. Force a safe rebuild
+    # on eventual outer commit; never publish uncommitted price evidence.
+    session.info.pop("alert_history_changes", None)
+    if previous_transaction.parent is None:
+        session.info.pop("alert_history_full_reset", None)
+    else:
+        session.info["alert_history_full_reset"] = True
+
+
+@sa_event.listens_for(ORMSession, "do_orm_execute")
+def invalidate_bulk_alert_history_changes(state):
+    if state.is_update or state.is_delete:
+        table = getattr(state.statement, "table", None)
+        if table is not None and table.name in {"alert_event", "alert_pulse"}:
+            state.session.info["alert_history_full_reset"] = True
+
+
+def reset_alert_history_schema(*args, **kwargs):
+    ALERT_HISTORY_INDEX.reset()
+
+
+for _alert_history_table in (AlertEvent.__table__, AlertPulse.__table__):
+    sa_event.listen(_alert_history_table, "after_create", reset_alert_history_schema)
+    sa_event.listen(_alert_history_table, "after_drop", reset_alert_history_schema)
 
 
 class AlertReminderState(db.Model):
@@ -12929,13 +12978,55 @@ def alert_pulse_read_payload(evidence, *, qualified_only=False):
     return compact
 
 
+def read_alert_history(window_start, now):
+    """Reuse committed history projections, never live candidate assessments."""
+    columns = (AlertEvent.id, AlertEvent.symbol, AlertEvent.strategy, AlertEvent.alert_type,
+               AlertEvent.message, AlertEvent.open_spread, AlertEvent.close_spread, AlertEvent.basis,
+               AlertEvent.funding_rate, AlertEvent.created_at, AlertEvent.long_exchange, AlertEvent.short_exchange)
+    base = db.session.query(*columns, AlertPulse.evidence_json, AlertPulse.updated_at).outerjoin(
+        AlertPulse, AlertPulse.alert_event_id == AlertEvent.id).filter(
+        AlertEvent.created_at >= window_start, AlertEvent.created_at <= now,
+        or_(AlertEvent.alert_type == "basis_threshold", AlertEvent.alert_type.startswith("rapid_", autoescape=True), AlertEvent.message.contains("确认后的")))
+
+    def read_rows(query):
+        # The request's auth SELECT may already hold an older repeatable-read
+        # snapshot. Read committed history on a separate short-lived connection
+        # so a consumed after_commit invalidation cannot fetch the old version.
+        with db.engine.connect() as connection:
+            if connection.dialect.name in {"mysql", "mariadb"}:
+                connection = connection.execution_options(isolation_level="READ COMMITTED")
+            result = connection.execution_options(stream_results=True).execute(query.statement)
+            try:
+                yield from result.yield_per(500)
+            finally:
+                result.close()
+
+    def load(identities, since):
+        if identities is None:
+            yield from read_rows(base)
+            return
+        identities = sorted(identities)
+        for offset in range(0, len(identities), 500):
+            yield from read_rows(base.filter(AlertEvent.id.in_(identities[offset:offset+500])))
+        # Previously future-dated rows become visible at their real boundary,
+        # even without a new commit. Normal inserts are also covered by IDs.
+        if since is not None and now > since:
+            yield from read_rows(base.filter(AlertEvent.created_at > since))
+
+    def audit():
+        return read_rows(base.with_entities(AlertEvent.id, AlertPulse.updated_at))
+
+    return ALERT_HISTORY_INDEX.snapshot(window_start, now, load, audit,
+                                        lambda evidence: alert_pulse_read_payload(evidence, qualified_only=True))
+
+
 @app.get("/api/alerts")
 def alerts():
     now = datetime.now()
     window_start = now - timedelta(hours=24)
     view = request.args.get("view", "legacy")
     if view == "health":
-        return jsonify(ALERT_STREAM_HUB.status())
+        return jsonify({**ALERT_STREAM_HUB.status(), "history_index": ALERT_HISTORY_INDEX.status()})
     if view not in {"legacy", "summary", "detail"}:
         return jsonify({"error": "无效的报警查询类型"}), 400
     try:
@@ -12944,9 +13035,6 @@ def alerts():
             raise ValueError("invalid amount")
     except (ValueError, TypeError):
         return jsonify({"error": "参考金额须为100至1,000,000 USDT"}), 400
-    query = AlertEvent.query.filter(AlertEvent.created_at >= window_start, AlertEvent.created_at <= now)
-    # 旧版拉升报警没有连续采样确认凭证，不能再作为可靠信号展示。
-    query = query.filter(or_(AlertEvent.alert_type == "basis_threshold", AlertEvent.alert_type.startswith("rapid_", autoescape=True), AlertEvent.message.contains("确认后的")))
     page, page_size = 1, 40
     selected_strategy, selected_path = request.args.get("strategy", ""), None
     if view == "detail":
@@ -12971,26 +13059,16 @@ def alerts():
                 selected_strategy = selected_path[0]
             except (ValueError, TypeError):
                 return jsonify({"error": "无效的报警路径"}), 400
-        query = query.filter(AlertEvent.symbol == symbol)
     episodes = SpotDivergence.query.filter(or_(SpotDivergence.resolved_at.is_(None), SpotDivergence.resolved_at >= window_start)).all()
     by_path = {}
     for episode in episodes:
         by_path.setdefault(spot_divergence_key(episode.symbol, episode.long_exchange, episode.short_exchange), []).append(episode)
     isolated = [item for item in episodes if item.resolved_at is None and not is_rwa_stock_pair(item.symbol)]
-    # Read immutable scalar rows rather than 40k+ ORM entities/identity-map
-    # entries per concurrent polling request. History and ordering are intact.
-    columns = (AlertEvent.id, AlertEvent.symbol, AlertEvent.strategy, AlertEvent.alert_type,
-               AlertEvent.message, AlertEvent.open_spread, AlertEvent.close_spread, AlertEvent.basis,
-               AlertEvent.funding_rate, AlertEvent.created_at, AlertEvent.long_exchange, AlertEvent.short_exchange)
-    all_events = [item for item in query.with_entities(*columns).order_by(AlertEvent.created_at.desc(), AlertEvent.id.desc()).yield_per(500) if not is_rwa_stock_pair(item.symbol) and not alert_is_divergent(item, by_path)]
-    pulse_rows = AlertPulse.query.join(AlertEvent, AlertPulse.alert_event_id == AlertEvent.id).filter(AlertEvent.created_at >= window_start, AlertEvent.created_at <= now)
-    if view == "detail":
-        pulse_rows = pulse_rows.filter(AlertEvent.symbol == symbol)
-    pulses = {event_id: alert_pulse_read_payload(evidence, qualified_only=True)
-              for event_id, evidence in pulse_rows.with_entities(AlertPulse.alert_event_id, AlertPulse.evidence_json).yield_per(500)}
-    # Hide old low-threshold noise consistently in counts, ranges, detail and
-    # browser notifications. Original AlertEvent/AlertPulse evidence stays in DB.
-    all_events = [item for item in all_events if item.id not in pulses or pulses[item.id] is not None]
+    indexed_events, indexed_pulses = read_alert_history(window_start, now)
+    asset_types = {symbol: is_rwa_stock_pair(symbol) for symbol in {item.symbol for item in indexed_events}}
+    all_events = [item for item in indexed_events if (view != "detail" or item.symbol == symbol)
+                  and not asset_types[item.symbol] and not alert_is_divergent(item, by_path)]
+    pulses = {item.id: indexed_pulses[item.id] for item in all_events if item.id in indexed_pulses}
     round_ids = alert_round_ids(all_events, pulses)
     grouped_events = {}
     for item in all_events:
@@ -13000,10 +13078,13 @@ def alerts():
         tickets = pulse.get("reminder", {}).get("notices", [])
         return tickets[-1]["at"] if tickets else pulse.get("noticed_at", item.created_at.replace(tzinfo=timezone.utc).timestamp())
     screening_now = time.time()
+    notice_epochs = {item.id: notice_epoch(item) for item in all_events}
+    reminder_counts = {item.id: reminder_count(pulses[item.id], screening_now)
+                       for item in all_events if pulses.get(item.id) and "reminder" in pulses[item.id]}
     def count_reminders(items):
         # Legacy non-pulse history keeps its old count; migrated and new pulses
         # count only first/breakthrough admissions, never repeat observations.
-        return sum(reminder_count(pulses[item.id], screening_now) for item in items if pulses.get(item.id) and "reminder" in pulses[item.id]) + len({round_ids[item.id] for item in items if not pulses.get(item.id) or "reminder" not in pulses[item.id]})
+        return sum(reminder_counts.get(item.id, 0) for item in items) + len({round_ids[item.id] for item in items if item.id not in reminder_counts})
     paths = {tuple(pulse["path"]) for pulse in pulses.values() if pulse and pulse.get("path")}
     live_quotes = ALERT_STREAM_HUB.screening_quotes(paths, screening_now)
     attention = {item.id: screen_pulse(pulses[item.id], live_quotes.get(tuple(pulses[item.id].get("path", []))), screening_now, notional)
@@ -13011,7 +13092,7 @@ def alerts():
                  for item in all_events}
     def priority(item):
         assessment = attention[item.id]
-        return ({"candidate": 2, "watch": 1}.get(assessment["tier"], 0), assessment.get("net_edge") or 0, notice_epoch(item))
+        return ({"candidate": 2, "watch": 1}.get(assessment["tier"], 0), assessment.get("net_edge") or 0, notice_epochs[item.id])
     active_events = []
     for items in grouped_events.values():
         active = []
@@ -13019,7 +13100,7 @@ def alerts():
             assessment, pulse = attention[item.id], pulses.get(item.id)
             if not current_notice(pulse, screening_now):
                 continue
-            age = screening_now-notice_epoch(item)
+            age = screening_now-notice_epochs[item.id]
             if assessment["live"] and 0 <= age <= 120:
                 active.append(item)
             elif pulse and pulse.get("state") == "retraced" and not pulse.get("ended_at") and 0 <= age <= 30 and pulse_has_watch_peak(pulse):
@@ -13045,40 +13126,45 @@ def alerts():
         for item in LatestMarketSnapshot.query.filter(LatestMarketSnapshot.symbol.in_(event_symbols)).all():
             market_context.setdefault(item.symbol, item)
 
-    def alert_context(item):
-        if item.strategy == "futures_futures":
-            latest = dual_context.get((item.symbol, item.long_exchange, item.short_exchange))
+    @lru_cache(maxsize=None)
+    def cached_alert_context(strategy, symbol, long_exchange, short_exchange):
+        if strategy == "futures_futures":
+            latest = dual_context.get((symbol, long_exchange, short_exchange))
             return {
                 "strategy": "futures_futures",
-                "long_exchange": item.long_exchange,
+                "long_exchange": long_exchange,
                 "long_market": "合约",
-                "short_exchange": item.short_exchange,
+                "short_exchange": short_exchange,
                 "short_market": "合约",
                 "long_interval": latest.long_funding_interval_hours if latest else None,
                 "short_interval": latest.short_funding_interval_hours if latest else None,
             }
-        if item.strategy != "spot_futures":
-            return {"strategy": item.strategy or "unknown", "long_exchange": item.long_exchange, "long_market": "未记录", "short_exchange": item.short_exchange, "short_market": "未记录", "long_interval": None, "short_interval": None}
-        # Explicit columns win. Only recover a missing spot venue from an anchored,
-        # known legacy prefix; an arbitrary message must never become Binance spot.
-        prefix = re.match(r"^(Binance|Gate|Bitget)(?=\s|现货|$)", item.message or "")
-        long_exchange = item.long_exchange or (prefix.group(1) if prefix else None)
-        latest = market_context.get(item.symbol)
+        if strategy != "spot_futures":
+            return {"strategy": strategy or "unknown", "long_exchange": long_exchange, "long_market": "未记录", "short_exchange": short_exchange, "short_market": "未记录", "long_interval": None, "short_interval": None}
+        latest = market_context.get(symbol)
         return {
             "strategy": "spot_futures",
             "long_exchange": long_exchange,
             "long_market": "现货",
-            "short_exchange": item.short_exchange or "Binance",
+            "short_exchange": short_exchange or "Binance",
             "short_market": "合约",
             "long_interval": None,
-            "short_interval": latest.funding_interval_hours if latest and item.short_exchange in (None, "Binance") else None,
+            "short_interval": latest.funding_interval_hours if latest and short_exchange in (None, "Binance") else None,
         }
+
+    def alert_context(item):
+        long_exchange = spot_alert_exchange(item) if item.strategy == "spot_futures" and not item.long_exchange else item.long_exchange
+        return cached_alert_context(item.strategy, item.symbol, long_exchange, item.short_exchange)
 
     def path_key(item):
         context = alert_context(item)
         return [context["strategy"], context["long_exchange"], context["short_exchange"]]
 
     def path_id(key):
+        return cached_path_id(tuple(key))
+
+    @lru_cache(maxsize=None)
+    def cached_path_id(key):
         return json.dumps(key, ensure_ascii=False, separators=(",", ":"))
 
     def value_ranges(items):

@@ -5,7 +5,7 @@ used by the existing application for instrument discovery, never as a fake tick.
 All outputs are full BBOs, not incremental L2 books. Bybit ticker deltas
 are applied only after a connection-local full snapshot.
 """
-from collections import defaultdict
+from collections import Counter, defaultdict, deque
 from copy import deepcopy
 from dataclasses import dataclass, field
 import asyncio
@@ -159,6 +159,7 @@ class AlertStreamHub:
         self.pending, self.workers, self.fresh = {}, {}, {}
         self.evaluated_at, self.dirty = {}, set()
         self.noise, self.live_quotes = {}, {}
+        self.stream_isolated = set()
         self.running = False
         self.rejected = 0
         self.frame_counts = defaultdict(lambda: defaultdict(int))
@@ -167,6 +168,7 @@ class AlertStreamHub:
         self.overloaded = False
         self.owners = {}
         self.loop = None
+        self.loop_delays = deque(maxlen=120)
 
     def _updates(self, updates):
         for update in updates:
@@ -182,6 +184,7 @@ class AlertStreamHub:
                 self.fresh.pop(path, None)
                 self.noise.pop(path, None)
                 self.live_quotes.pop(path, None)
+                self.stream_isolated.discard(path)
                 self.dirty.discard(path)
             self.routes.update(incoming)
             self.by_key = defaultdict(set)
@@ -205,6 +208,7 @@ class AlertStreamHub:
                 self.fresh.pop(path, None)
                 self.noise.pop(path, None)
                 self.live_quotes.pop(path, None)
+                self.stream_isolated.discard(path)
                 self.dirty.add(path)
                 self._updates(self.detector.reset(path, now))
 
@@ -293,7 +297,9 @@ class AlertStreamHub:
                         self.fresh.pop(path, None)
                         self.noise.pop(path, None)
                         self.live_quotes.pop(path, None)
+                        self.stream_isolated.add(path)
                         continue
+                self.stream_isolated.discard(path)
                 self.fresh[path] = now
                 self.dirty.discard(path)
                 if path not in self.noise:
@@ -367,13 +373,75 @@ class AlertStreamHub:
                 state["stale_reconnects"] = state.get("stale_reconnects", 0) + worker.stale_reconnects
                 state["stale_frames"] = state.get("stale_frames", 0) + worker.stale_frames
                 state["last_source_at"] = max(state.get("last_source_at", 0), worker.last_source_at)
-            fresh = sum(now - value <= self.MAX_AGE for path, value in self.fresh.items() if path in self.routes)
+            quality, missing_by_feed, stale_by_feed, examples = Counter(), Counter(), Counter(), []
+            basis_fresh = 0
+            for path, route in self.routes.items():
+                legs = [self.books.get(key) for key in (route.long_key, route.short_key)]
+                reason, issues = None, []
+                for role, key, leg in zip(("long", "short"), (route.long_key, route.short_key), legs):
+                    owner = self.owners.get(key)
+                    age = now - leg["at"] if leg else None
+                    if leg is None:
+                        missing_by_feed[key[0]] += 1
+                        issue = "disconnected" if owner and not owner.connected else "awaiting_quote"
+                    elif not -2 <= age <= self.MAX_AGE:
+                        stale_by_feed[key[0]] += 1
+                        if age < -2:
+                            issue = "future_timestamp"
+                        elif owner and not owner.connected:
+                            issue = "disconnected"
+                        elif owner and now - owner.last_source_at > self.MAX_AGE:
+                            issue = "source_lag"
+                        else:
+                            issue = "symbol_quote_quiet"
+                    else:
+                        continue
+                    issues.append(dict(leg=role, feed=key[0], symbol=key[1], reason=issue,
+                                       age_seconds=round(age, 3) if age is not None else None))
+                if any(leg is None for leg in legs):
+                    reason = "missing_quote"
+                elif issues:
+                    reason = "stale_quote"
+                elif abs(legs[0]["at"] - legs[1]["at"]) > self.MAX_SKEW:
+                    reason = "leg_skew"
+                elif path in self.stream_isolated:
+                    reason = "price_divergence"
+                elif path in self.dirty or path not in self.live_quotes:
+                    reason = "awaiting_evaluation"
+                else:
+                    reason = "fresh"
+                quality[reason] += 1
+                mark = self.marks.get(route.mark_key)
+                basis_fresh += bool(mark and -2 <= now - mark["at"] <= self.MAX_AGE)
+                if reason != "fresh" and len(examples) < 24:
+                    examples.append(dict(path=list(path), reason=reason, issues=issues,
+                                         skew_seconds=round(abs(legs[0]["at"]-legs[1]["at"]), 3) if all(legs) else None))
+            for feed in feeds:
+                cache = self.marks if feed == "bn_mark" else self.books
+                feed_books = [value for key, value in cache.items() if key[0] == feed]
+                ages = sorted(now-book["at"] for book in feed_books)
+                source_ages = sorted(now-worker.last_source_at for worker in self.workers.values()
+                                     if worker.feed == feed and worker.connected and worker.last_source_at)
+                feeds[feed].update(cached_symbols=len(ages), fresh_symbols=sum(-2 <= age <= self.MAX_AGE for age in ages),
+                                   age_p95_seconds=round(ages[min(len(ages)-1, int(len(ages)*.95))], 3) if ages else None,
+                                   source_age_max_seconds=round(max(source_ages), 3) if source_ages else None,
+                                   missing_path_legs=missing_by_feed[feed], stale_path_legs=stale_by_feed[feed])
+            fresh = quality["fresh"] if not self.overloaded else 0
             return dict(running=self.running, paths=len(self.routes), fresh_paths=fresh, feeds=dict(feeds),
                         policy_version=POLICY_VERSION, screening_ready_paths=sum(bool(window.cached.get("ready")) for window in self.noise.values()),
                         rejected_frames=self.rejected, pending=len(self.pending), persistence_error=self.persistence_error,
                         frame_counts={feed: dict(counts) for feed, counts in self.frame_counts.items()},
                         overloaded=self.overloaded, last_persisted_at=self.last_persisted_at, checked_at=now,
-                        transport="asyncio")
+                        transport="asyncio", path_quality=dict(quality), unfresh_samples=examples,
+                        basis_fresh_paths=basis_fresh,
+                        loop_delay_max_seconds=round(max(self.loop_delays, default=0), 4))
+
+    async def _observe_loop_delay(self):
+        # Scheduling delay distinguishes local CPU starvation from quote age.
+        while True:
+            before = time.monotonic()
+            await asyncio.sleep(.5)
+            self.loop_delays.append(max(0, time.monotonic()-before-.5))
 
     def _start_worker(self, worker):
         # One I/O loop, not two OS threads per socket fighting for the GIL.
@@ -381,6 +449,7 @@ class AlertStreamHub:
         if self.loop is None:
             self.loop = asyncio.new_event_loop()
             threading.Thread(target=self.loop.run_forever, daemon=True, name="alert-stream-io").start()
+            asyncio.run_coroutine_threadsafe(self._observe_loop_delay(), self.loop)
         worker.future = asyncio.run_coroutine_threadsafe(worker.run(), self.loop)
 
     def reconcile(self):
@@ -505,14 +574,15 @@ class PublicWorker:
                 self.last_error_type = type(error).__name__
             finally:
                 self.connected = False
+                # Stop considering the old BBO immediately, not after waiting
+                # for a peer's close handshake (up to one extra second).
+                self.hub.invalidate(keys, owner=self)
                 try:
                     if socket:
                         await socket.close()
                 except Exception as error:
                     self.errors += 1
                     self.last_error_type = type(error).__name__
-                finally:
-                    self.hub.invalidate(keys, owner=self)
             backoff = 1 if time.monotonic() - connected_at > 60 else min(60, backoff * 2)
             await asyncio.sleep(backoff + random.random())
 

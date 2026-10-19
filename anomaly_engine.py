@@ -154,9 +154,11 @@ class PulseDetector:
 
     def reset(self, path, at, reason="data_gap"):
         updates = []
-        for key in [key for key in self.tracks if key[0] == path]:
-            track = self.tracks.pop(key)
-            if track.pulse:
+        # There are exactly three supported metrics per path. Reconnecting a
+        # shard must not scan every other path once for each affected symbol.
+        for metric in RULES:
+            track = self.tracks.pop((path, metric), None)
+            if track and track.pulse:
                 track.pulse.update(state=reason, ended_at=at, version=track.pulse["version"] + 1)
                 updates.append(deepcopy(track.pulse))
         return updates
@@ -179,7 +181,9 @@ class PulseDetector:
         if metric not in RULES or not finite(value) or not finite(at):
             return []
         key = (path, metric)
-        track = self.tracks.setdefault(key, Track())
+        track = self.tracks.get(key)
+        if track is None:
+            track = self.tracks[key] = Track()
         if track.last and at <= track.last.at:
             return []
         # Quantity-only book updates cannot introduce a new price extremum.

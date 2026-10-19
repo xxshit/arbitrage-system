@@ -433,10 +433,13 @@ function showMarketRefreshCountdown(){clearInterval(marketRefreshCountdownTimer)
 async function loadSpotFutures(manual=false){
   if(spotFuturesLoading)return false;
   spotFuturesLoading=true;
-  const status=byId('spotFuturesUpdated'),bnOnly=byId('binanceSpotOnly').checked,alphaOnly=byId('binanceAlphaOnly').checked;
+  const status=byId('spotFuturesUpdated'),alphaOnly=byId('binanceAlphaOnly').checked;
+  const requestUrl=()=>'/api/spot-futures?page='+spotFuturesPage+'&binance_spot_only='+(byId('binanceSpotOnly').checked?'1':'0')+'&binance_alpha_only='+(byId('binanceAlphaOnly').checked?'1':'0')+'&funding_interval='+encodeURIComponent(spotFundingInterval)+'&symbol='+encodeURIComponent(spotFuturesSearch)+'&sort_by='+spotSort.key+'&sort_direction='+spotSort.direction;
+  const url=requestUrl();
   if(manual)status.textContent='正在读取已缓存的行情数据…';
   try{
-    const data=await fetchRefreshJson('/api/spot-futures?page='+spotFuturesPage+'&binance_spot_only='+(bnOnly?'1':'0')+'&binance_alpha_only='+(alphaOnly?'1':'0')+'&funding_interval='+encodeURIComponent(spotFundingInterval)+'&symbol='+encodeURIComponent(spotFuturesSearch)+'&sort_by='+spotSort.key+'&sort_direction='+spotSort.direction);
+    const data=await fetchRefreshJson(url);
+    if(url!==requestUrl())return false;
     destroyFloatingPopup();spotBasisOpenings=Object.fromEntries(data.symbols.map(group=>[group.symbol,group.basis_opening]));spotOpportunityByKey=new Map(data.symbols.flatMap(group=>group.rows.map(row=>[`${group.symbol}|${row.long_exchange}`,{group,row}])));replaceHtmlKeepingExchangeLogos(byId('spotFuturesRows'),data.symbols.length?spotRows(data.symbols):`<tr><td colspan="12" class="loading">${alphaOnly?'当前条件下没有匹配的 Binance Alpha 币种。':'没有符合条件的交易对。'}</td></tr>`);
     spotFuturesHasData=true;
     updateSortHeaders();
@@ -453,10 +456,11 @@ async function loadSpotFutures(manual=false){
     setPageRefreshSource('spot-futures',data.captured_at_epoch,'行情',failed.length>0);
     return true;
   }catch(error){
+    if(url!==requestUrl())return false;
     if(!spotFuturesHasData)byId('spotFuturesRows').innerHTML=`<tr><td colspan="12" class="loading">${escapeChatHtml(error.message)}</td></tr>`;
     status.textContent=spotFuturesHasData?`${error.message}，已保留上一组有效数据。`:error.message;
     return false;
-  }finally{spotFuturesLoading=false}
+  }finally{spotFuturesLoading=false;if(url!==requestUrl())setTimeout(()=>loadSpotFutures(true),0)}
 }
 function hedgeMetric(value,suffix=''){const number=Number(value);return Number.isFinite(number)?`${money(number)}${suffix}`:'—'}
 function hedgePositionSummaryMarkup(summary){return `<article><small>当前组合</small><strong>${Number(summary.current_count||0)}</strong><span>历史 ${Number(summary.history_count||0)} 组</span></article><article><small>现货 / 合约名义金额</small><strong>${hedgeMetric(summary.spot_notional,' USDT')}</strong><span>${hedgeMetric(summary.futures_notional,' USDT')}</span></article><article><small>当前对冲差额</small><strong class="${signClass(summary.hedge_gap_usdt)}">${hedgeMetric(summary.hedge_gap_usdt,' USDT')}</strong><span>按双腿实际成交累计</span></article><article><small>累计资费 / 手续费</small><strong class="${signClass(summary.funding_income)}">${hedgeMetric(summary.funding_income,' USDT')}</strong><span>手续费 ${hedgeMetric(summary.total_fees,' USDT')}</span></article><article><small>历史净结果</small><strong class="${signClass(summary.net_result)}">${hedgeMetric(summary.net_result,' USDT')}</strong><span>已实现盈亏 + 资费 - 手续费</span></article>`}
@@ -479,8 +483,6 @@ function setHedgePositionTab(tab){hedgePositionTab=tab==='history'?'history':'cu
 function openHedgePositionBuilder(encodedKey){const key=decodeURIComponent(encodedKey||''),opportunity=spotOpportunityByKey.get(key);if(!opportunity){alert('这条机会已刷新，请重新选择。');return}selectedHedgeOpportunity=opportunity;byId('hedgePreviewTitle').textContent=`${opportunity.group.symbol} · 建立对冲仓位`;byId('hedgePreviewRoute').textContent=`${opportunity.row.long_exchange} 买入现货 + Binance 卖出永续`;byId('hedgeSubmitButton').textContent=opportunity.row.long_exchange==='Binance'?'等待币安私有 API':`需 ${opportunity.row.long_exchange} + Binance 私有 API`;byId('hedgePositionModal').classList.remove('hidden');renderHedgePositionPreview()}
 function closeHedgePositionBuilder(){byId('hedgePositionModal')?.classList.add('hidden');selectedHedgeOpportunity=null}
 function renderHedgePositionPreview(){const target=byId('hedgeOrderPreview');if(!target||!selectedHedgeOpportunity)return;const {group,row}=selectedHedgeOpportunity,quote=Math.max(0,Number(byId('hedgeQuoteAmount')?.value)||0),leverage=Math.max(1,Number(byId('hedgeLeverage')?.value)||1),slippage=Math.max(0,Number(byId('hedgeMaxSlippage')?.value)||0),spotPrice=Number(row.long_ask),futuresPrice=Number(row.short_bid),quantity=spotPrice>0?quote/spotPrice:0,futuresNotional=quantity*futuresPrice,gap=quote-futuresNotional,margin=futuresNotional/leverage;target.innerHTML=`<div class="hedge-preview-market"><span><small>当前开差</small><b class="${signClass(row.open_spread)}">${percent(row.open_spread)}</b></span><span><small>当前资费</small><b class="${signClass(row.funding_rate)}">${percent(row.funding_rate)}</b></span><span><small>最大滑点</small><b>${slippage.toFixed(2)}%</b></span></div><div class="hedge-preview-legs"><article class="long"><header><b>① 买入现货</b><span>${escapeChatHtml(row.long_exchange)}</span></header><dl><span><dt>盘口卖一</dt><dd>${hedgeMetric(spotPrice)}</dd></span><span><dt>估算数量</dt><dd>${hedgeMetric(quantity)}</dd></span><span><dt>投入</dt><dd>${hedgeMetric(quote,' USDT')}</dd></span></dl></article><article class="short"><header><b>② 卖出永续</b><span>Binance</span></header><dl><span><dt>盘口买一</dt><dd>${hedgeMetric(futuresPrice)}</dd></span><span><dt>估算数量</dt><dd>${hedgeMetric(quantity)}</dd></span><span><dt>预估保证金</dt><dd>${hedgeMetric(margin,' USDT')}</dd></span></dl></article></div><div class="hedge-preview-balance"><span>双腿基础币数量保持一致</span><b>名义金额差 ${hedgeMetric(gap,' USDT')}</b><small>${escapeChatHtml(group.symbol)} 行情刷新后，最终确认页必须重新取盘口并按交易所步长取整。</small></div>`}
-function groupSortValue(group){const rows=group.rows;if(spotSort.key==='open_spread'||spotSort.key==='close_spread')return Math.max(...rows.map(row=>Number(row[spotSort.key])));return Number(rows[0][spotSort.key])}
-function sortGroups(groups){return [...groups].sort((a,b)=>{const delta=groupSortValue(a)-groupSortValue(b);return spotSort.direction==='desc'?-delta:delta})}
 function spotSortPickerMarkup(){return `<div class="spot-sort-picker"><label><span>排序</span><select id="spotSortSelect" onchange="setSpotSortFromPicker(this.value)">${spotSortOptions.map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select></label><button id="spotSortDirection" type="button" onclick="toggleSpotSortDirection()">从高到低 ↓</button></div>`}
 function configureSpotColumns(header){
   if(!header||header.dataset.spotCompact)return;

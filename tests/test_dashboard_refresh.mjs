@@ -182,6 +182,68 @@ for(const [name,start,end,lock,hasData,rowId] of [
   const retry=h.context[name]();assert.equal(requests,2);await h.advance(10000);await retry;assert.equal(h.context[lock],false);
 });
 
+function spotLoaderHarness(){
+  const h=harness(),requests=[],renders=[];
+  Object.assign(h.context,{active:'spot-futures',spotFuturesLoading:false,spotFuturesHasData:true,
+    spotFuturesPage:1,spotFuturesSearch:'',spotFundingInterval:'all',spotSort:{key:'open_spread',direction:'desc'},
+    spotSortLabels:{open_spread:'开差',close_spread:'平差'},spotRows:groups=>groups.map(group=>group.symbol).join(','),
+    destroyFloatingPopup(){},updateSortHeaders(){},showMarketRefreshCountdown(){},escapeChatHtml:String,
+    replaceHtmlKeepingExchangeLogos(target,markup){target.innerHTML=markup;renders.push(markup)}});
+  h.context.byId('spotFuturesRows').innerHTML='previous rows';
+  h.context.fetch=url=>new Promise((resolve,reject)=>requests.push({url,resolve:data=>resolve({ok:true,json:async()=>data}),reject}));
+  h.run(source.slice(source.indexOf('async function loadSpotFutures('),source.indexOf('function hedgeMetric(')));
+  h.run('installPageRefreshTracking()');
+  const payload=symbol=>({symbols:[{symbol,rows:[{long_exchange:'Gate',open_spread:.5}]}],total_symbols:1,page:1,pages:1,updated_at:'12:00:00',captured_at_epoch:100,errors:{}});
+  return {...h,requests,renders,payload};
+}
+
+test('spot direction switch discards pending old order and immediately requests the latest direction',async()=>{
+  const h=spotLoaderHarness(),first=h.context.loadSpotFutures();
+  h.context.spotSort.direction='asc';const coalesced=h.context.loadSpotFutures(true);
+  assert.equal(first,coalesced);assert.equal(h.requests.length,1);
+  h.requests[0].resolve(h.payload('old-desc'));assert.equal(await first,false);
+  assert.deepEqual(h.renders,[]);await h.advance(0);
+  assert.equal(h.requests.length,2);assert.ok(h.requests[1].url.endsWith('sort_direction=asc'));
+  h.requests[1].resolve(h.payload('new-asc'));await h.flush();
+  assert.deepEqual(h.renders,['new-asc']);assert.ok(h.context.byId('spotFuturesUpdated').textContent.includes('开差 ↑'));
+  assert.equal(h.run('pageRefreshState("spot-futures").inFlight'),0);
+});
+
+test('spot rapid sort and filter changes coalesce to the latest complete request',async()=>{
+  const h=spotLoaderHarness(),first=h.context.loadSpotFutures();
+  h.context.spotSort={key:'close_spread',direction:'asc'};h.context.loadSpotFutures(true);
+  h.context.spotSort.direction='desc';h.context.spotFuturesPage=2;h.context.spotFuturesSearch='DEMO/USDT';
+  h.context.spotFundingInterval='4H';h.context.byId('binanceSpotOnly').checked=true;h.context.byId('binanceAlphaOnly').checked=true;
+  h.context.loadSpotFutures(true);h.requests[0].resolve(h.payload('old'));await first;await h.advance(0);
+  assert.equal(h.requests.length,2);const url=new URL(h.requests[1].url,'http://preview');
+  for(const [key,value] of Object.entries({page:'2',symbol:'DEMO/USDT',sort_by:'close_spread',sort_direction:'desc',funding_interval:'4H',binance_spot_only:'1',binance_alpha_only:'1'}))assert.equal(url.searchParams.get(key),value);
+  h.requests[1].resolve(h.payload('latest'));await h.flush();assert.deepEqual(h.renders,['latest']);
+});
+
+test('spot superseded failure cannot overwrite current status or block a fresh sort request',async()=>{
+  const h=spotLoaderHarness(),first=h.context.loadSpotFutures();
+  h.context.spotSort.direction='asc';h.context.byId('spotFuturesUpdated').textContent='new filter requested';
+  h.requests[0].reject(new Error('old request failed'));assert.equal(await first,false);
+  assert.equal(h.context.byId('spotFuturesUpdated').textContent,'new filter requested');
+  await h.advance(0);assert.equal(h.requests.length,2);
+  h.requests[1].resolve(h.payload('recovered'));await h.flush();assert.deepEqual(h.renders,['recovered']);
+});
+
+test('spot unchanged request renders server order once without a redundant follow-up',async()=>{
+  const h=spotLoaderHarness(),first=h.context.loadSpotFutures();
+  const data=h.payload('ranked-first');data.symbols.push({symbol:'ranked-second',rows:[{long_exchange:'Bitget'}]});
+  h.requests[0].resolve(data);assert.equal(await first,true);await h.advance(0);
+  assert.deepEqual(h.renders,['ranked-first,ranked-second']);assert.equal(h.requests.length,1);
+  assert.ok(!source.includes('function groupSortValue('));assert.ok(!source.includes('function sortGroups('));
+});
+
+test('spot current request failure retains previous rows without automatic retry burst',async()=>{
+  const h=spotLoaderHarness(),first=h.context.loadSpotFutures();
+  h.requests[0].reject(new Error('network failed'));assert.equal(await first,false);await h.advance(0);
+  assert.equal(h.context.byId('spotFuturesRows').innerHTML,'previous rows');assert.equal(h.requests.length,1);
+  assert.ok(h.context.byId('spotFuturesUpdated').textContent.includes('已保留上一组有效数据'));
+});
+
 test('qualified candidates notify once while low-level retracement observations stay silent',async()=>{
   const h=harness();let sounds=0;
   Object.assign(h.context,{pruneAlertMutes(){},isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){},replaceHtmlKeepingExchangeLogos(){},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});

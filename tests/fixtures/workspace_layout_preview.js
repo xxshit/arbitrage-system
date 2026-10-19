@@ -13,8 +13,11 @@
   const spot = symbols.map((symbol,index) => ({symbol,rows:[{...base,long_ask:base.long_ask+index/10,transfer_status:wallet('Gate')},{...base,long_exchange:'Bitget',open_spread:0.75,transfer_status:wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC',chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}],reason:'快照已过期'})}]}));
   spot[0].rows.unshift({...base,long_exchange:'Binance',open_spread:.65,transfer_status:wallet('Binance',{chains:[{name:'BSC',deposit_open:true,withdraw_open:true}]})});
   spot[1].rows=spot[1].rows.slice(0,1);
+  spot[1].rows[0].open_spread=.25;
+  spot[2].rows[0].open_spread=-.3;spot[2].rows[1].open_spread=.2;
+  spot[3].rows[0].open_spread=-.1;spot[3].rows[1].open_spread=-.5;
   spot.slice(0,3).forEach(group=>{group.basis_opening={open_count:2,opened_basis:-1.1353,opened_at:'09-23 08:40:40',max_basis:-1.7,max_at:'09-23 08:45:00'}});
-  for(let i=0;i<7;i++)spot.push({symbol:`DENSITY${i+1}/USDT`,rows:[{...base,transfer_status:wallet('Gate')}]});
+  for(let i=0;i<7;i++)spot.push({symbol:`DENSITY${i+1}/USDT`,rows:[{...base,open_spread:.1-i*.05,transfer_status:wallet('Gate')}]});
   const isolatedRisk={symbol:'ISOLATED/USDT',long_exchange:'Gate',short_exchange:'Binance',state:'confirmed',long_ask:.12225,short_bid:.02814,index_price:.02804,open_spread:-76.98,basis:.36,blocked_chains:['BSC 充关','ETH 提关'],blocked_transfers:[{exchange:'Gate',chain:'BSC',deposit_open:false,withdraw_open:true},{exchange:'Gate',chain:'ETH',deposit_open:true,withdraw_open:false}],transfer_state:'fresh',stale:false,observed_at:'10-19 00:00:00 UTC'};
   spot.push({symbol:isolatedRisk.symbol,rows:[{...base,...isolatedRisk,transfer_status:wallet('Gate'),price_divergence:isolatedRisk},{...base,long_exchange:'Bitget',transfer_status:wallet('Bitget',{chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}]})}]});
   const dual = symbols.map(symbol => ({symbol,binance_change_5m:0.42,binance_change_15m:0.7,binance_change_30m:1.2,binance_change_1h:2.1,rows:[
@@ -122,6 +125,16 @@
     const url = new URL(String(input), location.origin),path=url.pathname;
     if (!(path in fixtures)) return Response.json({error:`未定义的合成接口 ${path}`}, {status:404});
     const payload = structuredClone(fixtures[path]);
+    if(path==='/api/spot-futures'){
+      const key=url.searchParams.get('sort_by')||'open_spread',direction=url.searchParams.get('sort_direction')||'desc',sign=direction==='desc'?-1:1;
+      const compare=(a,b)=>Number.isFinite(a)?Number.isFinite(b)?sign*(a-b):-1:Number.isFinite(b)?1:0;
+      const query=(url.searchParams.get('symbol')||'').toUpperCase(),period=url.searchParams.get('funding_interval')||'all';
+      let groups=payload.symbols.filter(group=>(!query||group.symbol.includes(query))&&(url.searchParams.get('binance_spot_only')!=='1'||group.rows.some(row=>row.long_exchange==='Binance'))&&(period==='all'||`${group.rows[0].funding_interval_hours}H`===period));
+      if(['open_spread','close_spread'].includes(key))groups.forEach(group=>group.rows.sort((a,b)=>compare(a[key],b[key])));
+      groups.sort((a,b)=>compare(a.rows[0][key],b.rows[0][key]));
+      const pages=Math.max(1,Math.ceil(groups.length/30)),page=Math.min(pages,Number(url.searchParams.get('page'))||1);
+      Object.assign(payload,{symbols:groups.slice((page-1)*30,page*30),total_symbols:groups.length,pages,page,sort_by:key,sort_direction:direction});
+    }
     if(path==='/api/alerts'){
       if(url.searchParams.get('view')==='detail'){
         const symbol=url.searchParams.get('symbol'),strategy=url.searchParams.get('strategy')||null,path_id=url.searchParams.get('path')||null,group=alertGroups.find(item=>item.symbol===symbol),items=(group?.timeline||[]).filter(item=>(!strategy||item.strategy===strategy)&&(!path_id||item.path_id===path_id)),size=Math.min(100,Number(url.searchParams.get('page_size'))||40),pages=Math.max(1,Math.ceil(items.length/size)),page=Math.min(pages,Number(url.searchParams.get('page'))||1);

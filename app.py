@@ -7269,6 +7269,26 @@ def onchain_opportunities_api():
     })
 
 
+def sort_spot_groups(groups, sort_by, direction):
+    """Sort coin groups and their spread paths without reordering shared caches."""
+    descending = direction == "desc"
+
+    def numeric_key(value):
+        valid = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        # Missing/non-finite values stay last in either direction; never coerce to zero.
+        return (not valid, (-value if descending else value) if valid else 0)
+
+    ordered = []
+    for group in groups:
+        rows = group["rows"]
+        if sort_by in {"open_spread", "close_spread"}:
+            rows = sorted(rows, key=lambda row: numeric_key(row.get(sort_by)))
+        ordered.append({**group, "rows": rows})
+    # For spread columns the first path is the maximum/minimum for this direction.
+    # Other columns are Binance-wide metrics and retain the existing venue order.
+    return sorted(ordered, key=lambda group: numeric_key(group["rows"][0].get(sort_by) if group["rows"] else None))
+
+
 @app.get("/api/spot-futures")
 def spot_futures():
     page = max(request.args.get("page", 1, type=int), 1)
@@ -7319,14 +7339,7 @@ def spot_futures():
             group for group in symbols
             if symbol_matches_query(group["symbol"], raw_symbol_query)
         ]
-    def sort_value(group):
-        if sort_by in {"open_spread", "close_spread"}:
-            return max(row[sort_by] for row in group["rows"])
-        return group["rows"][0][sort_by]
-
-    sortable_symbols = [group for group in symbols if sort_value(group) is not None]
-    missing_symbols = [group for group in symbols if sort_value(group) is None]
-    symbols = sorted(sortable_symbols, key=sort_value, reverse=sort_direction == "desc") + missing_symbols
+    symbols = sort_spot_groups(symbols, sort_by, sort_direction)
     total = len(symbols)
     pages = max((total + page_size - 1) // page_size, 1)
     page = min(page, pages)

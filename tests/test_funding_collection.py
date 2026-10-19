@@ -249,7 +249,15 @@ class FundingCollectionIntegrationTests(unittest.TestCase):
         with patch.object(module,"load_latest_market_snapshot",return_value=spot), patch.object(module,"load_latest_dual_futures_snapshot",return_value=dual), patch.object(module,"symbol_alias_rows",return_value=aliases), patch.object(module,"MARKET_PAYLOAD_CACHE",cache):
             catalog = module.funding_sync_catalog("Binance")
         self.assertEqual(set(catalog), {"BTCUSDT", "1000XECUSDT", "SYNCFIXUSDT"})
-        self.assertEqual(catalog["1000XECUSDT"]["candidates"], ["1000XECUSDT"])
+        self.assertEqual(catalog["1000XECUSDT"]["candidates"], ["1000XECUSDT", "XECUSDT"])
+
+    def test_live_canonical_quote_hint_cannot_disable_verified_history_alias(self):
+        dual = {"symbols":[{"symbol":"XEC/USDT","rows":[{"long_exchange":"Bybit","short_exchange":"Binance",
+                "short_funding_interval_hours":4,"alert_stream_route":{"short_key":["bn_future","XECUSDT"]}}]}]}
+        aliases = [SimpleNamespace(**item, verified=True) for item in module.SEEDED_SYMBOL_ALIASES]
+        with patch.object(module,'load_latest_market_snapshot',return_value=None), patch.object(module,'load_latest_dual_futures_snapshot',return_value=dual), patch.object(module,'symbol_alias_rows',return_value=aliases), patch.object(module,'MARKET_PAYLOAD_CACHE',{}):
+            catalog = module.funding_sync_catalog('Binance')
+        self.assertEqual(catalog['XECUSDT']['candidates'],['XECUSDT','1000XECUSDT'])
 
     def test_old_interior_gap_is_inserted_without_rewriting_existing_facts(self):
         stamp = int((time.time()-60)*1000)

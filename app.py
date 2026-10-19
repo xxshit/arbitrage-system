@@ -15044,7 +15044,9 @@ def funding_sync_catalog(exchange):
         matched = [raw for raw in candidates if raw in known]
         if raw_hint and raw_hint in candidates:
             matched = [raw_hint]
-        candidates = matched or candidates
+        # A live quote's canonical/raw hint can differ from the historical
+        # endpoint after a verified rename. Prefer it, but retain scoped fallbacks.
+        candidates = matched + [raw for raw in candidates if raw not in matched]
         key = candidates[0] if exchange == "Binance" else symbol
         target = {"candidates": candidates, "interval": interval}
         # Only a scheduling hint. Actual timestamps/rates always come from history.

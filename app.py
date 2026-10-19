@@ -1078,7 +1078,7 @@ MARKETS = {
 }
 EXCHANGES = ["Binance", "OKX", "Bybit"]
 SPOT_FUTURES_CACHE = {"snapshot": None, "expires_at": 0.0}
-EQUITY_SPOT_CACHE = {"snapshot": None, "saved_at": 0.0}
+EQUITY_SPOT_CACHE = {"snapshot": None, "saved_at": 0.0, "refresh_started_at": None}
 EQUITY_METADATA_POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix="equity-metadata")
 EQUITY_METADATA_PENDING = {}
 EQUITY_METADATA_ERRORS = {}
@@ -1140,6 +1140,7 @@ INDEX_COMPONENT_CURSOR = 0
 FUNDING_SYNC_CURSOR = 0
 DUAL_FUNDING_SYNC_CURSOR = 0
 MARKET_REFRESH_SECONDS = 5
+EQUITY_MARKET_REFRESH_SECONDS = 15
 MARKET_DB_PERSIST_SECONDS = 15
 HORN_SCAN_HOUR = 8
 LAST_HORN_SCAN_DATE = None
@@ -3644,6 +3645,13 @@ def spot_futures_snapshot():
     global MARKET_REFRESH_METRICS
     started_at = time.perf_counter()
     stage_at = started_at
+    equity_started_at = time.monotonic()
+    equity_last_start = EQUITY_SPOT_CACHE.get("refresh_started_at")
+    equity_due = equity_last_start is None or equity_started_at - equity_last_start >= EQUITY_MARKET_REFRESH_SECONDS
+    if equity_due:
+        # Only equity-specific reads/builds slow down; shared crypto feeds stay fast.
+        # Count attempted starts (including failures), not response completion time.
+        EQUITY_SPOT_CACHE["refresh_started_at"] = equity_started_at
     urls = {
         "futures_info": "https://fapi.binance.com/fapi/v1/exchangeInfo",
         "futures_books": "https://fapi.binance.com/fapi/v1/ticker/bookTicker",
@@ -3654,17 +3662,19 @@ def spot_futures_snapshot():
         "binance_spot_24h": "https://api.binance.com/api/v3/ticker/24hr",
         "gate_spot": "https://api.gateio.ws/api/v4/spot/tickers",
         "bitget_spot": "https://api.bitget.com/api/v2/spot/market/tickers",
-        **{key: url for key, url in EQUITY_SPOT_URLS.items() if key not in EQUITY_SPOT_TTLS},
     }
-    collect_equity_metadata()
+    if equity_due:
+        urls.update({key: url for key, url in EQUITY_SPOT_URLS.items() if key not in EQUITY_SPOT_TTLS})
+        collect_equity_metadata()
     results, errors = fetch_market_payloads(urls, {
         "futures_info": 3600, "funding_info": 15, "futures_24h": 20,
         "binance_spot_24h": 20,
     })
-    metadata, metadata_errors = collect_equity_metadata()
-    results.update(metadata)
-    errors.update(metadata_errors)
-    urls.update(EQUITY_SPOT_URLS)
+    if equity_due:
+        metadata, metadata_errors = collect_equity_metadata()
+        results.update(metadata)
+        errors.update(metadata_errors)
+        urls.update(EQUITY_SPOT_URLS)
     network_seconds = time.perf_counter() - started_at
 
     required = {"futures_info", "futures_books", "funding"}
@@ -3768,11 +3778,12 @@ def spot_futures_snapshot():
     snapshot_finished_at = time.perf_counter()
     if persist_due:
         capture_price_history(rows_by_symbol)
-    try:
-        refresh_equity_spot_snapshot(results, errors, urls)
-    except Exception:
-        db.session.rollback()
-        app.logger.exception("equity_spot_snapshot_failed")
+    if equity_due:
+        try:
+            refresh_equity_spot_snapshot(results, errors, urls)
+        except Exception:
+            db.session.rollback()
+            app.logger.exception("equity_spot_snapshot_failed")
     total_seconds = time.perf_counter() - started_at
     MARKET_REFRESH_METRICS = {
         "network_seconds": round(network_seconds, 3),

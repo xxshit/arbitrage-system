@@ -194,6 +194,47 @@ class EquityWorkspaceTests(unittest.TestCase):
             self.assertEqual(result['errors'], {})
             self.assertEqual(refresh.call_args.args[1], errors)
 
+    def test_equity_collection_runs_every_fifteen_seconds_without_throttling_shared_crypto(self):
+        now = [0.0]  # zero is a valid monotonic start, not an uninitialized sentinel
+        original = {'symbols': [], 'captured_at_epoch': 123}
+        module.EQUITY_SPOT_CACHE['snapshot'] = original
+        with module.app.app_context(), ExitStack() as stack:
+            stack.enter_context(patch.object(module.time, 'monotonic', side_effect=lambda: now[0]))
+            fetch = stack.enter_context(patch.object(module, 'fetch_market_payloads', side_effect=lambda *_: (dict(futures_info={'symbols': []}, futures_books=[], funding=[]), {})))
+            metadata = stack.enter_context(patch.object(module, 'collect_equity_metadata', return_value=({}, {})))
+            stack.enter_context(patch.object(module, 'symbol_alias_rows', return_value=[]))
+            stack.enter_context(patch.object(module, 'SPOT_FUTURES_CACHE', {}))
+            stack.enter_context(patch.object(module, 'LAST_MARKET_DB_PERSIST_AT', {'spot': 0}))
+            for name in ('sync_binance_listing_events_if_due', 'refresh_binance_open_interest', 'save_latest_market_snapshot', 'capture_price_history'):
+                stack.enter_context(patch.object(module, name))
+            alerts = stack.enter_context(patch.object(module, 'evaluate_alerts'))
+            refresh = stack.enter_context(patch.object(module, 'refresh_equity_spot_snapshot'))
+            for tick in (0, 5, 10, 15, 20, 30, 90, 90):
+                now[0] = tick
+                self.assertEqual(module.spot_futures_snapshot()['next_refresh_in_seconds'], 5)
+            self.assertEqual(module.EQUITY_MARKET_REFRESH_SECONDS, 15)
+            self.assertEqual(module.MARKET_REFRESH_SECONDS, 5)
+            self.assertEqual(alerts.call_count, 8)
+            self.assertEqual(refresh.call_count, 4)  # no catch-up burst after a pause
+            self.assertEqual(metadata.call_count, 8)  # prefetch + harvest only on equity turns
+            self.assertEqual([i for i, call in enumerate(fetch.call_args_list) if 'equity_bybit_tickers' in call.args[0]], [0, 3, 5, 6])
+            for call in fetch.call_args_list:
+                self.assertTrue({'futures_books', 'funding', 'binance_spot', 'gate_spot', 'bitget_spot'}.issubset(call.args[0]))
+            self.assertIs(module.EQUITY_SPOT_CACHE['snapshot'], original)
+
+    def test_equity_failed_attempts_are_limited_by_monotonic_start_time(self):
+        now = [100.0]
+        with patch.object(module.time, 'monotonic', side_effect=lambda: now[0]), \
+                patch.object(module, 'fetch_market_payloads', side_effect=RuntimeError('upstream unavailable')) as fetch, \
+                patch.object(module, 'collect_equity_metadata') as metadata:
+            for tick in (100, 105, 110, 115):
+                now[0] = tick
+                with self.assertRaisesRegex(RuntimeError, 'upstream unavailable'):
+                    module.spot_futures_snapshot()
+            self.assertEqual(fetch.call_count, 4)  # ordinary market recovery is not throttled
+            self.assertEqual(metadata.call_count, 2)
+            self.assertEqual([i for i, call in enumerate(fetch.call_args_list) if 'equity_bybit_tickers' in call.args[0]], [0, 3])
+
     def test_slow_metadata_is_nonblocking_bounded_and_preserves_fetch_time(self):
         pending, created = {}, []
         def submit(*_):

@@ -105,11 +105,12 @@ test('indicator displays real source time and ages it even without another respo
 });
 
 for(const [view,name] of [['spot-futures','loadSpotFutures'],['dual-futures','loadDualFutures'],['equity-arbitrage','loadEquityArbitrage'],['my-positions','loadHedgePositions'],['alerts','loadAlerts']]){
-  test(`${view}: 5-second start cadence, independent of response duration`,async()=>{
+  const seconds=view==='equity-arbitrage'?15:5;
+  test(`${view}: ${seconds}-second start cadence, independent of response duration`,async()=>{
     const h=harness(),starts=[];h.context.active=view;
     h.context[name]=()=>{starts.push(h.now());return new Promise(resolve=>h.context.setTimeout(resolve,2000))};
-    h.run('installPageRefreshTracking()');await h.context.startConfiguredPageTimers();h.context[name]();await h.flush();await h.advance(16000);
-    assert.deepEqual(starts,[100000,105000,110000,115000]);
+    h.run('installPageRefreshTracking()');await h.context.startConfiguredPageTimers();h.context[name]();await h.flush();await h.advance(seconds*3000+1000);
+    assert.deepEqual(starts,[0,1,2,3].map(i=>100000+i*seconds*1000));
   });
   test(`${view}: manual clicks coalesce and false return does not advance success time`,async()=>{
     const h=harness();h.context.active=view;let calls=0,resolve;
@@ -120,6 +121,39 @@ for(const [view,name] of [['spot-futures','loadSpotFutures'],['dual-futures','lo
     assert.equal(h.run(`pageRefreshState('${view}').failed`),true);
   });
 }
+
+test('equity 15-second polling leaves background alerts at 5 seconds',async()=>{
+  const h=harness(),equity=[],alerts=[];h.context.active='equity-arbitrage';
+  h.context.loadEquityArbitrage=async()=>{equity.push(h.now())};
+  h.context.loadAlerts=async()=>{alerts.push(h.now())};
+  h.run('installPageRefreshTracking()');await h.context.startConfiguredPageTimers();
+  await h.context.loadEquityArbitrage();await h.advance(30000);
+  assert.deepEqual(equity,[100000,115000,130000]);
+  assert.deepEqual(alerts,[105000,110000,115000,120000,125000,130000]);
+});
+
+test('equity ring uses 15 seconds and resets after completion without adding countdown text',async()=>{
+  const h=harness(),properties={};h.context.active='equity-arbitrage';
+  const ring={classList:{add(){},toggle(){}},style:{setProperty(key,value){properties[key]=value}},setAttribute(){}};
+  h.context.document.querySelector=()=>ring;
+  h.run(source.slice(source.indexOf('function renderPageRefreshIndicator('),source.indexOf('function beginPageRefresh(')));
+  h.run('Object.assign(pageRefreshState("equity-arbitrage"),{startedAt:100000,cycleStartedAt:100000})');
+  await h.advance(7500);h.context.renderPageRefreshIndicator();
+  assert.equal(properties['--refresh-angle'],'180deg');assert.ok(ring.title.includes('间隔 15秒'));
+  assert.ok(!h.context.byId('updated').textContent.includes('秒'));
+  h.context.beginPageRefresh('equity-arbitrage');assert.equal(properties['--refresh-angle'],'360deg');
+  h.context.finishPageRefresh('equity-arbitrage');assert.equal(properties['--refresh-angle'],'0deg');
+});
+
+test('inactive equity stops polling and a manual refresh is immediate, not delayed 15 seconds',async()=>{
+  const h=harness(),starts=[];h.context.active='equity-arbitrage';
+  h.context.loadEquityArbitrage=async()=>{starts.push(h.now())};
+  h.run('installPageRefreshTracking()');await h.context.startConfiguredPageTimers();
+  await h.context.loadEquityArbitrage();await h.advance(5000);await h.context.loadEquityArbitrage();
+  await h.advance(14999);assert.deepEqual(starts,[100000,105000]);
+  await h.advance(1);assert.deepEqual(starts,[100000,105000,120000]);
+  h.context.active='dashboard';await h.advance(30000);assert.equal(starts.length,3);
+});
 
 test('all live view reads abort, clear timers and can recover after timeout',async()=>{
   const h=harness();h.context.fetch=(_url,{signal})=>new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new Error('aborted'))));

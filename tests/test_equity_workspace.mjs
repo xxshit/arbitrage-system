@@ -31,8 +31,8 @@ test('equity navigation is exactly between spot and positions with its own view'
   const spot=html.indexOf('data-view="spot-futures"'),equity=html.indexOf('data-view="equity-arbitrage"'),positions=html.indexOf('data-view="my-positions"');
   assert.ok(spot<equity&&equity<positions);assert.ok(html.includes('id="equity-arbitrage" class="view"'));
   assert.ok(source.includes("if(viewId==='equity-arbitrage')loadEquityArbitrage();"));
-  assert.ok(source.includes("every('equity-arbitrage',5,()=>loadEquityArbitrage(),()=>activeViewId()==='equity-arbitrage')"));
-  assert.ok(source.includes("'equity-arbitrage':{label:'美股套利',seconds:5,names:['loadEquityArbitrage']}"));
+  assert.ok(source.includes("every('equity-arbitrage',pageRefreshProfiles['equity-arbitrage'].seconds,()=>loadEquityArbitrage(),()=>activeViewId()==='equity-arbitrage')"));
+  assert.ok(source.includes("'equity-arbitrage':{label:'美股套利',seconds:15,names:['loadEquityArbitrage']}"));
 });
 
 test('equity prices remain complete while percentages are two decimals, missing is not zero',()=>{

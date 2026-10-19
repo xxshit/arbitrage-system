@@ -11,6 +11,10 @@
     funding_interval_hours:4,next_funding_time:'2026-10-18 12:00:00',spot_volume:18200000,futures_volume:37600000,futures_open_interest:14300000,
     open_spread:0.85,close_spread:-0.93,change_5m:0.42,change_15m:0.7,change_30m:1.2,change_1h:2.1,change_12h:4.6,change_24h:7.9,change_3d:12.6,change_7d:18.4};
   const spot = symbols.map((symbol,index) => ({symbol,rows:[{...base,long_ask:base.long_ask+index/10,transfer_status:wallet('Gate')},{...base,long_exchange:'Bitget',open_spread:0.75,transfer_status:wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC',chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}],reason:'快照已过期'})}]}));
+  spot[0].rows.unshift({...base,long_exchange:'Binance',open_spread:.65,transfer_status:wallet('Binance',{chains:[{name:'BSC',deposit_open:true,withdraw_open:true}]})});
+  spot[1].rows=spot[1].rows.slice(0,1);
+  spot.slice(0,3).forEach(group=>{group.basis_opening={open_count:2,opened_basis:-1.1353,opened_at:'09-23 08:40:40',max_basis:-1.7,max_at:'09-23 08:45:00'}});
+  for(let i=0;i<7;i++)spot.push({symbol:`DENSITY${i+1}/USDT`,rows:[{...base,transfer_status:wallet('Gate')}]});
   const isolatedRisk={symbol:'ISOLATED/USDT',long_exchange:'Gate',short_exchange:'Binance',state:'confirmed',long_ask:.12225,short_bid:.02814,index_price:.02804,open_spread:-76.98,basis:.36,blocked_chains:['BSC 充关','ETH 提关'],blocked_transfers:[{exchange:'Gate',chain:'BSC',deposit_open:false,withdraw_open:true},{exchange:'Gate',chain:'ETH',deposit_open:true,withdraw_open:false}],transfer_state:'fresh',stale:false,observed_at:'10-19 00:00:00 UTC'};
   spot.push({symbol:isolatedRisk.symbol,rows:[{...base,...isolatedRisk,transfer_status:wallet('Gate'),price_divergence:isolatedRisk},{...base,long_exchange:'Bitget',transfer_status:wallet('Bitget',{chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}]})}]});
   const dual = symbols.map(symbol => ({symbol,binance_change_5m:0.42,binance_change_15m:0.7,binance_change_30m:1.2,binance_change_1h:2.1,rows:[
@@ -64,7 +68,7 @@
     '/api/equity-arbitrage':{items:[],page:1,pages:1,total:0,available:{spot_futures:0,futures_futures:0},captured_at_epoch:now(),execution_enabled:false},
     '/api/auth/me':{user_id:1,username:'preview_admin',is_admin:true,account_level:'lv3',csrf_token:'synthetic-only',device_lock_required:false,chat_nav_hidden:false},
     '/api/market-metadata/delisted-symbols':{symbols:[]},
-    '/api/spot-futures':{symbols:spot,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:5,page:1,pages:1,next_refresh_in_seconds:5},
+    '/api/spot-futures':{symbols:spot,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:spot.length,page:1,pages:1,next_refresh_in_seconds:5},
     '/api/dual-futures':{symbols:dual,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:4,page:1,pages:1,include_bybit_okx:false,next_refresh_in_seconds:5},
     '/api/arbitrage-thinking/funding-trend':{items:funding,updated_at:stamp},
     '/api/arbitrage-thinking/simple':{spot_simple:simple,dual_simple:simple.map(item=>({...item,long_exchange:'Bybit',long_is_spot:false,long_interval:4,long_open_interest:12000000}))},

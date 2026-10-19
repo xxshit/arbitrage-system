@@ -2,6 +2,8 @@ import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 os.environ["DATABASE_URL"] = "sqlite://"
 os.environ.setdefault("SECRET_KEY", "rolling-funding-test")
@@ -218,6 +220,44 @@ class RollingFundingTests(unittest.TestCase):
         expected = module.funding_statistics(["ROLLTESTUSDT"])["ROLLTESTUSDT"]
         self.assertEqual(actual, expected)
         self.assertAlmostEqual(actual["day_1"], .030)
+
+    def test_exchange_history_uses_only_verified_scoped_alias_without_scaling_rate(self):
+        aliases = [SimpleNamespace(**item, verified=True) for item in module.SEEDED_SYMBOL_ALIASES]
+        expected = {"PLAY/USDT": "PLAYSOUTUSDT", "SKYAI/USDT": "SKYAI1USDT", "XEC/USDT": "1000XECUSDT"}
+        end = int(self.now.timestamp() * 1000)
+        for symbol, raw in expected.items():
+            requested = []
+            def get(url, **_):
+                query = parse_qs(urlparse(url).query)
+                requested.append(query["symbol"][0])
+                if query["symbol"][0] != raw:
+                    return {"retCode": 10001, "result": {"list": []}}
+                if int(query["endTime"][0]) < end - 3600000:
+                    return {"retCode": 0, "result": {"list": []}}
+                return {"retCode": 0, "result": {"list": [{"fundingRateTimestamp": str(end - 3600000), "fundingRate": "0.00005"}]}}
+            with self.subTest(symbol=symbol), patch.object(module, "symbol_alias_rows", return_value=aliases), patch.object(module, "get_json", side_effect=get):
+                actual = module.fetch_exchange_funding_history("Bybit", symbol, end - 86400000, end)
+                self.assertEqual(actual, [(end - 3600000, .005)])
+                self.assertEqual(requested[:2], [symbol.replace("/", ""), raw])
+        with patch.object(module, "symbol_alias_rows", return_value=aliases), patch.object(module, "fetch_raw_exchange_funding_history", return_value=[]) as fetch:
+            module.fetch_exchange_funding_history("OKX", "PLAY/USDT", 0, end)
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(fetch.call_args.args[1], "PLAY/USDT")  # no cross-venue alias
+
+    def test_upstream_failure_is_not_treated_as_an_empty_symbol_or_zero_funding(self):
+        with patch.object(module, "get_json", return_value={"retCode": 10006}), patch.object(module, "symbol_alias_rows", return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, "bybit_funding_history_failed"):
+                module.fetch_exchange_funding_history("Bybit", "ROLLTEST/USDT", 0, 1)
+
+    def test_binance_dual_alias_reads_actual_contract_history_without_rate_multiplier(self):
+        aliases = [SimpleNamespace(**module.SEEDED_SYMBOL_ALIASES[0], verified=True)]
+        self.insert("Binance", [self.row(1, .005)], "1000XEC/USDT")
+        self.insert("Bybit", [self.row(1, .002)], "XEC/USDT")
+        groups = [{"symbol": "XEC/USDT", "rows": [{"long_exchange": "Bybit", "short_exchange": "Binance"}]}]
+        with patch.object(module, "symbol_alias_rows", return_value=aliases):
+            result = module.dual_funding_statistics(groups)[("XEC/USDT", "Bybit", "Binance")]
+        for field in ("previous", "day_1", "day_3", "day_7", "day_30"):
+            self.assertAlmostEqual(result[field], .003)
 
 
 if __name__ == "__main__":

@@ -2474,6 +2474,16 @@ def save_dual_funding_history_cursor(target):
 
 
 def fetch_exchange_funding_history(exchange, symbol, start_time, end_time):
+    # Use the same verified, exchange-scoped aliases as the quote paths. Funding
+    # is a percentage of notional: a 1000-unit contract does NOT scale the rate.
+    for raw_symbol, _multiplier in market_alias_candidates(symbol, exchange, "contract"):
+        rows = fetch_raw_exchange_funding_history(exchange, pair_slash(raw_symbol), start_time, end_time)
+        if rows:
+            return rows
+    return []
+
+
+def fetch_raw_exchange_funding_history(exchange, symbol, start_time, end_time):
     """Fetch settled non-Binance funding rates, newest first, down to start_time."""
     compact = symbol.replace("/", "")
     output = []
@@ -2483,6 +2493,10 @@ def fetch_exchange_funding_history(exchange, symbol, start_time, end_time):
             payload = get_json("https://api.bybit.com/v5/market/funding/history?" + urlencode({
                 "category": "linear", "symbol": compact, "endTime": cursor_end, "limit": 200,
             }), timeout=5)
+            if payload.get("retCode") == 10001:
+                return []  # unsupported symbol; only verified aliases may follow
+            if payload.get("retCode", 0) != 0:
+                raise RuntimeError("bybit_funding_history_failed")
             items = payload.get("result", {}).get("list", [])
             if not items:
                 break
@@ -2503,6 +2517,10 @@ def fetch_exchange_funding_history(exchange, symbol, start_time, end_time):
             if after:
                 params["after"] = after
             payload = get_json("https://www.okx.com/api/v5/public/funding-rate-history?" + urlencode(params), timeout=5)
+            if str(payload.get("code", "0")) == "51001":
+                return []
+            if str(payload.get("code", "0")) != "0":
+                raise RuntimeError("okx_funding_history_failed")
             items = payload.get("data", [])
             if not items:
                 break
@@ -2671,9 +2689,17 @@ def dual_funding_statistics(groups):
             return DUAL_FUNDING_STATISTICS_CACHE["data"]
         now = datetime.now(SHANGHAI_TZ)
         summaries = settled_funding_summaries(ExchangeFundingRateRecord, {(exchange, symbol) for exchange, symbol in targets if exchange != "Binance"}, now)
-        canonical_by_compact = {symbol.replace("/", ""): symbol for exchange, symbol in targets if exchange == "Binance"}
-        for compact, summary in settled_funding_summaries(FundingRateRecord, set(canonical_by_compact), now).items():
-            summaries[("Binance", canonical_by_compact[compact])] = summary
+        aliases = symbol_alias_rows()
+        binance_candidates = {symbol: [raw for raw, _multiplier in market_alias_candidates(symbol, "Binance", "contract", aliases)]
+                              for exchange, symbol in targets if exchange == "Binance"}
+        binance_summaries = settled_funding_summaries(FundingRateRecord, {raw for candidates in binance_candidates.values() for raw in candidates}, now)
+        for symbol, candidates in binance_candidates.items():
+            # Prefer the direct contract, matching quote normalization; fall back
+            # to a verified alias only when direct settled history is absent.
+            for raw in candidates:
+                if raw in binance_summaries:
+                    summaries[("Binance", symbol)] = binance_summaries[raw]
+                    break
         output = {}
         for group in groups:
             for row in group.get("rows", []):

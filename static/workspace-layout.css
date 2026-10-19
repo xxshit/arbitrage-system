@@ -10,7 +10,21 @@
 .workspace-layout main > header {align-items:start;gap:24px;margin-bottom:18px;padding-bottom:16px;border-bottom:1px solid var(--desk-line)}
 .workspace-layout main > header h1 {font-size:28px;line-height:1.25;margin:5px 0 8px}
 .workspace-layout main > header .sub {font-size:12px;line-height:1.7;max-width:660px}
-.workspace-layout .header-actions {gap:9px}
+.workspace-layout .header-actions {display:flex;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:9px;min-width:0}
+.workspace-layout .header-refresh {display:grid;gap:4px;flex:0 1 auto;min-width:0;max-width:100%}
+.workspace-layout main > header .header-refresh .status {width:auto;min-width:0;max-width:100%;padding-top:0;align-items:center;white-space:normal}
+.workspace-layout .header-refresh #updated {min-width:0;overflow-wrap:anywhere}
+.workspace-layout .header-refresh .header-refresh-feedback {max-width:100%;overflow-wrap:anywhere}
+.workspace-layout main > header .sound-actions {flex:0 0 auto}
+aside#appSidebar .caption {margin-bottom:12px}
+aside#appSidebar .sidebar-account {display:flex;align-items:center;justify-content:space-between;flex:0 0 auto;min-width:0;width:100%;gap:8px;margin:0 0 18px;padding:10px;border:1px solid #315777;border-radius:9px;background:#153b5b}
+aside#appSidebar .sidebar-account-info {display:grid;gap:6px;min-width:0}
+aside#appSidebar .sidebar-account-info > span {color:#f0f6fc;font-size:13px;line-height:1.4;overflow-wrap:anywhere}
+aside#appSidebar .sidebar-account-meta {display:flex;flex-wrap:wrap;align-items:center;gap:5px;min-width:0}
+aside#appSidebar .sidebar-account-meta > b {display:inline-block}
+aside#appSidebar .sidebar-account button {flex:0 0 auto;min-height:32px;padding:5px 7px;border:1px solid #5b7891;border-radius:6px;background:#214762;color:#f0f6fc;font-size:11px;white-space:nowrap}
+aside#appSidebar .sidebar-account button:hover {background:#2c5978}
+aside#appSidebar .sidebar-account button:focus-visible {outline:2px solid #67d7cf;outline-offset:3px}
 .workspace-layout main > header .section-refresh-button {flex:0 0 auto;min-width:52px;min-height:28px;padding:5px 8px;margin-left:3px;font-size:11px}
 .workspace-layout .section-refresh-button[hidden] {display:none!important}
 .workspace-layout .section-refresh-button:disabled {opacity:.55;cursor:wait}
@@ -581,7 +595,8 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
   .workspace-layout main > header h1 {font-size:24px}
   .workspace-layout main > header .sub {font-size:12px}
   .workspace-layout .header-actions {display:grid;grid-template-columns:minmax(0,1fr);gap:8px;width:100%;min-width:0}
-  .workspace-layout .header-actions .account-chip {width:100%;box-sizing:border-box;justify-content:space-between}
+  .workspace-layout .header-actions .header-refresh {width:100%}
+  aside#appSidebar .sidebar-account button {min-height:40px}
   .workspace-layout .header-actions .sound-actions {display:flex;flex-wrap:wrap;gap:6px;width:100%;min-width:0;justify-content:flex-start}
   .workspace-layout .header-actions .sound-actions :is(.sound-choice,.sound-test) {flex:1 1 0;width:auto;min-width:0;min-height:36px;padding:7px 5px;font-size:10px;white-space:nowrap}
   .workspace-layout .header-actions .status {width:100%;min-width:0;max-width:100%}

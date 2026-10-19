@@ -61,7 +61,7 @@ test('range repeats hide administrative labels without implying a new reminder c
   const label=h.context.alertPulseLabel(item);
   assert.ok(!label.includes('仅记录'));assert.ok(!label.includes('第30次'));
   assert.ok(h.context.alertRosterColumnsMarkup().includes('<span>提醒</span>'));
-  assert.ok(html.includes('20261020-spot-clean-footer-v1'));
+  assert.ok(html.includes('20261020-dual-white-cards-v1'));
 });
 
 test('price trace converts log prices into relative moves instead of showing a log-price as percent',()=>{
@@ -154,7 +154,7 @@ test('tips use the same simplified summary and retain open details across update
 test('pulse summaries have readable emphasis, explicit direction and native keyboard disclosure',()=>{
   assert.ok(css.includes('summary:focus-visible'));assert.ok(css.includes('.alert-pulse-move > b {white-space:nowrap;font-size:14px'));
   for(const text of ['.pulse-fall','.pulse-rise','flex-wrap:wrap','grid-template-columns:repeat(3,minmax(0,1fr))'])assert.ok(css.includes(text));
-  assert.ok(html.includes('20261020-spot-clean-footer-v1'));
+  assert.ok(html.includes('20261020-dual-white-cards-v1'));
 });
 
 test('pulse labels do not interpolate untrusted backend strings',()=>{

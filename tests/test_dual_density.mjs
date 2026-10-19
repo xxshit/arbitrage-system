@@ -47,7 +47,7 @@ test('compact dual keeps five aligned columns for one, two and three paths',()=>
       assert.ok(grid[column].includes(side==='long'?'4H':'8H'));assert.ok(grid[column].includes(side==='long'?'12:00:00':'16:00:00'));
     }
     for(const field of ['open_spread','close_spread','funding_difference','funding_difference_previous','funding_difference_24h','funding_difference_3d','funding_difference_7d','funding_difference_30d'])assert.ok(grid[4].includes(harness().dualDisplayPercent(row[field])),field);
-    assert.ok(grid[4].includes(row.funding_settlement_label));assert.ok(grid[4].includes('60.00%'));assert.ok(grid[4].includes(row._commonIndexId));
+    assert.ok(!grid[4].includes(row.funding_settlement_label));assert.ok(grid[4].includes('60.00%'));assert.ok(grid[4].includes(row._commonIndexId));
     active.forEach((item,index)=>{if(item&&!--item.left)active[index]=null});
   }
   assert.equal(routeIndex,6);assert.ok(active.every(item=>item===null));
@@ -78,4 +78,31 @@ test('dual density only hides duplicated trend lights, empty opening placeholder
   assert.ok(!compact.includes('overflow:hidden'));assert.ok(!compact.includes('text-overflow:ellipsis'));
   assert.ok(!compact.includes('#spot-futures'));assert.ok(!compact.includes('#equity-arbitrage'));
   assert.ok(source.includes("'dual-futures':{label:'期多期空',seconds:5"));
+});
+
+test('funding comparison removes the settlement note without dropping any period or mutating data',()=>{
+  const context=harness();
+  for(const label of ['双方结算 · 16:00','仅空腿结算 · 16:00',undefined]){
+    const row={...route('Bybit',0),funding_settlement_label:label},before=JSON.stringify(row),markup=context.dualFundingHistory(row);
+    assert.equal(JSON.stringify(row),before);assert.equal((markup.match(/<em /g)||[]).length,6);
+    for(const period of ['当前','上期','24H','3D','7D','30D'])assert.ok(markup.includes(`<b>${period}</b>`));
+    assert.ok(!markup.includes('<small>'));assert.ok(!markup.includes('结算'));assert.ok(!markup.includes('待同步'));
+    // Each leg's own settlement clock and cycle are still present.
+    assert.ok(context.dualExchangeCard(row,'long').includes('12:00:00'));
+    assert.ok(context.dualExchangeCard(row,'short').includes('16:00:00'));
+  }
+});
+
+test('dual restores rounded light cards without restoring large padding or tall tiles',()=>{
+  assert.ok(compact.includes('.dual-result-panel .common-index {display:inline-block;min-width:0}'));
+  assert.ok(compact.includes('td.symbol > div:has(> .kline-link) {display:flex;align-items:center}'));
+  for(const selector of ['.dual-exchange-card {','.dual-result-panel {','.dual-funding-history {']){
+    const rule=compact.slice(compact.indexOf(selector)).split('}')[0];
+    assert.match(rule,/border:1px solid/);assert.ok(rule.includes('border-radius:8px'));assert.ok(rule.includes('background:linear-gradient'));
+    assert.ok(!rule.includes('padding:10px'));assert.ok(!rule.includes('padding:12px'));
+  }
+  for(const selector of ['.dual-result-panel > div {','.dual-funding-history > span {']){
+    const rule=compact.slice(compact.indexOf(selector)).split('}')[0];
+    assert.ok(rule.includes('min-height:0'));assert.ok(rule.includes('background:rgba(255,255,255,.85)'));
+  }
 });

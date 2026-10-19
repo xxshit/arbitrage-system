@@ -421,10 +421,11 @@ function installTransferPopoverHandlers(){
 // Browsing pins identities, never quotes. Each poll still reads fresh watched groups.
 class MarketBrowseOrder{
   constructor(){this.version=0;this.context=null;this.reset()}
-  reset(context=this.context,freezeNext=false){this.version++;this.context=context;this.locked=false;this.freezeNext=freezeNext;this.displayed=[];this.order=[];this.changed=false;this.missing=0;this.page=1}
+  reset(context=this.context){this.version++;this.context=context;this.locked=false;this.displayed=[];this.order=[];this.changed=false;this.missing=0;this.page=1}
   prepare(context){if(this.context!==context)this.reset(context)}
   identities(groups){return groups.map(group=>({symbol:group.symbol,rows:group.rows.map(row=>({long_exchange:row.long_exchange,short_exchange:row.short_exchange}))}))}
   lock(){if(this.locked||!this.displayed.length)return false;this.order=this.identities(this.displayed);this.locked=true;this.version++;return true}
+  resume(){this.version++;this.locked=false;this.order=[];this.changed=false;this.missing=0}
   requestUrl(base){return base+(this.locked?'&observed_symbols='+encodeURIComponent(JSON.stringify(this.order.map(group=>group.symbol))):'')}
   accept(data){
     if(!Array.isArray(data.symbols)||data.symbols.some(group=>!Array.isArray(group.rows)))throw new Error('行情格式异常');
@@ -444,7 +445,6 @@ class MarketBrowseOrder{
       });
     }else{
       this.page=data.page;
-      if(this.freezeNext){this.order=this.identities(groups);this.locked=true;this.freezeNext=false}
     }
     this.displayed=groups;
     return groups;
@@ -458,12 +458,12 @@ function marketBaseUrl(scope){
 function marketBrowseControls(scope){return `<span class="market-order-control"><span id="${scope}OrderState" class="market-order-state">实时排序</span><button type="button" id="${scope}Resort" onclick="resortMarket('${scope}')" title="按最新行情重新排列币种和路径">重新排序</button></span>`}
 function updateMarketBrowseControls(scope){
   const state=marketBrowseStates[scope],label=byId(scope+'OrderState'),button=byId(scope+'Resort');
-  if(label){label.textContent=state.locked?'顺序已固定':'实时排序';label.title=state.locked?'行情继续每5秒更新；点击重新排序更新顺序':'浏览交易对时固定顺序，行情继续更新'}
-  if(button){button.classList?.toggle('ranking-changed',state.changed);button.title=state.changed?'排名或路径有变化，点击重新排序':'按最新行情重新排列币种和路径'}
+  if(label){label.textContent=state.locked?'顺序已固定':'实时排序';label.title=state.locked?'行情继续每5秒更新；回到列表左上方后自动恢复排序，也可点击重新排序':'行情及排名持续更新；滚动或点击行情时保护浏览位置，悬停不锁定'}
+  if(button){button.classList?.toggle('ranking-changed',state.changed);button.title=state.changed?'排名或路径有变化，点击重新排序并恢复实时排序':'重新排列币种和路径，并恢复实时排序'}
 }
 function resetMarketBrowse(scope){marketBrowseStates[scope].reset();updateMarketBrowseControls(scope)}
 function resortMarket(scope){
-  const state=marketBrowseStates[scope];state.reset(marketBaseUrl(scope),true);updateMarketBrowseControls(scope);
+  const state=marketBrowseStates[scope];state.prepare(marketBaseUrl(scope));state.resume();updateMarketBrowseControls(scope);
   return scope==='spot'?loadSpotFutures(true):loadDualFutures(true);
 }
 function lockMarketBrowse(scope){
@@ -474,16 +474,57 @@ function lockMarketBrowse(scope){
 }
 function installMarketBrowseLocks(){
   ['spot','dual'].forEach(scope=>{
-    const view=byId(scope==='spot'?'spot-futures':'dual-futures'),wrap=view?.querySelector('.table-wrap'),body=byId(scope==='spot'?'spotFuturesRows':'dualFuturesRows');
+    const view=byId(scope==='spot'?'spot-futures':'dual-futures'),wrap=view?.querySelector('.table-wrap');
     if(!wrap||wrap.dataset.browseLock)return;wrap.dataset.browseLock='true';wrap.tabIndex=0;
     wrap.setAttribute('aria-label',scope==='spot'?'现多期空交易对':'期多期空交易对');
-    // User intent, not render-induced scroll events; never unlock on an idle timer.
-    view.addEventListener('wheel',()=>lockMarketBrowse(scope),{passive:true});
-    wrap.addEventListener('touchstart',()=>lockMarketBrowse(scope),{passive:true});
-    wrap.addEventListener('pointerdown',()=>lockMarketBrowse(scope),{passive:true});
-    body?.addEventListener('pointerover',()=>lockMarketBrowse(scope),{passive:true});
-    wrap.addEventListener('focusin',()=>lockMarketBrowse(scope));
-    wrap.addEventListener('keydown',event=>{if(['ArrowDown','ArrowUp','PageDown','PageUp','Home','End',' '].includes(event.key))lockMarketBrowse(scope)});
+    let scrollIntentUntil=0,resumeTimer=null;
+    const atStart=()=>wrap.scrollTop<=2&&wrap.scrollLeft<=2&&(wrap.scrollHeight>wrap.clientHeight+1||window.scrollY<=2);
+    const cancelResume=()=>{clearTimeout(resumeTimer);resumeTimer=null};
+    const active=event=>event.isTrusted!==false&&activeViewId()===view.id;
+    const browse=()=>{cancelResume();lockMarketBrowse(scope)};
+    const allowScroll=()=>{scrollIntentUntil=Date.now()+2000};
+    const maybeResume=()=>{
+      cancelResume();
+      if(!marketBrowseStates[scope].locked||!atStart())return;
+      // Only settle a deliberate return to the start. Never time out a reader farther down.
+      const version=marketBrowseStates[scope].version;
+      resumeTimer=setTimeout(()=>{
+        resumeTimer=null;
+        if(activeViewId()===view.id&&marketBrowseStates[scope].version===version&&marketBrowseStates[scope].locked&&atStart()&&!wrap.querySelector('[aria-expanded="true"]'))resortMarket(scope);
+      },400);
+    };
+    const scroll=()=>{
+      if(activeViewId()!==view.id||Date.now()>scrollIntentUntil)return;
+      maybeResume();
+    };
+    // Hover/focus can be synthesized by repainting underneath a stationary pointer.
+    // Neither they nor render-induced scrolling are evidence of browsing intent.
+    wrap.addEventListener('wheel',event=>{
+      if(!active(event)||event.ctrlKey||(!event.deltaX&&!event.deltaY))return;
+      allowScroll();
+      if(atStart()&&event.deltaY<=0&&event.deltaX<=0){maybeResume();return}
+      browse();
+    },{passive:true});
+    wrap.addEventListener('pointerdown',event=>{
+      if(!active(event)||event.button!==0)return;
+      allowScroll();
+      if(event.target===wrap||event.target.closest?.('tbody tr[data-render-key]'))browse();
+    },{passive:true});
+    wrap.addEventListener('touchmove',event=>{if(active(event)){allowScroll();browse()}},{passive:true});
+    wrap.addEventListener('touchend',event=>{if(active(event)){allowScroll();scroll()}},{passive:true});
+    wrap.addEventListener('keydown',event=>{
+      if(!active(event)||event.target.closest?.('input,select,textarea')||!['ArrowDown','ArrowUp','ArrowLeft','ArrowRight','PageDown','PageUp','Home','End',' '].includes(event.key))return;
+      allowScroll();
+      if(atStart()&&(['ArrowUp','ArrowLeft','PageUp','Home'].includes(event.key)||(event.key===' '&&event.shiftKey))){maybeResume();return}
+      browse();
+    });
+    wrap.addEventListener('scroll',scroll,{passive:true});
+    // Very short screens use document scrolling instead of a nested table scroller.
+    window.addEventListener('scroll',scroll,{passive:true});
+    wrap.addEventListener('pointerleave',event=>{if(active(event))maybeResume()},{passive:true});
+    document.addEventListener('pointerdown',event=>{
+      if(active(event)&&!wrap.contains(event.target)&&!event.target.closest?.('.transfer-popover,.delisting-popover'))maybeResume();
+    },{passive:true});
   });
 }
 function marketScrollAnchor(scope){

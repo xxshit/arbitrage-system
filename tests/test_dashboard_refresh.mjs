@@ -285,12 +285,14 @@ for(const scope of ['spot','dual']){
     assert.ok(h.requests.at(-1).url.includes('observed_symbols='));await h.resolve(h.data([h.group('B',2)],[h.group('A',3)]));
     assert.equal(h.state().displayed[0].rows[0].open_spread,3);
   });
-  test(`${scope}: re-sort discards a pending pinned response, applies latest ranking once and stays fixed`,async()=>{
+  test(`${scope}: re-sort discards a pending pinned response and restores continuous live ranking`,async()=>{
     const h=browseHarness(scope);h.load();await h.resolve(h.data([h.group('A',1)]));h.lock();
     h.load();h.resort();await h.resolve(h.data([h.group('B',2)],[h.group('A',3)]));await h.advance(0);
     assert.ok(!h.requests.at(-1).url.includes('observed_symbols='));await h.resolve(h.data([h.group('B',4)]));
-    assert.equal(h.renders.at(-1),'B');assert.equal(h.state().locked,true);assert.equal(h.state().changed,false);
+    assert.equal(h.renders.at(-1),'B');assert.equal(h.state().locked,false);assert.equal(h.state().changed,false);
     await h.advance(0);assert.equal(h.requests.length,3);
+    h.load();assert.ok(!h.requests.at(-1).url.includes('observed_symbols='));await h.resolve(h.data([h.group('C',5)]));
+    assert.equal(h.renders.at(-1),'C');assert.equal(h.state().locked,false);
   });
   test(`${scope}: missing paths are placeholders, not cached numbers; recovery reuses original slot`,async()=>{
     const h=browseHarness(scope);h.load();await h.resolve(h.data([h.group('A',1),h.group('B',2)]));h.lock();
@@ -337,9 +339,94 @@ test('both scanner states are independent and all explicit filter/page/sort hand
     for(const name of names){const line=source.split('\n').find(line=>line.startsWith('function '+name+'('));assert.ok(line.includes(`resetMarketBrowse('${scope}')`),name)}
   }
   const hooks=source.slice(source.indexOf('function installMarketBrowseLocks'),source.indexOf('function marketScrollAnchor'));
-  for(const event of ['wheel','touchstart','pointerdown','pointerover','focusin','keydown'])assert.ok(hooks.includes(`'${event}'`));
-  assert.ok(!hooks.includes("addEventListener('scroll'"));assert.ok(!hooks.includes('setTimeout'));
+  for(const event of ['wheel','pointerdown','touchmove','touchend','keydown'])assert.ok(hooks.includes(`'${event}'`));
+  for(const event of ['pointerover','focusin','touchstart'])assert.ok(!hooks.includes(`addEventListener('${event}'`));
+  assert.ok(hooks.includes('Date.now()>scrollIntentUntil'));assert.ok(!source.includes('freezeNext'));
 });
+
+function installBrowseHooks(h){
+  const node=()=>({handlers:new Map(),dataset:{},addEventListener(name,fn){this.handlers.set(name,fn)},
+    fire(name,event={}){this.handlers.get(name)?.({isTrusted:true,target:this,button:0,deltaX:0,deltaY:0,...event})},
+    setAttribute(){},closest(){return null}});
+  const wrap=Object.assign(node(),{scrollTop:0,scrollLeft:0,scrollHeight:2000,clientHeight:500,expanded:false,
+    querySelector(){return this.expanded?{}:null},contains(target){return target===this||target===row}});
+  const row=Object.assign(node(),{closest:selector=>selector==='tbody tr[data-render-key]'?row:null});
+  const view=Object.assign(node(),{id:h.scope==='spot'?'spot-futures':'dual-futures',querySelector:()=>wrap});
+  const doc=node(),win=node(),oldById=h.context.byId;
+  h.context.byId=id=>id===view.id?view:id===(h.scope==='spot'?'dual-futures':'spot-futures')?null:oldById(id);
+  h.context.document.addEventListener=(...args)=>doc.addEventListener(...args);
+  h.context.addEventListener=(...args)=>win.addEventListener(...args);h.context.scrollY=0;
+  h.context.installMarketBrowseLocks();h.context.installMarketBrowseLocks();
+  return {wrap,row,view,doc,win};
+}
+
+for(const scope of ['spot','dual']){
+  test(`${scope}: repeated repaint, stationary hover, focus and programmatic scroll never pin ranking`,async()=>{
+    const h=browseHarness(scope),ui=installBrowseHooks(h);
+    for(let i=0;i<4;i++){
+      h.load();await h.resolve(h.data([h.group('rank-'+i,i)]));
+      for(const event of ['pointerover','focusin','scroll'])ui.wrap.fire(event,{target:ui.row});
+      assert.equal(h.state().locked,false);assert.ok(!h.requests.at(-1).url.includes('observed_symbols='));
+    }
+    assert.equal(h.renders.at(-1),'rank-3');
+    ui.view.fire('wheel',{deltaY:100});ui.wrap.fire('wheel',{deltaY:100,ctrlKey:true});
+    ui.wrap.fire('wheel',{deltaY:100,isTrusted:false});ui.wrap.fire('wheel',{deltaY:-100});
+    ui.wrap.fire('pointerdown',{target:ui.row,button:2});assert.equal(h.state().locked,false);
+  });
+  test(`${scope}: scrolling protects coins and paths until an intentional return to the origin`,async()=>{
+    const h=browseHarness(scope),ui=installBrowseHooks(h);
+    h.load();await h.resolve(h.data([h.group('A',1),h.group('B',2)]));
+    ui.wrap.fire('wheel',{deltaY:120});ui.wrap.scrollTop=120;ui.wrap.fire('scroll');
+    assert.equal(h.state().locked,true);
+    await h.advance(10000);ui.wrap.fire('pointerleave');await h.advance(500);
+    assert.equal(h.state().locked,true,'idle or leaving halfway down must not move a reader');
+    // Render/focus-induced scroll cannot lift the protection after input intent expires.
+    ui.wrap.scrollTop=0;ui.wrap.fire('scroll');await h.advance(500);assert.equal(h.state().locked,true);
+    ui.wrap.scrollTop=120;ui.wrap.fire('wheel',{deltaY:-120});ui.wrap.scrollTop=0;ui.wrap.fire('scroll');
+    await h.advance(399);assert.equal(h.state().locked,true);await h.advance(1);
+    assert.equal(h.state().locked,false);assert.ok(!h.requests.at(-1).url.includes('observed_symbols='));
+    await h.resolve(h.data([h.group('B',9),h.group('A',8)]));assert.equal(h.renders.at(-1),'B,A');
+  });
+  test(`${scope}: re-sort stays live but a new browsing action during its request protects the visible rows`,async()=>{
+    const h=browseHarness(scope),ui=installBrowseHooks(h);
+    h.load();await h.resolve(h.data([h.group('A',1)]));h.lock();h.resort();
+    ui.wrap.fire('pointerdown',{target:ui.row});assert.equal(h.state().locked,true);
+    await h.resolve(h.data([h.group('B',2)]));await h.advance(0);
+    assert.ok(h.requests.at(-1).url.includes('observed_symbols='));
+    await h.resolve(h.data([h.group('B',2)],[h.group('A',3)]));assert.equal(h.renders.at(-1),'A');
+  });
+  test(`${scope}: horizontal, keyboard and touch browsing resume only after returning to both axes`,async()=>{
+    const h=browseHarness(scope),ui=installBrowseHooks(h);
+    h.load();await h.resolve(h.data([h.group('A',1)]));
+    ui.wrap.fire('keydown',{key:'ArrowRight'});ui.wrap.scrollLeft=150;ui.wrap.fire('scroll');
+    ui.wrap.fire('pointerleave');await h.advance(500);assert.equal(h.state().locked,true);
+    ui.wrap.fire('keydown',{key:'Home'});ui.wrap.scrollLeft=0;ui.wrap.fire('scroll');await h.advance(400);
+    assert.equal(h.state().locked,false);await h.resolve(h.data([h.group('B',2)]));
+    ui.wrap.fire('touchmove');ui.wrap.scrollTop=80;ui.wrap.fire('scroll');assert.equal(h.state().locked,true);
+    ui.wrap.scrollTop=0;ui.wrap.fire('touchend');await h.advance(400);assert.equal(h.state().locked,false);
+  });
+  test(`${scope}: top-row inspection resumes on leaving, except while its details are expanded`,async()=>{
+    const h=browseHarness(scope),ui=installBrowseHooks(h);
+    h.load();await h.resolve(h.data([h.group('A',1)]));ui.wrap.fire('pointerdown',{target:ui.row});
+    ui.wrap.expanded=true;ui.wrap.fire('pointerleave');await h.advance(400);assert.equal(h.state().locked,true);
+    ui.wrap.expanded=false;ui.doc.fire('pointerdown');await h.advance(400);assert.equal(h.state().locked,false);
+    await h.resolve(h.data([h.group('B',2)]));
+    ui.wrap.fire('pointerdown',{target:ui.row});ui.wrap.fire('pointerleave');await h.advance(200);
+    ui.wrap.fire('pointerdown',{target:ui.row});await h.advance(400);assert.equal(h.state().locked,true,'new intent cancels resume');
+    ui.wrap.fire('pointerleave');h.context.resetMarketBrowse(scope);h.lock();await h.advance(400);
+    assert.equal(h.requests.length,2,'a timer from the previous context cannot issue a request');
+  });
+  test(`${scope}: short-screen document scroll and pending pinned responses obey automatic resume`,async()=>{
+    const h=browseHarness(scope),ui=installBrowseHooks(h);
+    h.load();await h.resolve(h.data([h.group('A',1)]));ui.wrap.scrollHeight=ui.wrap.clientHeight;
+    ui.wrap.fire('wheel',{deltaY:120});h.context.scrollY=120;ui.win.fire('scroll');
+    ui.wrap.fire('pointerleave');await h.advance(400);assert.equal(h.state().locked,true);
+    h.load();ui.wrap.fire('keydown',{key:'Home'});h.context.scrollY=0;ui.win.fire('scroll');await h.advance(400);
+    await h.resolve(h.data([h.group('B',2)],[h.group('A',3)]));await h.advance(0);
+    assert.ok(!h.requests.at(-1).url.includes('observed_symbols='));
+    await h.resolve(h.data([h.group('B',4)]));assert.equal(h.renders.at(-1),'B');assert.equal(h.state().locked,false);
+  });
+}
 
 function enableSpotHeader(h){
   const ring={classList:{add(){},toggle(){}},style:{setProperty(){}},setAttribute(){}};

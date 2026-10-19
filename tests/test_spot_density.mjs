@@ -73,3 +73,22 @@ test('compact styling is spot-scoped, keeps all period values and wraps divergen
   assert.ok(source.includes("'spot-futures':{label:'现多期空',seconds:5"));
   assert.ok(source.includes("'equity-arbitrage':{label:'美股套利',seconds:15"));
 });
+
+test('spot page allocates remaining viewport height to one table scroll without hiding overflow',()=>{
+  const compact=css.slice(css.indexOf('/* Spot scanner:'),css.indexOf('/* 05 Hedge ledger:'));
+  assert.ok(compact.includes('body:has(#spot-futures.active) main {display:flex;flex-direction:column;height:100%;min-height:0;'));
+  assert.ok(compact.includes('.layout-view#spot-futures.active {display:flex;flex:1 1 0;flex-direction:column;min-height:0}'));
+  assert.ok(compact.includes('.layout-view#spot-futures > .panel {display:flex;flex:1 1 0;flex-direction:column;min-height:0;margin:0;'));
+  assert.ok(compact.includes('.layout-view#spot-futures.active .table-wrap {flex:1 1 0;min-height:0;max-height:none;overflow:auto;overscroll-behavior:contain}'));
+  assert.ok(compact.includes(':is(.panel-title,.pagination) {flex:0 0 auto}'));
+  assert.ok(!compact.includes('100dvh - 205px'));assert.ok(!compact.includes('overflow:hidden'));assert.ok(!compact.includes('overflow-y:hidden'));
+});
+
+test('narrow pagination keeps all controls reachable and short screens use page scroll instead of clipping rows',()=>{
+  const compact=css.slice(css.indexOf('/* Spot scanner:'),css.indexOf('/* 05 Hedge ledger:'));
+  assert.ok(compact.includes('grid-template-columns:auto minmax(0,1fr) auto'));
+  for(const id of ['previousPage','nextPage','pageInfo'])assert.ok(compact.includes('.pagination #'+id));
+  assert.ok(compact.includes('@media(max-height:520px), (max-width:760px) and (max-height:640px)'));
+  assert.ok(compact.includes('body:has(#spot-futures.active) main {display:block;height:auto}'));
+  assert.ok(!compact.includes('scrollbar-width:none'));assert.ok(!compact.includes('-webkit-scrollbar'));
+});

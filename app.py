@@ -48,6 +48,11 @@ from funding_alerts import advance as advance_funding_alert, binance_observation
 from funding_history import DAY_MS, FundingHistoryClient, FundingHistoryError, FundingSyncSchedule, expected_settlement
 from market_transport import PublicMarketHttp, decode_json
 from market_status import snapshot_delays
+from spread_history import (
+    HistoryBuffer, HistoryStore, PERIODS as SPREAD_HISTORY_PERIODS,
+    VENUES as SPREAD_HISTORY_VENUES, observations as spread_history_observations,
+    chart_series,
+)
 
 load_dotenv()
 
@@ -64,6 +69,8 @@ app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
 ALERT_STREAM_HUB = AlertStreamHub()
 ALERT_HISTORY_INDEX = AlertHistoryIndex()
+SPREAD_HISTORY_BUFFER = HistoryBuffer()
+SPREAD_HISTORY_STORE = HistoryStore(Path(app.instance_path) / "spread-history")
 
 
 @app.after_request
@@ -84,7 +91,7 @@ def compress_alert_market_response(response):
 
 @app.after_request
 def disable_live_view_response_cache(response):
-    if request.path in {"/api/dashboard", "/api/spot-futures", "/api/dual-futures", "/api/equity-arbitrage", "/api/alerts", "/api/hedge-positions", "/api/daily-report/listings", "/api/market-metadata/delisted-symbols"}:
+    if request.path in {"/api/dashboard", "/api/spot-futures", "/api/spot-futures/history", "/api/dual-futures", "/api/equity-arbitrage", "/api/alerts", "/api/hedge-positions", "/api/daily-report/listings", "/api/market-metadata/delisted-symbols"}:
         response.headers["Cache-Control"] = "private, no-store"
     return response
 
@@ -1228,6 +1235,7 @@ RUNTIME_RULE_DEFAULTS = [
     {"rule_key": "rapid_move_threshold", "category": "报警规则", "label": "实时异动报警", "schedule_type": "policy", "value": "15秒0.20 / 30秒0.30 / 120秒0.50", "unit": "百分点", "editable": False, "description": "有效对齐报价首次越线即记录；保留瞬时极值与回落，回落后再变动0.20个百分点独立记录，不要求超过旧峰值。小偏离冻结起点、300秒内累计0.50个百分点也记录。双端价格另用1%/1.5%/3%对数变化阈值。只在网页提醒，不新增Lark。"},
     {"rule_key": "funding_retention", "category": "数据保留", "label": "资费历史保留", "schedule_type": "retention", "value": "31", "unit": "天", "editable": False, "description": "保留31天真实结算，给最近720小时滚动累计留一天缓冲；超过31天清理。"},
     {"rule_key": "price_retention", "category": "数据保留", "label": "价格快照保留", "schedule_type": "retention", "value": "8", "unit": "天", "editable": False, "description": "涨跌幅计算所需的 Binance 价格快照滚动保留 8 天。"},
+    {"rule_key": "spread_history_retention", "category": "数据保留", "label": "现多期空开差/基差历史", "schedule_type": "retention", "value": "15", "unit": "天", "editable": False, "description": "有效公开行情每分钟保留首末及高低点，按小时压缩；滚动展示15天，未采集和失效行情留空。"},
     {"rule_key": "chat_retention", "category": "数据保留", "label": "协作记录保留", "schedule_type": "retention", "value": str(CHAT_RETENTION_DAYS), "unit": "天", "editable": False, "description": f"文字消息、图片消息和私有图片文件仅保留最近 {CHAT_RETENTION_DAYS} 天，过期后自动物理清理。"},
 ]
 MARKET_REFRESH_METRICS = {
@@ -3875,7 +3883,11 @@ def spot_futures_snapshot():
         if rows:
             for row in rows:
                 row.update(mark_price=float(funding_item["markPrice"]), index_price=float(funding_item["indexPrice"]))
+                row["basis_source_at"] = float(funding_item.get("time", 0) or 0) / 1000 or None
             rows_by_symbol.append({"symbol": alias["canonical"], "rows": rows})
+    SPREAD_HISTORY_BUFFER.observe(spread_history_observations(
+        (group for group in rows_by_symbol if not is_rwa_stock_pair(group["symbol"])),
+        getattr(results, "observed_at", {}), errors, time.time()))
     rows_finished_at = time.perf_counter()
     evaluate_alerts(rows_by_symbol)
     alerts_finished_at = time.perf_counter()
@@ -7441,6 +7453,34 @@ def market_rank_identities(groups):
         {key: row[key] for key in ("long_exchange", "short_exchange") if key in row}
         for row in group["rows"]
     ]} for group in groups]
+
+
+def persist_spread_history(now=None):
+    return SPREAD_HISTORY_STORE.persist(SPREAD_HISTORY_BUFFER, time.time() if now is None else now)
+
+
+def read_spot_spread_history(symbol, exchange, period, now=None):
+    now = time.time() if now is None else now
+    duration = SPREAD_HISTORY_PERIODS[period]
+    start = now - duration
+    step = max(60, math.ceil(duration / 720 / 60) * 60)
+    series = {}
+    for metric, venue in (("open", exchange), ("basis", "Binance")):
+        records = SPREAD_HISTORY_STORE.chunks(symbol, venue, metric, start, now)
+        series[metric] = chart_series(records, start, now, step)
+    return dict(symbol=symbol, exchange=exchange, period=period, start=start, end=now,
+                retention_days=15, sample_seconds=5, summary_seconds=step, series=series)
+
+
+@app.get("/api/spot-futures/history")
+def spot_spread_history():
+    symbol = request.args.get("symbol", "").strip().upper()
+    exchange = request.args.get("exchange", "")
+    period = request.args.get("period", "24h")
+    if (len(symbol) > 30 or not re.fullmatch(r"[\w]+/USDT", symbol)
+            or exchange not in SPREAD_HISTORY_VENUES or period not in SPREAD_HISTORY_PERIODS):
+        return jsonify(error="请选择有效币种、现货交易所和最长15天的周期。"), 400
+    return jsonify(read_spot_spread_history(symbol, exchange, period))
 
 
 @app.get("/api/spot-futures")
@@ -14873,6 +14913,25 @@ with app.app_context():
         db.session.commit()
 
 
+def background_spread_history():
+    last_cleanup = 0
+    warned_dropped = 0
+    while True:
+        started = time.monotonic()
+        try:
+            SPREAD_HISTORY_STORE.prune(time.time())
+            persist_spread_history()
+            if time.time() - last_cleanup >= 3600 and SPREAD_HISTORY_STORE.directory.is_dir():
+                SPREAD_HISTORY_STORE.maintain(time.time())
+                last_cleanup = time.time()
+            if SPREAD_HISTORY_BUFFER.dropped > warned_dropped:
+                app.logger.warning("Spread history persistence backlog exceeded bounded buffer; chart gaps retained")
+                warned_dropped = SPREAD_HISTORY_BUFFER.dropped
+        except Exception:
+            app.logger.exception("Spread history persistence failed; bounded buffer retained for retry")
+        time.sleep(max(1, 30 - (time.monotonic() - started)))
+
+
 def background_spot_market_refresh():
     while True:
         cycle_started_at = time.monotonic()
@@ -15586,6 +15645,7 @@ def start_background_workers():
     ):
         threading.Thread(target=background_dashboard_cache_refresh, args=(refresh, seconds, rule_key, rule_key is None, requires_metadata), daemon=True, name=f"dashboard-{name}").start()
     threading.Thread(target=background_spot_market_refresh, daemon=True, name="spot-market-refresh").start()
+    threading.Thread(target=background_spread_history, daemon=True, name="spot-spread-history").start()
     threading.Thread(target=background_dual_market_refresh, daemon=True, name="dual-market-refresh").start()
     for exchange in ("Binance", "Bybit", "OKX"):
         threading.Thread(target=background_funding_history_sync, args=(exchange,), daemon=True,

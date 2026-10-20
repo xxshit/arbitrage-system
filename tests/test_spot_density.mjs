@@ -10,6 +10,7 @@ const renderer=source.slice(source.indexOf('function spotRows('),source.indexOf(
 const columns=source.slice(source.indexOf('function configureSpotColumns('),source.indexOf('function configureSpotLayoutShell('));
 function harness(){
   const context={encodeURIComponent,exchangeName:name=>`EXCHANGE:${name}`,signClass:n=>n<0?'negative':'positive',percent:n=>`${n}%`,
+    spreadHistoryButton:(_symbol,_exchange,_metric,value)=>`${value}%`,
     intervalClass:()=>'',fundingClock:time=>time,coinglassKlineUrl:()=>'/chart',delistingSymbolClass:()=>'',
     spotTransferStatus:(row,symbol)=>`STATUS:${symbol}:${row.long_exchange}`,basisOpeningMarkup:()=>'<span>OPENING</span>',
     spotLiquidity:row=>`SPOT_VOLUME:${row.spot_volume}`,futuresLiquidity:row=>`FUTURE_VOLUME:${row.futures_volume}`,

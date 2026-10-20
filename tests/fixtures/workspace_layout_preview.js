@@ -134,6 +134,18 @@
     const method = String(options.method || 'GET').toUpperCase();
     if (method !== 'GET') return Response.json({error:'隔离预览禁止写入'}, {status:405});
     const url = new URL(String(input), location.origin),path=url.pathname;
+    if(path==='/api/spot-futures/history'){
+      const period=url.searchParams.get('period')||'24h',duration=({'1h':3600,'6h':21600,'24h':86400,'3d':259200,'7d':604800,'15d':1296000})[period],end=now(),start=end-duration;
+      const exchange=url.searchParams.get('exchange'),empty=exchange==='Bitget';
+      const series=Object.fromEntries(['open','basis'].map((metric,index)=>{
+        const points=empty?[]:Array.from({length:240},(_,i)=>[start+duration*i/239,
+          index?-.12+Math.sin(i/15)*.04:.1+Math.sin(i/22)*.22+(i===144?1.2:0),
+          i===110]).filter((_,i)=>i<90||i>=110);
+        return [metric,{points,first_at:points[0]?.[0]??null,last_at:points.at(-1)?.[0]??null,
+          low:points.length?Math.min(...points.map(p=>p[1])):null,high:points.length?Math.max(...points.map(p=>p[1])):null}];
+      }));
+      return Response.json({symbol:url.searchParams.get('symbol'),exchange,period,start,end,retention_days:15,summary_seconds:Math.max(60,Math.ceil(duration/720/60)*60),series});
+    }
     if (!(path in fixtures)) return Response.json({error:`未定义的合成接口 ${path}`}, {status:404});
     const payload = structuredClone(fixtures[path]);
     if(new URLSearchParams(location.search).get('upstream_preview')==='1'&&['/api/spot-futures','/api/dual-futures'].includes(path)){

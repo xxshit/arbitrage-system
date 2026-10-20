@@ -40,15 +40,18 @@ class OpportunityTests(unittest.TestCase):
         for value in (None, 0, -1, True, math.nan, 48):
             self.assertIsNone(baseline(value))
 
-    def test_static_half_percent_low_funding_is_retained_at_c(self):
+    def test_static_half_percent_low_funding_is_retained_with_low_score(self):
         item = self.candidate()
-        self.assertEqual((item["grade"], item["status"]), ("C", "watch"))
+        self.assertEqual(item["status"], "watch")
+        self.assertLess(item["score"], 30)
+        self.assertNotIn("grade", item)
         self.assertLess(item["scenario"]["net"], 0)
         self.assertTrue(any("常态溢价" in reason for reason in item["reasons"]))
 
     def test_new_funding_improvement_survives_all_previous_low_insurance(self):
         item = self.candidate(live=quotes(.05, funding=.02))
-        self.assertEqual((item["grade"], item["status"]), ("B", "watch"))
+        self.assertEqual(item["status"], "watch")
+        self.assertGreater(item["score"], self.candidate(live=quotes(.05, funding=.006))["score"])
         self.assertEqual(item["funding"]["above"], 0)
         self.assertIn("资费", item["drivers"])
 
@@ -60,7 +63,7 @@ class OpportunityTests(unittest.TestCase):
     def test_rising_trend_is_supporting_evidence_not_a_gate(self):
         down = self.candidate(row=dict(change_24h=-3), live=quotes(.1, funding=.03))
         up = self.candidate(row=dict(change_24h=3), live=quotes(.1, funding=.03))
-        self.assertEqual(down["grade"], up["grade"])
+        self.assertEqual(down["score"], up["score"])
         self.assertEqual(up["trend"], "价格走强")
 
     def test_flat_market_with_no_funding_driver_is_not_a_candidate(self):
@@ -70,11 +73,12 @@ class OpportunityTests(unittest.TestCase):
         item = self.candidate(live=quotes(-1.2), hist=history(range=1.5, max_abs=2, low=-2, high=-.5))
         self.assertEqual(item["status"], "watch")
         self.assertLess(item["scenario"]["spread_net"], 0)
-        self.assertEqual(item["grade"], "B")
+        self.assertGreater(item["score"], 20)
 
     def test_current_opportunity_requires_exit_and_four_fees(self):
         item = self.candidate(live=quotes(1.5), hist=history(range=1.4, max_abs=1.5, exit_q75=.1))
-        self.assertEqual((item["grade"], item["status"]), ("A", "opportunity"))
+        self.assertEqual(item["status"], "opportunity")
+        self.assertGreater(item["score"], self.candidate()["score"])
         self.assertGreater(item["scenario"]["fee_budget"], .6)
         self.assertAlmostEqual(item["scenario"]["spread_net"],
                                1.5-.11-item["scenario"]["fee_budget"]-.1)
@@ -99,7 +103,8 @@ class OpportunityTests(unittest.TestCase):
     def test_funding_can_be_the_main_driver_of_current_space(self):
         item = self.candidate(live=quotes(.5, funding=.5), profile=funding(.5))
         self.assertLess(item["scenario"]["spread_net"], 0)
-        self.assertEqual((item["grade"], item["status"]), ("A", "opportunity"))
+        self.assertEqual(item["status"], "opportunity")
+        self.assertGreater(item["score"], 70)
 
     def test_incomplete_funding_never_credits_forecast_income(self):
         item = self.candidate(live=quotes(.5, funding=.5),
@@ -131,7 +136,7 @@ class OpportunityTests(unittest.TestCase):
             item=self.candidate(live=live)
             self.assertEqual(item["status"], "watch")
             self.assertIn("充提", " ".join(item["risks"]))
-            self.assertEqual(item["grade"], "C")
+            self.assertLess(item["score"], self.candidate(live=quotes(2))["score"])
 
     def test_bad_or_stale_quotes_are_never_live(self):
         for leg, field, value in (
@@ -190,6 +195,29 @@ class OpportunityTests(unittest.TestCase):
         before=deepcopy(args)
         classify(*args,NOW)
         self.assertEqual(args,before)
+
+    def test_five_day_old_opening_survives_flat_recent_day_and_low_current_gap(self):
+        older = dict(range=2.2,max_abs=1.3,low=-.9,high=1.3,peak_at=NOW-5*86400,
+                     first_at=NOW-6*86400,last_at=NOW,bins=5000)
+        hist = history(windows={"24h":dict(range=.05,max_abs=.1),"15d":older})
+        item = self.candidate(live=quotes(.05),hist=hist)
+        self.assertEqual(item["status"],"watch")
+        self.assertGreater(item["score"],30)
+        self.assertIn("价差",item["drivers"])
+
+    def test_episode_summary_survives_raw_retention_and_fades_gradually(self):
+        activity = dict(count=3,returned=2,peak=1.5,peak_at=NOW-20*86400,last_at=NOW-20*86400)
+        item = self.candidate(live=quotes(.05),hist={},activity=activity)
+        self.assertIsNotNone(item)
+        self.assertEqual(item["status"],"watch")
+        older = self.candidate(live=quotes(.05),hist={},activity={**activity,"last_at":NOW-80*86400})
+        self.assertLess(older["score"],item["score"])
+
+    def test_scores_are_continuous_evidence_not_three_grade_mappings(self):
+        scores = {self.candidate(live=quotes(.5, funding=rate),profile=funding(rate))["score"]
+                  for rate in (.006,.01,.02,.03,.05,.1,.3,.5)}
+        self.assertGreater(len(scores),5)
+        self.assertTrue(all(0 <= score <= 100 for score in scores))
 
 
 if __name__=="__main__":

@@ -119,6 +119,34 @@ class OpportunityHistoryTests(unittest.TestCase):
         cache.refresh(self.store,NOW+3600)
         self.assertFalse(cache.snapshot()[0][("TEST/USDT","Gate")]["ready"])
 
+    def test_multi_period_ranges_preserve_five_days_ago_without_fabricating_counts(self):
+        buffer=HistoryBuffer()
+        for offset,value in ((10*86400,1.8),(5*86400,-1.3),(2*86400,.8),(3600,.1)):
+            buffer.observe([(("TEST/USDT","Gate","open"),NOW-offset,value)])
+        self.store.persist(buffer,NOW)
+        cache=ProfileCache();cache.refresh(self.store,NOW)
+        profile=cache.snapshot()[0][("TEST/USDT","Gate")]
+        self.assertEqual(profile["windows"]["24h"]["high"],.1)
+        self.assertEqual(profile["windows"]["3d"]["high"],.8)
+        self.assertEqual(profile["windows"]["7d"]["low"],-1.3)
+        self.assertEqual(profile["windows"]["15d"]["high"],1.8)
+        self.assertLess(profile["windows"]["7d"]["coverage"],.01)
+        self.assertNotIn("count",profile["windows"]["7d"])
+        self.assertFalse(profile["close_ready"])
+
+    def test_boundary_hour_excludes_old_extreme_and_cache_not_stale(self):
+        buffer=HistoryBuffer()
+        start=NOW-7*86400+30
+        buffer.observe([(("TEST/USDT","Gate","open"),start-5,99),
+                        (("TEST/USDT","Gate","open"),start+5,.7)])
+        self.store.persist(buffer,NOW)
+        cache=ProfileCache();cache.refresh(self.store,NOW+30)
+        self.assertEqual(cache.snapshot()[0][("TEST/USDT","Gate")]["windows"]["7d"]["high"],.7)
+        buffer.observe([(("TEST/USDT","Gate","open"),NOW+35,1.3)])
+        self.store.persist(buffer,NOW+35)
+        cache.refresh(self.store,NOW+40)
+        self.assertEqual(cache.snapshot()[0][("TEST/USDT","Gate")]["windows"]["7d"]["high"],1.3)
+
     def test_book_api_auth_bounded_response_validation_and_no_upstream(self):
         buffer=BookBuffer()
         for i in range(300):

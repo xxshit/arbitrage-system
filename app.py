@@ -55,6 +55,7 @@ from spread_history import (
     chart_series,
 )
 from opportunity_history import BookBuffer, ProfileCache
+from opportunity_activity import ActivityLedger
 from opportunity_pool import POLICY as OPPORTUNITY_POLICY, classify as classify_opportunity, funding_profile
 
 load_dotenv()
@@ -77,6 +78,7 @@ SPREAD_HISTORY_BUFFER = HistoryBuffer()
 SPREAD_HISTORY_STORE = HistoryStore(Path(app.instance_path) / "spread-history")
 OPPORTUNITY_BOOKS = BookBuffer()
 OPPORTUNITY_PROFILES = ProfileCache()
+OPPORTUNITY_ACTIVITY = ActivityLedger(SPREAD_HISTORY_STORE.directory)
 OPPORTUNITY_FUNDING_CACHE = {"at": 0, "key": frozenset(), "events": {}}
 OPPORTUNITY_FUNDING_LOCK = threading.Lock()
 
@@ -3923,7 +3925,9 @@ def spot_futures_snapshot():
     opportunity_paths = [("spot_futures", group["symbol"], row["long_exchange"], "Binance")
                          for group in rows_by_symbol if not is_rwa_stock_pair(group["symbol"])
                          for row in group["rows"]]
-    OPPORTUNITY_BOOKS.observe(ALERT_STREAM_HUB.screening_quotes(opportunity_paths), time.time())
+    opportunity_quotes = ALERT_STREAM_HUB.screening_quotes(opportunity_paths)
+    OPPORTUNITY_BOOKS.observe(opportunity_quotes, time.time())
+    OPPORTUNITY_ACTIVITY.observe(opportunity_quotes, time.time())
     alerts_finished_at = time.perf_counter()
     captured_at = datetime.now()
     live_snapshot = {
@@ -13151,6 +13155,7 @@ def spot_thinking_candidates(snapshot, notional, hold_hours):
     enrich_funding_statistics(groups)
     enrich_price_changes(groups, {"change_24h": 86400})
     histories, _ = OPPORTUNITY_PROFILES.snapshot()
+    activities = OPPORTUNITY_ACTIVITY.snapshot()
     events = opportunity_funding_events(groups)
     now = time.time()
     paths = [("spot_futures", group["symbol"], row["long_exchange"], "Binance")
@@ -13193,10 +13198,11 @@ def spot_thinking_candidates(snapshot, notional, hold_hours):
             {**row, "listing_review": listing_review},
             funding, histories.get((item["symbol"], item["long_exchange"])),
             quotes.get(("spot_futures", item["symbol"], item["long_exchange"], "Binance")),
-            now, notional, hold_hours)
+            now, notional, hold_hours,
+            activity=activities.get((item["symbol"], item["long_exchange"])))
         if result:
             output.append({**item, **result})
-    return sorted(output, key=lambda item: (item["grade"], item["status"] != "opportunity",
+    return sorted(output, key=lambda item: (-item["score"], item["status"] != "opportunity",
                   -(item["scenario"]["net"] if item["scenario"]["net"] is not None else -1e9),
                   item["symbol"], item["long_exchange"]))
 
@@ -15082,8 +15088,12 @@ def background_spread_history():
             if time.time()-last_profiles >= 120:
                 OPPORTUNITY_PROFILES.refresh(SPREAD_HISTORY_STORE, time.time())
                 last_profiles = time.time()
+            if not OPPORTUNITY_ACTIVITY.ready:
+                OPPORTUNITY_ACTIVITY.restore()
+            OPPORTUNITY_ACTIVITY.persist(time.time())
             if time.time() - last_cleanup >= 3600 and SPREAD_HISTORY_STORE.directory.is_dir():
                 SPREAD_HISTORY_STORE.maintain(time.time())
+                OPPORTUNITY_ACTIVITY.checkpoint()
                 last_cleanup = time.time()
             if SPREAD_HISTORY_BUFFER.dropped > warned_dropped:
                 app.logger.warning("Spread history persistence backlog exceeded bounded buffer; chart gaps retained")

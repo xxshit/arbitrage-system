@@ -1,13 +1,61 @@
 """Explainable spot-long/perpetual-short research, not execution or alerts.
 
 Rates are percentages of the spot reference notional, not account ROI.
-Funding scenarios are assumptions; grades are priorities, never probabilities.
+Funding scenarios are assumptions; scores are priorities, never probabilities.
 """
 import math
 
-POLICY = dict(version=1, spot_fee=.20, futures_fee=.10, slippage=.10,
+POLICY = dict(version=2, spot_fee=.20, futures_fee=.10, slippage=.10,
               min_net=.10, priority_net=.30, stable_range=.15,
               active_range=.40, active_peak=1.0, baseline_daily=.03)
+
+
+def priority_score(opening, rate, base, funding, history, activity, quote, live, current, net, now, notional):
+    """Continuous evidence score. No A/B/C mapping and no display-period input."""
+    def unit(value):
+        return min(1, max(0, value))
+    historical = history.get("windows", {}).get("15d") or history
+    width = historical.get("range", 0) or 0
+    amplitude = historical.get("max_abs", 0) or 0
+    peak_at = historical.get("peak_at") or historical.get("last_at")
+    recency = 2**(-max(0, now-peak_at)/(30*86400)) if number(peak_at) else .5
+    spread = (35*unit(width/2) + 15*unit(amplitude/2)*unit(width/.4))*recency
+    count = activity.get("count", 0)
+    if count:
+        event_age = max(0, now-(activity.get("last_at") or now))
+        event_weight = 2**(-event_age/(30*86400))
+        peak_weight = 2**(-max(0, now-(activity.get("peak_at") or now))/(30*86400))
+        observed = (20*unit(abs(activity.get("peak", 0))/2)*peak_weight +
+                    (10*unit(count/4) + 15*unit(activity.get("returned", 0)/3))*event_weight)
+        spread = max(spread, observed) + 10*unit(activity.get("returned", 0)/3)*event_weight
+    if number(opening):
+        spread = max(spread, 20*unit(max(0, opening)/1.5))
+    count_f = funding.get("count", 0)
+    daily = funding.get("total")
+    settled = 30*unit(math.log1p(max(0, daily/.03-1))/math.log(11)) if number(daily) else 0
+    continuity = 25*funding.get("above", 0)/max(1, count_f)
+    projected = 20*unit(math.log1p(max(0, rate/base-1))/math.log(11)) if number(rate) and base else 0
+    drag = 20*(count_f-funding.get("positive", 0)-funding.get("zero", 0))/max(1, count_f)
+    fund = max(0, (settled+continuity)*(1 if funding.get("complete") else .5)+projected-drag)
+    bonus = 20*unit(max(0, net)/1) if current and number(net) else 0
+    penalty = 0
+    if not quote:
+        penalty += 15
+    elif quote["capacity"] is None:
+        penalty += 8
+    elif quote["capacity"] < notional:
+        penalty += 10*(1-unit(quote["capacity"]/notional))
+    transfer = (live or {}).get("transfer_state")
+    penalty += 20 if transfer == "restricted" else 10 if transfer != "normal" else 0
+    if not historical or (historical.get("bins", 12) < 12):
+        penalty += 8
+    score = max(0, min(100, max(spread, fund)+.2*min(spread, fund)+bonus-penalty))
+    # A fixed premium is not evidence of repeated profitable openings.
+    if width <= POLICY["stable_range"] and not count and fund < 15:
+        score = min(score, 29)
+    return dict(score=round(score), score_parts=dict(
+        spread=round(spread, 1), funding=round(fund, 1), current=round(bonus, 1),
+        deductions=round(penalty, 1)), score_version=2)
 
 
 def number(value):
@@ -41,6 +89,7 @@ def funding_profile(events, now, interval):
                     and all((b[0]-a[0]) <= interval*3600+120
                             for a, b in zip(events, events[1:]) if b[0] > now-86400))
     return dict(count=len(recent), above=len(above), positive=positive,
+                zero=sum(r == 0 for _, r in recent),
                 baseline_count=sum(abs(r-b) <= 1e-6 for _, r, b in classified),
                 unknown_count=len(recent)-len(classified),
                 total=sum(r for _, r in recent) if recent else None,
@@ -71,8 +120,8 @@ def quote_metrics(live, now):
                 at=min(stamps), long=long, short=short)
 
 
-def classify(row, funding, history, live, now, notional=1000, hold_hours=72):
-    """Return a path-local candidate, retaining flat positive gaps at grade C."""
+def classify(row, funding, history, live, now, notional=1000, hold_hours=72, activity=None):
+    """Return a path-local candidate; a flat premium stays low-scored."""
     if row.get("price_divergence") or row.get("is_delisting"):
         return None
     quote = quote_metrics(live, now)
@@ -82,11 +131,16 @@ def classify(row, funding, history, live, now, notional=1000, hold_hours=72):
     interval = quote["short"].get("interval") if quote else row.get("funding_interval_hours")
     base = baseline(interval)
     history = history or {}
+    activity = activity or {}
     fresh_history = number(history.get("computed_at")) and 0 <= now-history["computed_at"] <= 360
     ready = fresh_history and history.get("ready", False)
-    active = (ready and history.get("range", 0) >= POLICY["active_range"]
-              and history.get("max_abs", 0) >= POLICY["active_peak"])
-    stable = ready and history.get("range", math.inf) <= POLICY["stable_range"]
+    potential = history.get("windows", {}).get("15d") or history
+    active = (fresh_history and potential.get("range", 0) >= POLICY["active_range"]
+              and potential.get("max_abs", 0) >= POLICY["active_peak"])
+    # Observed episodes survive raw-curve expiry. No 24H opportunity cutoff.
+    active = active or (activity.get("count", 0) > 0 and
+                        number(activity.get("last_at")) and now-activity["last_at"] < 90*86400)
+    stable = fresh_history and potential.get("range", math.inf) <= POLICY["stable_range"]
     rate_fresh = (quote and number(quote["short"].get("funding_at"))
                   and 0 <= now-quote["short"]["funding_at"] <= 600)
     higher = number(rate) and base is not None and rate > base+1e-6
@@ -109,9 +163,9 @@ def classify(row, funding, history, live, now, notional=1000, hold_hours=72):
     if spread_watch:
         drivers.append("价差")
         if active:
-            reasons.append(f"近24H开差 {history['low']:+.2f}%～{history['high']:+.2f}%，存在价差波动")
+            reasons.append("已有多日价差打开证据，按最近发生时间逐渐降低权重，不以24小时过期")
         elif stable:
-            reasons.append(f"已采区间开差接近 {history['median']:+.2f}%，常态溢价；等待更好的开平窗口")
+            reasons.append("已采区间为常态溢价；等待更好的开平窗口")
         else:
             reasons.append("保留正价差观察，尚不能把当前开差直接当作收益")
     if stable and not funding_watch:
@@ -160,21 +214,20 @@ def classify(row, funding, history, live, now, notional=1000, hold_hours=72):
         notes.append("结算历史覆盖不足，资费仅作观察，不计入净空间")
     current = not risks and max(v for v in (spread_net, funding_net, -math.inf) if v is not None) >= POLICY["min_net"]
     net = max((v for v in (spread_net, funding_net) if v is not None), default=None)
-    grade = "B" if current or funding_watch or active else "C"
-    if current and net >= POLICY["priority_net"]:
-        grade = "A"
-    if not quote or (live and live.get("transfer_state") == "restricted"):
-        grade = "C"
     if current:
         reasons.append("当前盘口与历史退出情景扣除费用预算后仍有空间")
     elif active and number(opening) and number(history.get("median")) and opening <= history["median"]+.10:
         reasons.append("目前接近常态，等待下一次有利的开仓位置")
-    return dict(grade=grade, grade_label={"A": "优先", "B": "关注", "C": "低优先观察"}[grade],
+    scored = priority_score(opening, rate, base, funding, history, activity, quote, live, current, net, now, notional)
+    if row.get("listing_review"):
+        scored["score"] = max(0, scored["score"]-20)
+        scored["score_parts"]["deductions"] += 20
+    return dict(**scored,
                 status="opportunity" if current else "watch",
                 status_label="当前有机会" if current else "值得观察",
                 reasons=reasons, risks=risks, notes=notes, drivers=drivers, trend=trend,
                 open_spread=opening, close_spread=closing, funding_current=rate,
-                funding=funding, history=history,
+                funding=funding, history=history, activity=activity,
                 capacity_usdt=quote["capacity"] if quote else None,
                 quoted_at=quote["at"] if quote else None,
                 scenario=dict(net=net, spread_net=spread_net, funding_net=funding_net,

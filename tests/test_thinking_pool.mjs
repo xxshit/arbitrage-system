@@ -13,9 +13,9 @@ function harness(overrides={}){
     liquidityAmount:()=>'$1.00M',...overrides};
   vm.createContext(context);vm.runInContext(source,context);return context;
 }
-const filters={grade:'all',status:'all',search:''};
-const item={symbol:'DEMO/USDT',long_exchange:'Gate',short_exchange:'Binance',grade:'C',
-  grade_label:'低优先观察',status:'watch',open_spread:.5,close_spread:.55,short_interval:4,
+const filters={min_score:'all',status:'all',search:''};
+const item={symbol:'DEMO/USDT',long_exchange:'Gate',short_exchange:'Binance',score:18,
+  status:'watch',open_spread:.5,close_spread:.55,short_interval:4,
   funding_current:.005,funding_previous:.004,funding_24h:.03,funding_3d:.09,
   funding_7d:.21,funding_30d:1.193,
   funding:{total:.03,complete:true},reasons:['常态溢价，不假定归零'],
@@ -26,12 +26,12 @@ test('strategy tabs remain spot/dual; drivers never replace strategies',()=>{
   assert.ok(source.includes('data-thinking-strategy="dual"'));
   assert.ok(!source.includes('data-thinking-strategy="funding"'));
   assert.ok(!source.includes('data-thinking-strategy="spread"'));
-  assert.ok(source.includes('未套用现多期空的分级规则'));
+  assert.ok(source.includes('未套用现多期空的评分规则'));
 });
-test('grades and current/watch status filter independently',()=>{
+test('numeric threshold and internal qualification filter independently',()=>{
   const ui=harness().ThinkingPool;
-  const items=[item,{...item,grade:'B'},{...item,grade:'A',status:'opportunity'}];
-  assert.equal(ui.select(items,{...filters,grade:'C'},1000).length,1);
+  const items=[item,{...item,score:55},{...item,score:80,status:'opportunity'}];
+  assert.equal(ui.select(items,{...filters,min_score:'60'},1000).length,1);
   assert.equal(ui.select(items,{...filters,status:'watch'},1000).length,2);
   assert.equal(ui.select(items,{...filters,status:'opportunity'},1000).length,1);
   assert.equal(ui.select(items,{...filters,search:'dem'},1000).length,3);
@@ -45,11 +45,12 @@ test('aged quotes never remain labelled as a current opportunity',()=>{
   assert.equal(ui.qualified({...current,quoted_at:null},1000),false);
   assert.equal(ui.select([current],{...filters,status:'opportunity'},1011).length,0);
 });
-test('live status expires visibly even when automatic refresh is delayed',()=>{
-  const node={dataset:{quotedAt:1},textContent:'当前有机会',classList:{remove:s=>node.removed=s}};
+test('stale quotes remove current-space score bonus without restoring status badges',()=>{
+  const node={dataset:{scoreBase:'80',scoreCurrent:'20',quotedAt:'1'},textContent:'80'};
   const ui=harness({document:{querySelectorAll:()=>[node]}}).ThinkingPool;
   ui.expire();
-  assert.equal(node.textContent,'值得观察');assert.equal(node.removed,'is-current');
+  assert.equal(node.textContent,'45');
+  assert.equal(ui.displayScore({score:80,score_parts:{current:20},quoted_at:1000},1005),80);
 });
 test('browsing order uses exact coin+venue paths, automatic order resumes when released',()=>{
   const ui=harness().ThinkingPool,a={...item},b={...item,long_exchange:'Bitget'};
@@ -58,11 +59,12 @@ test('browsing order uses exact coin+venue paths, automatic order resumes when r
   assert.equal(ui.ordered([b,a],keys,false)[0].long_exchange,'Bitget');
   assert.equal(ui.ordered([b],keys,true).length,1);
 });
-test('compact spot row shows funding details and keeps reasons collapsed',()=>{
-  const ui=harness().ThinkingPool,markup=ui.spotRow(item);
+test('compact spot row shows score and evidence without grade or status labels',()=>{
+  const ui=harness().ThinkingPool,markup=ui.spotRow({...item,quoted_at:Date.now()/1000});
   const main=markup.split('<details')[0];
-  for(const text of ['C · 低优先观察','值得观察','充提未知','+0.50%','+0.0050%','币安资费详情','当前','上期','24H','3D','7D','30D'])assert.ok(main.includes(text),text);
-  for(const text of ['常态溢价','依据与风险','盘口记录'])assert.ok(markup.includes(text),text);
+  for(const text of ['>18</b>','评分','充提未知','+0.50%','+0.0050%','币安资费详情','当前','上期','24H','3D','7D','30D'])assert.ok(main.includes(text),text);
+  for(const text of ['值得观察','依据与风险','B ·','C ·','当前有机会</span>'])assert.ok(!markup.includes(text),text);
+  assert.ok(markup.includes('盘口'));
   assert.ok(!main.includes('常态溢价'));
   assert.ok(!main.includes('opportunity-reasons'));
   assert.ok(!main.includes('<span>本期预计'));
@@ -70,16 +72,18 @@ test('compact spot row shows funding details and keeps reasons collapsed',()=>{
   for(const value of ['+0.0040%','+0.0300%','+0.0900%','+0.2100%','+1.1930%'])assert.ok(main.includes(value),value);
   assert.ok(!markup.includes('当前有机会</span>'));
   assert.equal(ui.pct(null),'—');assert.equal(ui.pct(0),'0.00%');
+  assert.match(markup,/合约 <b class="opportunity-interval"[^>]*>4H<\/b>/);
+  assert.ok(!markup.includes('资费 <span>4H'));
 });
 test('funding display uses settled totals, distinguishes missing from zero and retains negative values',()=>{
   const ui=harness().ThinkingPool;
   const main=ui.spotRow({...item,funding:{total:999},funding_24h:null,
     funding_3d:0,funding_7d:-.218,funding_30d:undefined,
-    trend:'价格走强',risks:['首档容量不足参考金额']}).split('<details')[0];
+    trend:'价格走强',risks:[]}).split('<details')[0];
   assert.match(main,/data-funding-field="funding_24h"[^]*?<b class="neutral">—<\/b>/);
   assert.match(main,/data-funding-field="funding_3d"[^]*?<b class="neutral">0\.0000%<\/b>/);
   assert.match(main,/data-funding-field="funding_7d"[^]*?<b class="negative">-0\.2180%<\/b>/);
-  assert.ok(!main.includes('999'));assert.ok(!main.includes('价格走强'));assert.ok(!main.includes('首档容量不足'));
+  assert.ok(!main.includes('999'));assert.ok(!main.includes('价格走强'));
 });
 test('dual cards have no grades or new spot rules and retain original fields',()=>{
   const ui=harness().ThinkingPool,markup=ui.dualRow({...item,long_exchange:'Bybit',funding_previous:.01,funding_24h:.03,funding_3d:.09});
@@ -92,11 +96,23 @@ test('dual cards have no grades or new spot rules and retain original fields',()
 });
 test('API text, symbols and reasons are escaped; no order, notification or secret endpoint',()=>{
   const ui=harness().ThinkingPool;
-  const markup=ui.spotRow({...item,symbol:'"><img src=x onerror=x>/USDT',reasons:['<script>bad()</script>']});
+  const markup=ui.spotRow({...item,symbol:'"><img src=x onerror=x>/USDT',risks:['<script>bad()</script>']});
   assert.ok(!markup.includes('<script>'));assert.ok(!markup.includes('<img src=x'));
   assert.ok(markup.includes('&lt;script&gt;'));
   assert.ok(!/method:\s*['"]POST|\/order|\/lark|api[_-]key|secret/i.test(source));
   assert.ok(template.indexOf("filename='thinking-pool.js'")<template.indexOf("filename='app.js'"));
   assert.ok(app.includes('rememberServerDelistings(simpleThinkingCache.spot_simple)'));
   assert.equal((app.match(/async function loadSimpleThinking/g)||[]).length,1);
+});
+test('period changes show different real ranges and observed counts without changing score',()=>{
+  const ui=harness().ThinkingPool;
+  const data={...item,score:77,history:{windows:{'24h':{high:.5,low:.4,peak_at:1000,first_at:1,last_at:1000,coverage:.5},
+    '7d':{high:1.3,low:-1.2,peak_at:1000,first_at:1,last_at:1000,coverage:.5}}},
+    activity:{since:1,windows:{'24h':{positive:0,negative:0,recent:[]},
+      '7d':{positive:3,negative:1,recent:[{started:900,peak:1.3,peak_at:1000}]}}}};
+  const day=ui.spreadEvidence(data,'24h'),week=ui.spreadEvidence(data,'7d');
+  assert.ok(day.includes('+0.50%'));assert.ok(!day.includes('+1.30%'));
+  assert.ok(week.includes('+1.30%'));assert.ok(week.includes('-1.20%'));assert.ok(week.includes('正 3 次'));
+  assert.ok(week.includes('历史未满'));assert.ok(week.includes('已见'));assert.equal(data.score,77);
+  assert.ok(!ui.spreadEvidence(item).includes('正 0 次'));
 });

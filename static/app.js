@@ -1055,7 +1055,7 @@ const sectionWorkspaceMeta={
   'my-positions':{name:'我的仓位',group:'实时机会',description:'统一查看本站记录的当前组合与历史结果。',source:'每5秒读取本站记录；未接交易所私有API，不代表实时账户仓位。'},
   'funding-trend':{name:'主升正资费套利榜',group:'实时机会',description:'从趋势、资费与流动性共同评估观察候选。',source:'页面约60秒读取；资费按各交易所实际周期结算。'},
   'trade-validation':{name:'趋势验证',group:'研究复盘',description:'分开查看假设、目标、回撤与真实路径复盘。',source:'页面约30秒读取；未完成和无法判定样本不冒充胜率。'},
-  thinking:{name:'我的套利思维',group:'研究复盘',description:'按策略复核候选；现多期空分级、入选依据和当前机会。',source:'页面约5秒读取；研究筛选不是自动下单信号。'},
+  thinking:{name:'我的套利思维',group:'研究复盘',description:'按路径评分，查看资费明细与多周期价差数据。',source:'页面约5秒读取；研究筛选不是自动下单信号。'},
   'daily-trends':{name:'趋势推送',group:'研究复盘',description:'按周期回看已记录的趋势与推送证据。',source:'进入或手动读取日报；不会因刷新补发旧信号。'},
   'daily-thoughts':{name:'思路分析',group:'研究复盘',description:'核对盯盘观点、证据变化与分周期验证。',source:'页面按盯盘扫描周期读取；停用币种不会因刷新恢复。'},
   'daily-listings':{name:'上下架信息',group:'研究复盘',description:'分清公告发布时间、实际执行时间与数据来源。',source:'进入或手动读取已入库公告；待解析不等于已确认。'},

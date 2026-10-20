@@ -162,7 +162,8 @@
     if(path==='/api/arbitrage-thinking/simple'){
       payload.updated_at_epoch=now();
       payload.spot_simple=Array.from({length:8},(_,i)=>({...simple[i%3],symbol:i<3?symbols[i]:`SAMPLE${i}/USDT`,
-        long_exchange:i%2?'Bitget':'Gate',grade:i===0?'A':i<3?'B':'C',grade_label:i===0?'优先':i<3?'关注':'低优先观察',
+        long_exchange:i%2?'Bitget':'Gate',score:[82,74,63,24,20,16,10,8][i],
+        score_parts:{spread:55,funding:i<3?60:2,current:i===0?15:0,deductions:0},
         status:i===0?'opportunity':'watch',open_spread:i===0?1.5:.5,close_spread:i===0?1.55:.55,quoted_at:now(),
         funding_current:i<3?.025:.005,funding:{count:6,above:i<3?2:0,total:.03,complete:true},
         funding_previous:i===6?null:.005,funding_24h:i===6?null:.03,
@@ -171,7 +172,12 @@
         risks:i===2?['首档容量不足参考金额']:[],trend:i===1?'回撤正资费观察':'价格走强',
         transfer_status:wallet(i%2?'Bitget':'Gate',{chains:[{name:'BSC',deposit_open:true,withdraw_open:true}]}),
         capacity_usdt:i===2?500:15000,scenario:{exit_spread:.1,fee_budget:.66,slippage:.1,spread_net:i===0?.63:-.86,funding_net:i===0?.65:-.81,notional:1000,hold_hours:72,funding_income:.045},
-        history:{first_at:now()-86400,last_at:now(),low:0,high:1.5}}));
+        history:{first_at:now()-86400,last_at:now(),low:0,high:1.5,
+          windows:Object.fromEntries([['24h',1],['3d',3],['7d',7],['15d',15]].map(([name,days])=>[name,{
+            low:i<3?-.8-days*.03:.48,high:i<3?1+days*.05:.52,
+            peak_at:now()-(days>3?5*86400:1800),first_at:now()-Math.min(8,days)*86400,last_at:now(),coverage:Math.min(1,8/days)}]))},
+        activity:i===6?{}:{since:now()-8*86400,windows:Object.fromEntries(['24h','3d','7d','15d'].map((period,index)=>[period,{
+          positive:i<3?index+1:0,negative:i<2?1:0,recent:i<3?[{started:now()-(index>1?5*86400:1800),peak:1.28,peak_at:now()-(index>1?5*86400:1800)+10}]:[]}]))}}));
     }
     if(path==='/api/equity-arbitrage'){
       const strategy=url.searchParams.get('strategy')||'all',query=(url.searchParams.get('symbol')||'').toUpperCase();

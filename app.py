@@ -40,7 +40,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from anomaly_streams import AlertStreamHub, Route
 from anomaly_engine import alert_round_ids, pulse_is_actionable
 from alert_history_index import AlertHistoryIndex
-from trend_reference import TrendReferenceCache, fetch_reference
+from trend_reference import TrendReferenceCache, fetch_reference, reference_failure_reason
 from alert_reminders import admit_pulse, current_notice, reminder_count, reminder_state_id
 from alert_screening import DEFAULT_NOTIONAL, okx_contract_unit, pulse_has_watch_peak, screen_pulse
 from asset_catalog import NON_CRYPTO_BOOTSTRAP, bootstrap_category, compact_symbol, instrument_category
@@ -15502,17 +15502,19 @@ def background_long_trend_references():
     time.sleep(10)
     restored, targets, catalog_at, cursor = False, {}, 0, 0
     while True:
-        symbol = None
+        symbol, raw, stage = None, None, "restore"
         with app.app_context():
             try:
                 if not restored:
                     for row in FuturesTrendReference.query.limit(2000).all():
                         try:
                             LONG_TREND_REFERENCES.put(row.symbol, json.loads(row.payload))
-                        except (ValueError, TypeError, KeyError):
-                            app.logger.warning("invalid_long_trend_cache")
+                        except (ValueError, TypeError, KeyError) as error:
+                            app.logger.warning("invalid_long_trend_cache symbol=%r reason=%s",
+                                               row.symbol[:64], reference_failure_reason(error))
                     restored = True
                 now = time.time()
+                stage = "catalog"
                 if now - catalog_at >= 60:
                     targets = long_trend_targets()
                     catalog_at = now
@@ -15525,12 +15527,17 @@ def background_long_trend_references():
                         symbol, cursor = candidate, index + 1
                         break
                 if symbol is not None:
+                    stage = "refresh"
                     sync_long_trend_reference(symbol, *targets[symbol], now)
-            except Exception:
+            except Exception as error:
                 db.session.rollback()
                 if symbol:
                     LONG_TREND_REFERENCES.defer(symbol, time.time() + 300)
-                app.logger.warning("long_trend_reference_refresh_failed")
+                app.logger.warning(
+                    "long_trend_reference_refresh_failed symbol=%r source=%r stage=%s reason=%s retry_seconds=%s",
+                    (symbol or "-")[:64], (raw or "-")[:64], stage, reference_failure_reason(error),
+                    300 if symbol else 15,
+                )
             finally:
                 db.session.remove()
         # At most one low-weight request per 1.5s; 429/418 shares the host backoff.

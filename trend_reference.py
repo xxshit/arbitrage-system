@@ -5,6 +5,7 @@ is selected at/before now minus 30 days, not a calendar-month candle or a
 shorter listing history. This avoids retaining 30 days of full-market ticks.
 """
 import math
+import re
 import threading
 from collections import OrderedDict
 from urllib.parse import urlencode
@@ -16,6 +17,30 @@ MAX_POINTS = 99
 MAX_SYMBOLS = 2000
 
 
+def valid_reference_symbol(raw_symbol):
+    # exchangeInfo is the identity allowlist in long_trend_targets(). Binance
+    # also lists Chinese names; do not rewrite them or reject non-ASCII letters.
+    # urlencode below keeps the exact name in a single public query parameter.
+    return isinstance(raw_symbol, str) and 0 < len(raw_symbol) <= 64 and raw_symbol.isalnum()
+
+
+def reference_failure_reason(error):
+    """Log known local codes, never arbitrary upstream/DB exception contents."""
+    code = str(error)
+    safe_codes = {
+        "invalid_reference_symbol", "invalid_reference_multiplier", "invalid_reference_response",
+        "invalid_reference_candle", "unexpected_reference_timestamp", "invalid_reference_price",
+        "duplicate_reference_timestamp", "invalid_reference_cache", "invalid_reference_bounds",
+        "invalid_reference_source", "invalid_reference_points", "invalid_reference_timestamp",
+        "public_payload_too_large", "unsupported_content_encoding", "upstream_api_error",
+        "not_a_public_market_endpoint", "invalid_market_timeout", "upstream_rate_limit_backoff",
+        "market_deadline_exceeded", "market_connection_wait_timeout",
+    }
+    if code in safe_codes or re.fullmatch(r"upstream_(?:http_[0-9]{3}|api_error_-?[0-9]{1,16})", code):
+        return code
+    return type(error).__name__
+
+
 def reference_bounds(now):
     target = int(now) // BUCKET * BUCKET - WINDOW
     return target - 2 * BUCKET, target + COVERAGE
@@ -23,7 +48,7 @@ def reference_bounds(now):
 
 def fetch_reference(get_json, raw_symbol, multiplier, now):
     start, end = reference_bounds(now)
-    if not isinstance(raw_symbol, str) or not raw_symbol.isascii() or not raw_symbol.isalnum():
+    if not valid_reference_symbol(raw_symbol):
         raise ValueError("invalid_reference_symbol")
     multiplier = float(multiplier)
     if not math.isfinite(multiplier) or multiplier <= 0:
@@ -66,7 +91,7 @@ class TrendReferenceCache:
         if start % BUCKET or end % BUCKET or end - start != COVERAGE + 2 * BUCKET:
             raise ValueError("invalid_reference_bounds")
         raw, multiplier = data["source_symbol"], float(data["multiplier"])
-        if not isinstance(raw, str) or not raw.isascii() or not raw.isalnum() or not math.isfinite(multiplier) or multiplier <= 0:
+        if not valid_reference_symbol(raw) or not math.isfinite(multiplier) or multiplier <= 0:
             raise ValueError("invalid_reference_source")
         rows = data["points"]
         if not isinstance(rows, list) or len(rows) > MAX_POINTS:

@@ -10,7 +10,8 @@ os.environ.setdefault("SECRET_KEY", "trend-reference-test")
 os.environ.setdefault("CHAT_ENCRYPTION_KEY", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
 
 import app as module
-from trend_reference import BUCKET, WINDOW, TrendReferenceCache, fetch_reference, reference_bounds
+from trend_reference import (BUCKET, WINDOW, TrendReferenceCache, fetch_reference, reference_bounds,
+                             reference_failure_reason)
 
 NOW = 2_000_000_100 // BUCKET * BUCKET
 TARGET = NOW - WINDOW
@@ -27,6 +28,42 @@ def candle(at=TARGET, opening="100", close="900"):
 
 
 class ReferenceTests(unittest.TestCase):
+    def test_live_chinese_contract_names_fetch_restore_and_roll_with_exact_identity(self):
+        for raw in ("币安人生USDT", "我踏马来了USDT", "龙虾USDT", "牛来USDT", "哈基米USDT"):
+            with self.subTest(raw=raw):
+                get = MagicMock(return_value=[candle(), candle(TARGET+300, opening="200")])
+                result = fetch_reference(get, raw, 1, NOW)
+                url = get.call_args.args[0]
+                self.assertTrue(url.isascii())
+                self.assertEqual(parse_qs(urlsplit(url).query)["symbol"], [raw])
+                self.assertEqual(result["source_symbol"], raw)
+                cache = TrendReferenceCache()
+                cache.put(raw, json.loads(json.dumps(result)))
+                self.assertAlmostEqual(cache.change(raw, 120, NOW), 20)
+                self.assertAlmostEqual(cache.change(raw, 120, NOW+300), -40)
+                self.assertFalse(cache.due(raw, raw, 1, NOW))
+
+    def test_symbol_validation_still_rejects_query_path_controls_and_oversize(self):
+        for raw in (None, 123, "", "X"*65, "BTC/USDT", "BTCUSDT&signature=x", "币安人生USDT\n",
+                    "币安人生 USDT", "币安\u200b人生USDT", "币安人生USDT#x", "币安人生USDT%26x", "🚀USDT"):
+            with self.subTest(raw=raw):
+                get = MagicMock()
+                with self.assertRaisesRegex(ValueError, "invalid_reference_symbol"):
+                    fetch_reference(get, raw, 1, NOW)
+                get.assert_not_called()
+                with self.assertRaisesRegex(ValueError, "invalid_reference_source"):
+                    TrendReferenceCache().put("BAD", {**data(), "source_symbol": raw})
+
+    def test_failure_diagnostics_allow_codes_but_not_arbitrary_exception_contents(self):
+        for error in (ValueError("invalid_reference_symbol"), RuntimeError("upstream_http_429"),
+                      RuntimeError("upstream_rate_limit_backoff"), ValueError("upstream_api_error_-1121"),
+                      TimeoutError("market_connection_wait_timeout")):
+            self.assertEqual(reference_failure_reason(error), str(error))
+        for error in (ValueError("invalid_reference_symbol secret=private"),
+                      RuntimeError("https://example.test?token=private"),
+                      ValueError("upstream_api_error_-1121\nprivate")):
+            self.assertEqual(reference_failure_reason(error), type(error).__name__)
+
     def test_public_request_uses_bounded_5m_range_and_open_not_future_close(self):
         get = MagicMock(return_value=[candle()])
         result = fetch_reference(get, "BTCUSDT", 1, NOW)
@@ -184,6 +221,43 @@ class TrendIntegrationTests(unittest.TestCase):
              patch.object(module, "symbol_alias_rows", return_value=[alias]), patch.object(module, "is_rwa_stock_pair", return_value=False):
             self.assertEqual(module.long_trend_targets(), {"BTC/USDT": ("BTCUSDT", 1), "XEC/USDT": ("1000XECUSDT", 1000)})
 
+    def test_catalog_keeps_chinese_identity_and_rejects_unlisted_or_inactive_contracts(self):
+        symbols = ["币安人生/USDT", "哈基米/USDT", "未上市/USDT"]
+        catalog = {"symbols": [
+            {"symbol": "币安人生USDT", "quoteAsset": "USDT", "status": "TRADING", "contractType": "PERPETUAL"},
+            {"symbol": "哈基米USDT", "quoteAsset": "USDT", "status": "SETTLING", "contractType": "PERPETUAL"}]}
+        with patch.object(module, "SPOT_FUTURES_CACHE", {"snapshot": {"symbols": [{"symbol": s} for s in symbols]}}), \
+             patch.object(module, "DUAL_FUTURES_CACHE", {"snapshot": None}), \
+             patch.object(module, "MARKET_PAYLOAD_CACHE", {"https://fapi.binance.com/fapi/v1/exchangeInfo": {"payload": catalog}}), \
+             patch.object(module, "symbol_alias_rows", return_value=[]), patch.object(module, "is_rwa_stock_pair", return_value=False):
+            self.assertEqual(module.long_trend_targets(), {"币安人生/USDT": ("币安人生USDT", 1)})
+
+    def test_chinese_reference_sync_commits_and_publishes_then_restores_without_network(self):
+        session = MagicMock()
+        session.get.return_value = None
+        with patch.object(module.db, "session", session), \
+             patch.object(module.MARKET_HTTP, "get_json", return_value=[candle()]) as get, \
+             patch.object(module, "LONG_TREND_REFERENCES", self.cache):
+            module.sync_long_trend_reference("哈基米/USDT", "哈基米USDT", 1, NOW)
+        row = session.add.call_args.args[0]
+        session.commit.assert_called_once()
+        self.assertEqual(row.symbol, "哈基米/USDT")
+        self.assertEqual(json.loads(row.payload)["source_symbol"], "哈基米USDT")
+        cache = TrendReferenceCache()
+        cache.put(row.symbol, json.loads(row.payload))
+        self.assertAlmostEqual(cache.change(row.symbol, 120, NOW), 20)
+        self.assertEqual(get.call_count, 1)
+
+    def test_failed_database_commit_does_not_publish_or_clear_reference_history(self):
+        session = MagicMock()
+        session.commit.side_effect = RuntimeError("database temporarily unavailable")
+        with patch.object(module.db, "session", session), \
+             patch.object(module, "fetch_reference", return_value=data([[TARGET, 200]])), \
+             patch.object(module, "LONG_TREND_REFERENCES", self.cache):
+            with self.assertRaises(RuntimeError):
+                module.sync_long_trend_reference("BTC/USDT", "BTCUSDT", 1, NOW)
+        self.assertAlmostEqual(self.cache.change("BTC/USDT", 120, NOW), 20)
+
     def test_reference_table_is_separate_from_account_and_price_history(self):
         self.assertEqual(set(module.FuturesTrendReference.__table__.columns.keys()), {"symbol", "payload", "updated_at"})
         self.assertEqual(module.PRICE_HISTORY_RETENTION_SECONDS, 8*86400)
@@ -220,6 +294,72 @@ class TrendIntegrationTests(unittest.TestCase):
                 module.sync_long_trend_reference("BTC/USDT", "BTCUSDT", 1, NOW+1)
             session.commit.assert_called_once()
             self.assertAlmostEqual(self.cache.change("BTC/USDT", 120, NOW), 20)
+
+
+class StopWorker(BaseException):
+    pass
+
+
+class TrendWorkerTests(unittest.TestCase):
+    def test_failed_symbol_is_identified_deferred_and_does_not_starve_next_target(self):
+        cache = TrendReferenceCache()
+        session = MagicMock()
+        reference_table = SimpleNamespace(query=MagicMock())
+        reference_table.query.limit.return_value.all.return_value = []
+        targets = {"币安人生/USDT": ("币安人生USDT", 1), "哈基米/USDT": ("哈基米USDT", 1)}
+        with patch.object(module, "FuturesTrendReference", reference_table), \
+             patch.object(module.db, "session", session), patch.object(module, "LONG_TREND_REFERENCES", cache), \
+             patch.object(module, "long_trend_targets", return_value=targets), \
+             patch.object(module, "sync_long_trend_reference", side_effect=[TimeoutError("market_deadline_exceeded"), None]) as sync, \
+             patch("app.time.time", return_value=NOW), \
+             patch("app.time.sleep", side_effect=[None, None, StopWorker()]), \
+             self.assertLogs(module.app.logger, level="WARNING") as logs:
+            with self.assertRaises(StopWorker):
+                module.background_long_trend_references()
+        self.assertEqual([call.args[0] for call in sync.call_args_list], sorted(targets))
+        first = sorted(targets)[0]
+        self.assertEqual(cache.retries[first], NOW+300)
+        self.assertFalse(cache.due(first, *targets[first], NOW+299))
+        self.assertTrue(cache.due(first, *targets[first], NOW+300))
+        self.assertEqual(len(logs.output), 1)
+        for value in (first, targets[first][0], "stage=refresh", "reason=market_deadline_exceeded", "retry_seconds=300"):
+            self.assertIn(value, logs.output[0])
+        session.rollback.assert_called_once()
+
+    def test_worker_restores_unicode_and_keeps_valid_cache_when_another_row_is_corrupt(self):
+        cache = TrendReferenceCache()
+        reference_table = SimpleNamespace(query=MagicMock())
+        reference_table.query.limit.return_value.all.return_value = [
+            SimpleNamespace(symbol="BAD/USDT", payload=json.dumps({**data(), "source_symbol": "bad/path"})),
+            SimpleNamespace(symbol="哈基米/USDT", payload=json.dumps({**data(), "source_symbol": "哈基米USDT"})),
+        ]
+        with patch.object(module, "FuturesTrendReference", reference_table), \
+             patch.object(module.db, "session", MagicMock()), patch.object(module, "LONG_TREND_REFERENCES", cache), \
+             patch.object(module, "long_trend_targets", return_value={"哈基米/USDT": ("哈基米USDT", 1)}), \
+             patch.object(module, "sync_long_trend_reference") as sync, \
+             patch("app.time.time", return_value=NOW), patch("app.time.sleep", side_effect=[None, StopWorker()]), \
+             self.assertLogs(module.app.logger, level="WARNING") as logs:
+            with self.assertRaises(StopWorker):
+                module.background_long_trend_references()
+        self.assertAlmostEqual(cache.change("哈基米/USDT", 120, NOW), 20)
+        sync.assert_not_called()
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("invalid_long_trend_cache symbol='BAD/USDT' reason=invalid_reference_source", logs.output[0])
+
+    def test_catalog_failure_is_reported_without_leaking_db_message_and_recovers(self):
+        reference_table = SimpleNamespace(query=MagicMock())
+        reference_table.query.limit.return_value.all.return_value = []
+        with patch.object(module, "FuturesTrendReference", reference_table), \
+             patch.object(module.db, "session", MagicMock()), \
+             patch.object(module, "long_trend_targets", side_effect=[RuntimeError("password=private"), {}]) as targets, \
+             patch("app.time.time", return_value=NOW), \
+             patch("app.time.sleep", side_effect=[None, None, StopWorker()]), \
+             self.assertLogs(module.app.logger, level="WARNING") as logs:
+            with self.assertRaises(StopWorker):
+                module.background_long_trend_references()
+        self.assertEqual(targets.call_count, 2)
+        self.assertIn("stage=catalog reason=RuntimeError retry_seconds=15", logs.output[0])
+        self.assertNotIn("private", logs.output[0])
 
 
 if __name__ == "__main__":

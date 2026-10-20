@@ -19,7 +19,7 @@ function harness(){
 const route=(long,index)=>({long_exchange:long,short_exchange:'Binance',open_spread:index+.51,close_spread:-index-.72,
   long_basis:-.23,short_basis:.45,long_bid:2.1234,long_ask:2.1236,short_bid:2.15,short_ask:2.17,
   long_funding_rate:.01,short_funding_rate:-.02,long_funding_cap:1.5,short_funding_cap:2,
-  long_funding_interval_hours:4,short_funding_interval_hours:8,long_next_funding_time:'2026-10-20 12:00:00',short_next_funding_time:'2026-10-20 16:00:00',
+  long_funding_interval_hours:4,short_funding_interval_hours:8,long_next_funding_time:'10-20 12:00',short_next_funding_time:'10-20 16:00',
   long_open_interest:100+index,long_volume:200+index,short_open_interest:300+index,short_volume:400+index,
   funding_difference:.1,funding_difference_previous:.2,funding_difference_24h:.3,funding_difference_3d:.4,funding_difference_7d:.5,funding_difference_30d:.6,
   funding_settlement_label:'双方结算 · 16:00',index_overlap:60,_commonIndexId:`path-${index}-${long}`,
@@ -51,7 +51,7 @@ test('compact dual keeps five aligned columns for one, two and three paths',()=>
       for(const field of ['basis','funding_rate','funding_cap'])assert.ok(grid[column].includes(harness().dualDisplayPercent(row[`${side}_${field}`])),field);
       for(const field of ['open_interest','volume'])assert.ok(grid[column].includes(`>${row[`${side}_${field}`]}<`),field);
       assert.ok(grid[column].includes(side==='long'?'2.1235':'2.1600'));
-      assert.ok(grid[column].includes(side==='long'?'4H':'8H'));assert.ok(grid[column].includes(side==='long'?'12:00:00':'16:00:00'));
+      assert.ok(grid[column].includes(side==='long'?'4H':'8H'));assert.ok(grid[column].includes(side==='long'?'12:00':'16:00'));
     }
     for(const field of ['open_spread','close_spread','funding_difference','funding_difference_previous','funding_difference_24h','funding_difference_3d','funding_difference_7d','funding_difference_30d'])assert.ok(grid[4].includes(harness().dualDisplayPercent(row[field])),field);
     assert.ok(!grid[4].includes(row.funding_settlement_label));assert.ok(grid[4].includes('60.00%'));assert.ok(grid[4].includes(row._commonIndexId));
@@ -96,8 +96,8 @@ test('funding comparison removes the settlement note without dropping any period
     const visibleText=markup.replace(/<[^>]*>/g,'');
     assert.ok(!markup.includes('<small>'));assert.ok(!visibleText.includes('结算'));assert.ok(!visibleText.includes('待同步'));
     // Each leg's own settlement clock and cycle are still present.
-    assert.ok(context.dualExchangeCard(row,'long').includes('12:00:00'));
-    assert.ok(context.dualExchangeCard(row,'short').includes('16:00:00'));
+    assert.ok(context.dualExchangeCard(row,'long').includes('12:00'));
+    assert.ok(context.dualExchangeCard(row,'short').includes('16:00'));
   }
 });
 

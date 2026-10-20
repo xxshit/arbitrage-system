@@ -9,6 +9,7 @@ const css=readFileSync(new URL('../static/workspace-layout.css',import.meta.url)
 const functions=source.slice(source.indexOf('function isAlertMuted('),source.indexOf('function renderTipsItems('));
 const helpers=source.slice(source.indexOf('function alertLabel('),source.indexOf('function toggleTips('));
 const transferHelpers=source.slice(source.indexOf('function transferFlagText('),source.indexOf('function spotRows('));
+const settlementHelpers=source.slice(source.indexOf('function beijingFundingTime('),source.indexOf('function dualFundingCap('));
 const exchangeHelpers=source.slice(source.indexOf('const exchangeIcon='),source.indexOf('\n',source.indexOf('const exchangeIcon=')))+'\n'+source.slice(source.indexOf('function exchangeName('),source.indexOf('function syncRenderedNode('));
 const escape=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const pathKey=(strategy='spot_futures',long='Gate',short='Binance')=>JSON.stringify([strategy,long,short]);
@@ -24,7 +25,7 @@ function harness(fetcher=async url=>{const params=new URL(url,'https://example.t
   const context={URLSearchParams,console,clearTimeout(){},window:{innerWidth:1280},byId:node,escapeChatHtml:escape,delistingSymbolClass:()=>'',changeClass:value=>value<0?'negative':'positive',percent:value=>(value>=0?'+':'')+Number(value).toFixed(4)+'%',intervalClass:()=>'',exchangeName:escape,fetchRefreshJson:fetcher,renderTipsItems(){},
     replaceHtmlKeepingExchangeLogos:(target,markup)=>{if(target.innerHTML!==markup)target.innerHTML=markup}};
   vm.createContext(context);
-  vm.runInContext("let latestFundingAlerts={groups:[],active_events:[]},selectedFundingContract='',mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertScope='history',alertNotional=1000,alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+exchangeHelpers+'\n'+transferHelpers+'\n'+helpers+'\n'+functions,context);
+  vm.runInContext("let latestFundingAlerts={groups:[],active_events:[]},selectedFundingContract='',mutedAlertSymbols=new Set(),selectedAlertSymbol='',latestAlertGroups=[],latestActiveAlertEvents=[],alertListQuery='',alertListSort='latest',alertScope='history',alertNotional=1000,alertDetailVersion=0,alertDetailRequest=null,alertDetailState={symbol:'',data:null,loading:false,error:''};\n"+exchangeHelpers+'\n'+transferHelpers+'\n'+settlementHelpers+'\n'+helpers+'\n'+functions,context);
   return {context,node,scroll,transferScroll,run:code=>vm.runInContext(code,context)};
 }
 
@@ -626,6 +627,16 @@ test('funding missing limits are not zero and small rates keep meaningful digits
 test('funding histories keep observations separate from actual settlement timestamps',()=>{
   const h=fundingHarness(),item=fundingGroup();item.history=[{kind:'settled_cap',side:'positive',observed_at:1792414805,settlement_at:1792414800,rate:1,interval:4,notice:false}];
   const markup=h.context.fundingDetailCard(item);assert.ok(markup.includes('实际结算触顶'));assert.ok(markup.includes('实际结算 '));assert.ok(!markup.includes('仅记录'));
+});
+
+test('funding alert next settlement uses Beijing but explicitly UTC event history remains UTC',()=>{
+  const h=fundingHarness(),item=fundingGroup();item.next_at=1792512000;
+  item.history=[{kind:'settled_cap',side:'positive',observed_at:1792497605,settlement_at:1792497600,rate:1,interval:4,notice:false}];
+  const markup=h.context.fundingDetailCard(item);
+  assert.ok(markup.includes('下次结算 10-21 00:00（北京时间）'));
+  assert.ok(markup.includes('发现时间（UTC）'));
+  assert.ok(markup.includes('实际结算 10-20 12:00:00 UTC'));
+  assert.ok(!markup.includes('下次结算 10-20 16:00'));
 });
 
 test('funding search, selection and refresh keep the selected coin and scroll',()=>{

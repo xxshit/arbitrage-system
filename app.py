@@ -2828,11 +2828,14 @@ def enrich_price_changes(groups):
 
 
 def format_funding_time(timestamp_ms):
-    if not timestamp_ms:
+    """Exchange epoch milliseconds → Beijing wall time, never the server's TZ."""
+    if not timestamp_ms or isinstance(timestamp_ms, bool):
         return None
     try:
+        if int(timestamp_ms) <= 0:
+            return None
         return datetime.fromtimestamp(int(timestamp_ms) / 1000, tz=timezone.utc).astimezone(SHANGHAI_TZ).strftime("%m-%d %H:%M")
-    except (TypeError, ValueError, OSError):
+    except (TypeError, ValueError, OverflowError, OSError):
         return None
 
 
@@ -3894,7 +3897,7 @@ def spot_futures_snapshot():
             close_spread = (futures_book["ask"] - book["bid"]) / book["bid"] * 100
             contract_basis = (float(funding_item["markPrice"]) - float(funding_item["indexPrice"])) / float(funding_item["indexPrice"]) * 100
             oi_contracts = BINANCE_OPEN_INTEREST_CACHE.get(symbol, {}).get("contracts")
-            rows.append({"long_exchange": exchange, "long_ask": book["ask"], "long_bid": book["bid"], "short_exchange": "Binance 合约", "short_bid": futures_book["bid"], "short_ask": futures_book["ask"], "basis": contract_basis, "funding_rate": float(funding_item["lastFundingRate"]) * 100, "funding_interval_hours": intervals.get(symbol, 8), "next_funding_time": datetime.fromtimestamp(int(funding_item["nextFundingTime"]) / 1000, tz=timezone.utc).astimezone().strftime("%m-%d %H:%M"), "spot_volume": spot_volumes[exchange].get(raw_spot_symbol), "futures_volume": futures_volumes.get(symbol), "futures_open_interest": oi_contracts * float(funding_item.get("markPrice", 0) or 0) if oi_contracts is not None else None, "open_spread": open_spread, "close_spread": close_spread})
+            rows.append({"long_exchange": exchange, "long_ask": book["ask"], "long_bid": book["bid"], "short_exchange": "Binance 合约", "short_bid": futures_book["bid"], "short_ask": futures_book["ask"], "basis": contract_basis, "funding_rate": float(funding_item["lastFundingRate"]) * 100, "funding_interval_hours": intervals.get(symbol, 8), "next_funding_time": format_funding_time(funding_item.get("nextFundingTime")) or "—", "spot_volume": spot_volumes[exchange].get(raw_spot_symbol), "futures_volume": futures_volumes.get(symbol), "futures_open_interest": oi_contracts * float(funding_item.get("markPrice", 0) or 0) if oi_contracts is not None else None, "open_spread": open_spread, "close_spread": close_spread})
             feed = {"Binance": "bn_spot", "Gate": "gate", "Bitget": "bitget"}[exchange]
             stream_symbol = raw_spot_symbol[:-4] + "_USDT" if exchange == "Gate" else raw_spot_symbol
             rows[-1]["alert_stream_route"] = dict(long_key=(feed, stream_symbol), short_key=("bn_future", symbol),

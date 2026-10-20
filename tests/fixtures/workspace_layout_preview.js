@@ -4,11 +4,12 @@
   delete window.PushManager;
   const now = () => Date.now() / 1000;
   const stamp = '2026-10-18 10:30:00';
+  const fundingStamp = new Date((Math.floor((Date.now()+8*3600000)/86400000)+1)*86400000).toISOString().slice(5,10)+' 00:00';
   const wallet=(exchange,overrides={})=>({exchange,state:'fresh',chains:[{name:'BSC',deposit_open:false,withdraw_open:true}],captured_at:'10-18 10:30:00 UTC',captured_at_epoch:now(),reason:'',source_url:'https://api.gateio.ws/api/v4/spot/currencies',...overrides});
   const symbols = ['DEMO/USDT','SAMPLE/USDT','LONGTOKEN/USDT','SMALL/USDT'];
   const base = {long_exchange:'Gate',short_exchange:'Binance',long_ask:1.23456789,long_bid:1.2344,short_ask:1.246,short_bid:1.245,
     basis:0.83,funding_rate:0.025,funding_previous:0.021,funding_24h:0.14,funding_3d:0.42,funding_7d:0.98,funding_30d:3.8,
-    funding_interval_hours:4,next_funding_time:'2026-10-18 12:00:00',spot_volume:18200000,futures_volume:37600000,futures_open_interest:14300000,
+    funding_interval_hours:4,next_funding_time:fundingStamp,spot_volume:18200000,futures_volume:37600000,futures_open_interest:14300000,
     open_spread:0.85,close_spread:-0.93,change_5m:0.42,change_15m:0.7,change_30m:1.2,change_1h:2.1,change_12h:4.6,change_24h:7.9,change_2d:10.2,change_3d:12.6,change_7d:18.4,change_30d:-28.7};
   const spot = symbols.map((symbol,index) => ({symbol,rows:[{...base,long_ask:base.long_ask+index/10,transfer_status:wallet('Gate')},{...base,long_exchange:'Bitget',open_spread:0.75,transfer_status:wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC',chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}],reason:'快照已过期'})}]}));
   spot[0].rows.unshift({...base,long_exchange:'Binance',open_spread:.65,transfer_status:wallet('Binance',{chains:[{name:'BSC',deposit_open:true,withdraw_open:true}]})});
@@ -22,7 +23,7 @@
   spot.push({symbol:isolatedRisk.symbol,rows:[{...base,...isolatedRisk,transfer_status:wallet('Gate'),price_divergence:isolatedRisk},{...base,long_exchange:'Bitget',transfer_status:wallet('Bitget',{chains:[{name:'BEP20',deposit_open:true,withdraw_open:true}]})}]});
   const dual = symbols.map(symbol => ({symbol,binance_change_5m:0.42,binance_change_15m:0.7,binance_change_30m:1.2,binance_change_1h:2.1,binance_change_12h:-4.6,binance_change_24h:7.9,binance_change_2d:10.2,binance_change_3d:-12.6,binance_change_7d:18.4,binance_change_30d:-28.7,rows:[
     {...base,long_exchange:'Bybit',long_basis:-0.2,short_basis:0.83,long_open_interest:12000000,short_open_interest:14300000,long_volume:25000000,short_volume:37600000,
-      long_funding_rate:0.01,short_funding_rate:0.025,long_funding_interval_hours:4,short_funding_interval_hours:4,long_next_funding_time:stamp,short_next_funding_time:stamp,
+      long_funding_rate:0.01,short_funding_rate:0.025,long_funding_interval_hours:4,short_funding_interval_hours:4,long_next_funding_time:fundingStamp,short_next_funding_time:fundingStamp,
       funding_difference:0.015,funding_difference_previous:0.012,funding_difference_24h:0.09,funding_difference_3d:0.27,funding_difference_7d:0.6,funding_difference_30d:2.4,funding_settlement_label:'双方结算 · 12:00'},
   ]}));
   // Single, double and triple paths plus long identifiers and missing fields.

@@ -46,6 +46,13 @@ class SpotSortingTests(unittest.TestCase):
         self.assertEqual([g["rows"][0]["long_exchange"] for g in result], ["Gate", "Gate", "Bitget"])
         self.assertEqual([r["open_spread"] for r in result[2]["rows"]], [.3015, .1003, -.2])
 
+    def test_two_and_thirty_day_sort_parameters_are_not_reset_to_spread(self):
+        for period in ("2d", "30d"):
+            for direction in ("asc", "desc"):
+                result = self.request(self.groups, f"sort_by=change_{period}&sort_direction={direction}")
+                self.assertEqual(result["sort_by"], "change_" + period)
+                self.assertEqual(result["sort_direction"], direction)
+
     def test_ascending_uses_minimum_not_maximum_or_absolute_value(self):
         groups = [group("A", [("Gate", -.1), ("Bitget", -5)]), group("B", [("Gate", -.5)]),
                   group("C", [("Gate", 0)]), group("D", [("Gate", 10)])]

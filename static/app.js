@@ -58,7 +58,7 @@ let spotSort = {key:'open_spread', direction:'desc'};
 const spotSortOptions=[
 ['open_spread','开差'],['close_spread','平差'],
 ['basis','基差'],['funding_rate','资费差 · 当前'],['funding_previous','资费差 · 上期'],['funding_24h','资费差 · 24H'],['funding_3d','资费差 · 3D'],['funding_7d','资费差 · 7D'],['funding_30d','资费差 · 30D'],
-['change_5m','涨跌幅 · 5MIN'],['change_15m','涨跌幅 · 15MIN'],['change_30m','涨跌幅 · 30MIN'],['change_1h','涨跌幅 · 1H'],['change_12h','涨跌幅 · 12H'],['change_24h','涨跌幅 · 24H'],['change_3d','涨跌幅 · 3D'],['change_7d','涨跌幅 · 7D']
+['change_5m','涨跌幅 · 5MIN'],['change_15m','涨跌幅 · 15MIN'],['change_30m','涨跌幅 · 30MIN'],['change_1h','涨跌幅 · 1H'],['change_12h','涨跌幅 · 12H'],['change_24h','涨跌幅 · 24H'],['change_2d','涨跌幅 · 2D'],['change_3d','涨跌幅 · 3D'],['change_7d','涨跌幅 · 7D'],['change_30d','涨跌幅 · 30D']
 ];
 let spotFuturesSearch = '';
 let spotFundingInterval = 'all';
@@ -82,7 +82,7 @@ const dualSortOptions=[
 ['open_spread','开差'],['close_spread','平差'],
 ['funding_difference','资费差 · 当前'],['funding_difference_previous','资费差 · 上期'],['funding_difference_24h','资费差 · 24H'],['funding_difference_3d','资费差 · 3D'],['funding_difference_7d','资费差 · 7D'],['funding_difference_30d','资费差 · 30D'],
 ['binance_basis','基差 · BN'],['bybit_basis','基差 · BY'],['okx_basis','基差 · OK'],
-['binance_change_5m','涨跌幅 · 5MIN'],['binance_change_15m','涨跌幅 · 15MIN'],['binance_change_30m','涨跌幅 · 30MIN'],['binance_change_1h','涨跌幅 · 1H'],['binance_change_12h','涨跌幅 · 12H'],['binance_change_24h','涨跌幅 · 24H'],['binance_change_3d','涨跌幅 · 3D'],['binance_change_7d','涨跌幅 · 7D']
+['binance_change_5m','涨跌幅 · 5MIN'],['binance_change_15m','涨跌幅 · 15MIN'],['binance_change_30m','涨跌幅 · 30MIN'],['binance_change_1h','涨跌幅 · 1H'],['binance_change_12h','涨跌幅 · 12H'],['binance_change_24h','涨跌幅 · 24H'],['binance_change_2d','涨跌幅 · 2D'],['binance_change_3d','涨跌幅 · 3D'],['binance_change_7d','涨跌幅 · 7D'],['binance_change_30d','涨跌幅 · 30D']
 ];
 const dualSortLabels=Object.fromEntries(dualSortOptions);
 let alertSignature = '';
@@ -191,8 +191,8 @@ function signClass(value){return Number(value)>=0?'positive':'negative'}
 function intervalClass(hours){return [1,2,4,8].includes(Number(hours))?`interval-${hours}`:'interval-other'}
 function displayFunding(value){return value===null||value===undefined?'—':percent(value)}
 function fundingStack(row){return `<div class="funding-stack"><span class="funding-item"><b>当前</b><span class="${signClass(row.funding_rate)}">${displayFunding(row.funding_rate)}</span></span><span class="funding-item"><b>上期</b><span class="${signClass(row.funding_previous)}">${displayFunding(row.funding_previous)}</span></span><span class="funding-item" title="最近24小时已结算资费累计，不含当前预估"><b>24H</b><span class="${signClass(row.funding_24h)}">${displayFunding(row.funding_24h)}</span></span><span class="funding-item" title="最近3天（72小时）已结算资费累计，不含当前预估"><b>3D</b><span class="${signClass(row.funding_3d)}">${displayFunding(row.funding_3d)}</span></span><span class="funding-item" title="最近7天（168小时）已结算资费累计，不含当前预估"><b>7D</b><span class="${signClass(row.funding_7d)}">${displayFunding(row.funding_7d)}</span></span><span class="funding-item" title="最近30天（720小时）已结算资费累计，不含当前预估"><b>30D</b><span class="${signClass(row.funding_30d)}">${displayFunding(row.funding_30d)}</span></span></div>`}
-const trendPeriods=[['change_5m','5MIN'],['change_15m','15MIN'],['change_30m','30MIN'],['change_1h','1H'],['change_12h','12H'],['change_24h','24H'],['change_3d','3D'],['change_7d','7D']];
-const spotSortLabels={basis:'基差',funding_rate:'当前资费',funding_previous:'上期资费',funding_24h:'24H 资费',funding_3d:'3D 资费',funding_7d:'7D 资费',funding_30d:'30D 资费',change_5m:'5MIN 涨跌幅',change_15m:'15MIN 涨跌幅',change_30m:'30MIN 涨跌幅',change_1h:'1H 涨跌幅',change_12h:'12H 涨跌幅',change_24h:'24H 涨跌幅',change_3d:'3D 涨跌幅',change_7d:'7D 涨跌幅',open_spread:'开差',close_spread:'平差'};
+const trendPeriods=[['change_5m','5MIN'],['change_15m','15MIN'],['change_30m','30MIN'],['change_1h','1H'],['change_12h','12H'],['change_24h','24H'],['change_2d','2D'],['change_3d','3D'],['change_7d','7D'],['change_30d','30D']];
+const spotSortLabels={basis:'基差',funding_rate:'当前资费',funding_previous:'上期资费',funding_24h:'24H 资费',funding_3d:'3D 资费',funding_7d:'7D 资费',funding_30d:'30D 资费',change_5m:'5MIN 涨跌幅',change_15m:'15MIN 涨跌幅',change_30m:'30MIN 涨跌幅',change_1h:'1H 涨跌幅',change_12h:'12H 涨跌幅',change_24h:'24H 涨跌幅',change_2d:'2D 涨跌幅',change_3d:'3D 涨跌幅',change_7d:'7D 涨跌幅',change_30d:'30D 涨跌幅',open_spread:'开差',close_spread:'平差'};
 function changeClass(value){return value===null||value===undefined?'neutral':Number(value)>0?'positive':Number(value)<0?'negative':'neutral'}
 function displayChange(value){return value===null||value===undefined?'—':percent(value)}
 function trendLights(row){return `<div class="trend-lights">${trendPeriods.map(([key,label])=>`<span class="trend-light ${changeClass(row[key])}" title="${label} ${displayChange(row[key])}"><i></i><em>${label}</em></span>`).join('')}</div>`}

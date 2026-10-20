@@ -40,6 +40,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from anomaly_streams import AlertStreamHub, Route
 from anomaly_engine import alert_round_ids, pulse_is_actionable
 from alert_history_index import AlertHistoryIndex
+from trend_reference import TrendReferenceCache, fetch_reference
 from alert_reminders import admit_pulse, current_notice, reminder_count, reminder_state_id
 from alert_screening import DEFAULT_NOTIONAL, okx_contract_unit, pulse_has_watch_peak, screen_pulse
 from asset_catalog import NON_CRYPTO_BOOTSTRAP, bootstrap_category, compact_symbol, instrument_category
@@ -69,6 +70,7 @@ app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
 ALERT_STREAM_HUB = AlertStreamHub()
 ALERT_HISTORY_INDEX = AlertHistoryIndex()
+LONG_TREND_REFERENCES = TrendReferenceCache()
 SPREAD_HISTORY_BUFFER = HistoryBuffer()
 SPREAD_HISTORY_STORE = HistoryStore(Path(app.instance_path) / "spread-history")
 
@@ -561,6 +563,13 @@ class ExchangeFundingRateRecord(db.Model):
     __table_args__ = (
         db.UniqueConstraint("exchange", "symbol", "funding_time", name="uq_exchange_funding_symbol_time"),
     )
+
+
+class FuturesTrendReference(db.Model):
+    """One bounded strip of public 30D reference candles per canonical symbol."""
+    symbol = db.Column(db.String(30), primary_key=True)
+    payload = db.Column(db.Text, nullable=False)
+    updated_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False)
 
 
 class FuturesPriceHistory(db.Model):
@@ -1206,8 +1215,10 @@ TREND_WINDOWS = {
     "change_4h": 4 * 60 * 60,
     "change_12h": 12 * 60 * 60,
     "change_24h": 24 * 60 * 60,
+    "change_2d": 2 * 24 * 60 * 60,
     "change_3d": 3 * 24 * 60 * 60,
     "change_7d": 7 * 24 * 60 * 60,
+    "change_30d": 30 * 24 * 60 * 60,
 }
 BACKGROUND_WORKERS_STARTED = False
 EARLY_TREND_SCAN_LOCK = threading.Lock()
@@ -1234,7 +1245,7 @@ RUNTIME_RULE_DEFAULTS = [
     {"rule_key": "alarm_threshold", "category": "报警规则", "label": "基差追踪记录", "schedule_type": "policy", "value": "1% / 扩大0.2%", "unit": "规则", "editable": False, "description": "仅用于基差追踪及扩张日志，不再以绝对水平额外生成报警；报警使用独立实时异动规则。"},
     {"rule_key": "rapid_move_threshold", "category": "报警规则", "label": "实时异动报警", "schedule_type": "policy", "value": "15秒0.20 / 30秒0.30 / 120秒0.50", "unit": "百分点", "editable": False, "description": "有效对齐报价首次越线即记录；保留瞬时极值与回落，回落后再变动0.20个百分点独立记录，不要求超过旧峰值。小偏离冻结起点、300秒内累计0.50个百分点也记录。双端价格另用1%/1.5%/3%对数变化阈值。只在网页提醒，不新增Lark。"},
     {"rule_key": "funding_retention", "category": "数据保留", "label": "资费历史保留", "schedule_type": "retention", "value": "31", "unit": "天", "editable": False, "description": "保留31天真实结算，给最近720小时滚动累计留一天缓冲；超过31天清理。"},
-    {"rule_key": "price_retention", "category": "数据保留", "label": "价格快照保留", "schedule_type": "retention", "value": "8", "unit": "天", "editable": False, "description": "涨跌幅计算所需的 Binance 价格快照滚动保留 8 天。"},
+    {"rule_key": "price_retention", "category": "数据保留", "label": "价格快照保留", "schedule_type": "retention", "value": "8", "unit": "天", "editable": False, "description": "5分钟价格快照保留8天（含2D）；30D涨跌幅独立缓存币安30天前的5分钟参考价，不扩大高频历史表。"},
     {"rule_key": "spread_history_retention", "category": "数据保留", "label": "现多期空开差/基差历史", "schedule_type": "retention", "value": "15", "unit": "天", "editable": False, "description": "有效公开行情每分钟保留首末及高低点，按小时压缩；滚动展示15天，未采集和失效行情留空。"},
     {"rule_key": "chat_retention", "category": "数据保留", "label": "协作记录保留", "schedule_type": "retention", "value": str(CHAT_RETENTION_DAYS), "unit": "天", "editable": False, "description": f"文字消息、图片消息和私有图片文件仅保留最近 {CHAT_RETENTION_DAYS} 天，过期后自动物理清理。"},
 ]
@@ -2810,6 +2821,8 @@ def enrich_price_changes(groups):
         for key, seconds in TREND_WINDOWS.items():
             previous = points.get((group["symbol"], now_bucket - seconds))
             change = (current - previous) / previous * 100 if previous else None
+            if key == "change_30d":
+                change = LONG_TREND_REFERENCES.change(group["symbol"], current, now_bucket, raw_price=True)
             for row in group["rows"]:
                 row[key] = change
 
@@ -3131,7 +3144,11 @@ def enrich_dual_binance_reference(groups):
                 if row.get(f"{side}_exchange") == "Binance":
                     bid, ask = row.get(f"{side}_bid"), row.get(f"{side}_ask")
                     if bid and ask:
-                        references[group["symbol"]] = {"basis": row.get(f"{side}_basis"), "price": (bid + ask) / 2}
+                        # Dual quotes are alias-normalized; the shared Binance
+                        # history (and spot page's contract leg) uses raw units.
+                        factor = row.get("alert_stream_route", {}).get(f"{side}_factor")
+                        multiplier = 1 / factor if factor else LONG_TREND_REFERENCES.multiplier(group["symbol"])
+                        references[group["symbol"]] = {"basis": row.get(f"{side}_basis"), "price": (bid + ask) / 2 * multiplier}
     for group in (SPOT_FUTURES_CACHE["snapshot"] or {}).get("symbols", []):
         if group["symbol"] in symbols and group["symbol"] not in references and group["rows"]:
             row = group["rows"][0]
@@ -3153,6 +3170,7 @@ def enrich_dual_binance_reference(groups):
         for key, seconds in TREND_WINDOWS.items():
             previous = points.get((group["symbol"], now_bucket - seconds))
             group[f"binance_{key}"] = (current_price - previous) / previous * 100 if current_price and previous else None
+        group["binance_change_30d"] = LONG_TREND_REFERENCES.change(group["symbol"], current_price, now_bucket, raw_price=True)
 
 
 def load_latest_dual_futures_snapshot():
@@ -3204,7 +3222,9 @@ def price_history_integrity(groups):
             FuturesPriceHistory.symbol.in_(symbols), FuturesPriceHistory.bucket_at >= cutoff
         ).group_by(FuturesPriceHistory.symbol).all()
     )
-    target_buckets = [now_bucket - seconds for seconds in TREND_WINDOWS.values()]
+    # 30D has a separate bounded reference cache, not eight days of 5m history.
+    target_buckets = [now_bucket - seconds for seconds in TREND_WINDOWS.values()
+                      if seconds < PRICE_HISTORY_RETENTION_SECONDS]
     target_points = {
         (item.symbol, item.bucket_at) for item in FuturesPriceHistory.query.filter(
             FuturesPriceHistory.symbol.in_(symbols), FuturesPriceHistory.bucket_at.in_(target_buckets)
@@ -7500,7 +7520,7 @@ def spot_futures():
     symbol_query = raw_symbol_query.replace("/", "").replace("-", "")
     sort_by = request.args.get("sort_by", "open_spread")
     sort_direction = request.args.get("sort_direction", "desc")
-    if sort_by not in {"basis", "funding_rate", "funding_previous", "funding_24h", "funding_3d", "funding_7d", "funding_30d", "change_5m", "change_15m", "change_30m", "change_1h", "change_12h", "change_24h", "change_3d", "change_7d", "open_spread", "close_spread"}:
+    if sort_by not in {"basis", "funding_rate", "funding_previous", "funding_24h", "funding_3d", "funding_7d", "funding_30d", "change_5m", "change_15m", "change_30m", "change_1h", "change_12h", "change_24h", "change_2d", "change_3d", "change_7d", "change_30d", "open_spread", "close_spread"}:
         sort_by = "open_spread"
     if sort_direction not in {"asc", "desc"}:
         sort_direction = "desc"
@@ -15270,6 +15290,79 @@ def background_binance_settlement_tail():
         time.sleep(max(.25, 20 - (time.monotonic()-started)))
 
 
+def long_trend_targets():
+    """Only active, verified Binance contracts already covered by these pages."""
+    symbols = set()
+    for snapshot in (SPOT_FUTURES_CACHE.get("snapshot"), DUAL_FUTURES_CACHE.get("snapshot")):
+        symbols.update(group["symbol"] for group in (snapshot or {}).get("symbols", [])
+                       if not is_rwa_stock_pair(group["symbol"]))
+    catalog = MARKET_PAYLOAD_CACHE.get("https://fapi.binance.com/fapi/v1/exchangeInfo", {}).get("payload", {})
+    aliases = symbol_alias_rows()
+    targets = {}
+    for item in catalog.get("symbols", []):
+        if item.get("status") != "TRADING" or item.get("contractType") != "PERPETUAL" or item.get("quoteAsset") != "USDT":
+            continue
+        raw = item["symbol"]
+        canonical, multiplier = resolve_symbol_alias(raw, "Binance", "contract", aliases)
+        symbol = pair_slash(canonical)
+        if symbol in symbols and (symbol not in targets or raw == canonical):
+            targets[symbol] = (raw, multiplier)
+    return targets
+
+
+def sync_long_trend_reference(symbol, raw, multiplier, now):
+    # Release DB transactions before the public network read.
+    db.session.remove()
+    data = fetch_reference(MARKET_HTTP.get_json, raw, multiplier, now)
+    row = db.session.get(FuturesTrendReference, symbol)
+    if row is None:
+        row = FuturesTrendReference(symbol=symbol)
+        db.session.add(row)
+    row.payload = json.dumps(data, separators=(",", ":"), allow_nan=False)
+    row.updated_at = utc_now_naive()
+    db.session.commit()
+    LONG_TREND_REFERENCES.put(symbol, data)
+
+
+def background_long_trend_references():
+    time.sleep(10)
+    restored, targets, catalog_at, cursor = False, {}, 0, 0
+    while True:
+        symbol = None
+        with app.app_context():
+            try:
+                if not restored:
+                    for row in FuturesTrendReference.query.limit(2000).all():
+                        try:
+                            LONG_TREND_REFERENCES.put(row.symbol, json.loads(row.payload))
+                        except (ValueError, TypeError, KeyError):
+                            app.logger.warning("invalid_long_trend_cache")
+                    restored = True
+                now = time.time()
+                if now - catalog_at >= 60:
+                    targets = long_trend_targets()
+                    catalog_at = now
+                ordered = sorted(targets)
+                for offset in range(len(ordered)):
+                    index = (cursor + offset) % len(ordered)
+                    candidate = ordered[index]
+                    raw, multiplier = targets[candidate]
+                    if LONG_TREND_REFERENCES.due(candidate, raw, multiplier, now):
+                        symbol, cursor = candidate, index + 1
+                        break
+                if symbol is not None:
+                    sync_long_trend_reference(symbol, *targets[symbol], now)
+            except Exception:
+                db.session.rollback()
+                if symbol:
+                    LONG_TREND_REFERENCES.defer(symbol, time.time() + 300)
+                app.logger.warning("long_trend_reference_refresh_failed")
+            finally:
+                db.session.remove()
+        # At most one low-weight request per 1.5s; 429/418 shares the host backoff.
+        time.sleep(1.5 if symbol else 15)
+
+
 def background_price_history_backfill():
     time.sleep(60)
     while True:
@@ -15653,6 +15746,7 @@ def start_background_workers():
     threading.Thread(target=background_binance_settlement_tail, daemon=True, name="binance-settlement-tail").start()
     threading.Thread(target=background_funding_alerts, daemon=True, name="funding-alerts").start()
     threading.Thread(target=background_price_history_backfill, daemon=True, name="price-history-backfill").start()
+    threading.Thread(target=background_long_trend_references, daemon=True, name="long-trend-references").start()
     threading.Thread(target=background_index_component_sync, daemon=True, name="index-component-sync").start()
     threading.Thread(target=background_onchain_opportunity_refresh, daemon=True, name="onchain-opportunity-refresh").start()
     threading.Thread(target=background_announcement_scan, daemon=True, name="announcement-scan").start()

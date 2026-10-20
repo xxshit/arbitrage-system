@@ -165,6 +165,8 @@
         long_exchange:i%2?'Bitget':'Gate',grade:i===0?'A':i<3?'B':'C',grade_label:i===0?'优先':i<3?'关注':'低优先观察',
         status:i===0?'opportunity':'watch',open_spread:i===0?1.5:.5,close_spread:i===0?1.55:.55,quoted_at:now(),
         funding_current:i<3?.025:.005,funding:{count:6,above:i<3?2:0,total:.03,complete:true},
+        funding_previous:i===6?null:.005,funding_24h:i===6?null:.03,
+        funding_3d:i===7?0:.09,funding_7d:i===7?-.21:.21,funding_30d:i===7?-12.193:1.193,
         reasons:i<3?['本期预计 +0.0250% / 4H，高于基准 0.0050%','近24H已结算 6 期，其中 2 期高于基准']:['已采区间开差接近 +0.50%，常态溢价；等待更好的开平窗口','资费未明显脱离基准，低优先观察，不假定价差会归零'],
         risks:i===2?['首档容量不足参考金额']:[],trend:i===1?'回撤正资费观察':'价格走强',
         transfer_status:wallet(i%2?'Bitget':'Gate',{chains:[{name:'BSC',deposit_open:true,withdraw_open:true}]}),

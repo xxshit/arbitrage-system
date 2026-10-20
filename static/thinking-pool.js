@@ -87,18 +87,23 @@
   }
   function spotRow(item){
     const current=!state.error&&qualified(item),grade=item.grade||'C';
-    const funding=typeof item.funding==='object'&&item.funding||{};
-    const firstReason=(item.reasons||[]).slice(0,2);
     return `<article class="opportunity-row" data-render-key="${attr(item)}">
       <div class="opportunity-main"><div class="opportunity-priority"><b class="opportunity-grade grade-${esc(grade)}">${esc(grade)} · ${esc(item.grade_label||'待评估')}</b>
       <span class="opportunity-state ${current?'is-current':''}" data-live-status="${item.status==='opportunity'?'1':'0'}" data-quoted-at="${Number(item.quoted_at)||0}">${current?'当前有机会':'值得观察'}</span></div>
       <div class="opportunity-path"><button type="button" class="symbol-detail-trigger" data-market-symbol="${esc(item.symbol)}" data-delisting-announced="${item.delisting_announced?'1':'0'}" data-opportunity-key="${attr(item)}" onclick="ThinkingPool.symbol(this)">${esc(item.symbol)}</button>
       <span>${exchangeName(item.long_exchange)}现货 → ${exchangeName('Binance')}合约</span>${transferStatusControl(item.transfer_status||{exchange:item.long_exchange},item.symbol)}</div>
       <div class="opportunity-values"><span>开差 <b class="${color(item.open_spread)}">${pct(item.open_spread)}</b></span><span>平差 <b class="${color(item.close_spread)}">${pct(item.close_spread)}</b></span></div>
-      <div class="opportunity-values"><span>本期预计 <b class="${color(item.funding_current)}">${pct(item.funding_current,4)}</b> / ${esc(item.short_interval||'—')}H</span>
-      <span>已结算24H <b class="${color(funding.total)}">${pct(funding.total,4)}</b></span></div>
-      <div class="opportunity-reasons">${firstReason.map(reason=>`<span>${esc(reason)}</span>`).join('')||'<span>筛选依据待同步</span>'}
-      <small>${esc(item.trend||'')} ${item.risks?.length?`· ${esc(item.risks[0])}`:''}</small></div>
+      <div class="opportunity-funding" role="group" aria-label="币安资费详情">
+        <span class="opportunity-funding-title">资费 <span>${esc(item.short_interval||'—')}H</span></span>
+        <div class="opportunity-funding-grid">${[
+          ['当前','funding_current','本期预计资金费率，最终以实际结算为准'],
+          ['上期','funding_previous','最近一期已结算资金费率'],
+          ['24H','funding_24h','最近24小时已结算滚动累计'],
+          ['3D','funding_3d','最近3天已结算滚动累计'],
+          ['7D','funding_7d','最近7天已结算滚动累计'],
+          ['30D','funding_30d','最近30天已结算滚动累计'],
+        ].map(([label,field,description])=>`<span class="opportunity-funding-item" title="${description}" data-funding-field="${field}"><span>${label}</span><b class="${color(item[field])}">${pct(item[field],4)}</b></span>`).join('')}</div>
+      </div>
       <button type="button" class="opportunity-history" data-opportunity-key="${attr(item)}" onclick="ThinkingPool.history(this)">历史</button></div>${details(item)}</article>`;
   }
   function dualRow(item){

@@ -13146,6 +13146,9 @@ def spot_thinking_candidates(snapshot, notional, hold_hours):
     groups = [{"symbol": group["symbol"], "rows": [dict(row) for row in group["rows"]]}
               for group in snapshot["symbols"] if not is_rwa_stock_pair(group["symbol"])]
     enrich_transfer_networks(groups)
+    # Reuse the spot page's cached, settled rolling totals for display only.
+    # The independent 48H funding profile still drives opportunity grading.
+    enrich_funding_statistics(groups)
     enrich_price_changes(groups, {"change_24h": 86400})
     histories, _ = OPPORTUNITY_PROFILES.snapshot()
     events = opportunity_funding_events(groups)
@@ -13166,7 +13169,10 @@ def spot_thinking_candidates(snapshot, notional, hold_hours):
                         short_interval=row.get("funding_interval_hours"),
                         long_volume=row.get("spot_volume"), short_volume=row.get("futures_volume"),
                         basis=row.get("basis"), change_24h=row.get("change_24h"),
-                        transfer_status=row.get("transfer_status"))
+                        transfer_status=row.get("transfer_status"),
+                        **{field: row.get(field) for field in (
+                            "funding_previous", "funding_24h", "funding_3d",
+                            "funding_7d", "funding_30d")})
             items.append((item, row, profiles[key]))
     aliases = symbol_alias_rows()
     now_beijing = datetime.now(SHANGHAI_TZ).replace(tzinfo=None)

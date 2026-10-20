@@ -155,10 +155,25 @@ class OpportunityHistoryTests(unittest.TestCase):
         before=deepcopy(snapshot)
         def enrich(groups):
             groups[0]["rows"][0]["price_divergence"]={"state":"confirmed"}
-        with module.app.app_context(),patch.object(module,"is_rwa_stock_pair",side_effect=lambda s:s=="EQUITY/USDT"),patch.object(module,"enrich_transfer_networks",side_effect=enrich),patch.object(module,"enrich_price_changes"),patch.object(module,"opportunity_funding_events",return_value={}),patch.object(module,"symbol_alias_rows",return_value=[]),patch.object(module.ALERT_STREAM_HUB,"screening_quotes",return_value={}):
+        stats={"TESTUSDT":{"previous":.004,"day_1":.03,"day_3":.09,"day_7":-.21,"day_30":1.193}}
+        with module.app.app_context(),patch.object(module,"is_rwa_stock_pair",side_effect=lambda s:s=="EQUITY/USDT"),patch.object(module,"enrich_transfer_networks",side_effect=enrich),patch.object(module,"enrich_price_changes"),patch.object(module,"funding_statistics",return_value=stats) as totals,patch.object(module,"opportunity_funding_events",return_value={}),patch.object(module,"symbol_alias_rows",return_value=[]),patch.object(module.ALERT_STREAM_HUB,"screening_quotes",return_value={}):
             output=module.spot_thinking_candidates(snapshot,1000,72)
+            totals.assert_called_once_with(["TESTUSDT"])
         self.assertEqual(snapshot,before)
         self.assertEqual([item["long_exchange"] for item in output],["Bitget"])
+        self.assertEqual({field:output[0][field] for field in (
+            "funding_previous","funding_24h","funding_3d","funding_7d","funding_30d")},
+            dict(funding_previous=.004,funding_24h=.03,funding_3d=.09,funding_7d=-.21,funding_30d=1.193))
+        # Display totals must not replace the independent profile used by grading.
+        self.assertIsNone(output[0]["funding"]["total"])
+
+    def test_empty_funding_statistics_remain_unknown_not_zero_or_current_rate_times_periods(self):
+        snapshot={"symbols":[{"symbol":"NOHISTORY/USDT","rows":[{
+            "long_exchange":"Gate","open_spread":.5,"funding_rate":.005,"funding_interval_hours":4}]}]}
+        with module.app.app_context(),patch.object(module,"is_rwa_stock_pair",return_value=False),patch.object(module,"enrich_transfer_networks"),patch.object(module,"enrich_price_changes"),patch.object(module,"funding_statistics",return_value={}),patch.object(module,"opportunity_funding_events",return_value={}),patch.object(module,"symbol_alias_rows",return_value=[]),patch.object(module.ALERT_STREAM_HUB,"screening_quotes",return_value={}):
+            item=module.spot_thinking_candidates(snapshot,1000,72)[0]
+        for field in ("funding_previous","funding_24h","funding_3d","funding_7d","funding_30d"):
+            self.assertIsNone(item[field])
 
 
 if __name__=="__main__":

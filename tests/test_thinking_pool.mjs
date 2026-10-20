@@ -16,7 +16,9 @@ function harness(overrides={}){
 const filters={grade:'all',status:'all',search:''};
 const item={symbol:'DEMO/USDT',long_exchange:'Gate',short_exchange:'Binance',grade:'C',
   grade_label:'低优先观察',status:'watch',open_spread:.5,close_spread:.55,short_interval:4,
-  funding_current:.005,funding:{total:.03,complete:true},reasons:['常态溢价，不假定归零'],
+  funding_current:.005,funding_previous:.004,funding_24h:.03,funding_3d:.09,
+  funding_7d:.21,funding_30d:1.193,
+  funding:{total:.03,complete:true},reasons:['常态溢价，不假定归零'],
   risks:[],scenario:{spread_net:-.86},quoted_at:1000};
 
 test('strategy tabs remain spot/dual; drivers never replace strategies',()=>{
@@ -56,11 +58,28 @@ test('browsing order uses exact coin+venue paths, automatic order resumes when r
   assert.equal(ui.ordered([b,a],keys,false)[0].long_exchange,'Bitget');
   assert.equal(ui.ordered([b],keys,true).length,1);
 });
-test('compact spot row includes reasons, grade, status and transfer control without invented return',()=>{
+test('compact spot row shows funding details and keeps reasons collapsed',()=>{
   const ui=harness().ThinkingPool,markup=ui.spotRow(item);
-  for(const text of ['C · 低优先观察','值得观察','常态溢价','充提未知','+0.50%','+0.0050%','依据与风险','盘口记录'])assert.ok(markup.includes(text),text);
+  const main=markup.split('<details')[0];
+  for(const text of ['C · 低优先观察','值得观察','充提未知','+0.50%','+0.0050%','币安资费详情','当前','上期','24H','3D','7D','30D'])assert.ok(main.includes(text),text);
+  for(const text of ['常态溢价','依据与风险','盘口记录'])assert.ok(markup.includes(text),text);
+  assert.ok(!main.includes('常态溢价'));
+  assert.ok(!main.includes('opportunity-reasons'));
+  assert.ok(!main.includes('<span>本期预计'));
+  assert.equal((main.match(/data-funding-field=/g)||[]).length,6);
+  for(const value of ['+0.0040%','+0.0300%','+0.0900%','+0.2100%','+1.1930%'])assert.ok(main.includes(value),value);
   assert.ok(!markup.includes('当前有机会</span>'));
   assert.equal(ui.pct(null),'—');assert.equal(ui.pct(0),'0.00%');
+});
+test('funding display uses settled totals, distinguishes missing from zero and retains negative values',()=>{
+  const ui=harness().ThinkingPool;
+  const main=ui.spotRow({...item,funding:{total:999},funding_24h:null,
+    funding_3d:0,funding_7d:-.218,funding_30d:undefined,
+    trend:'价格走强',risks:['首档容量不足参考金额']}).split('<details')[0];
+  assert.match(main,/data-funding-field="funding_24h"[^]*?<b class="neutral">—<\/b>/);
+  assert.match(main,/data-funding-field="funding_3d"[^]*?<b class="neutral">0\.0000%<\/b>/);
+  assert.match(main,/data-funding-field="funding_7d"[^]*?<b class="negative">-0\.2180%<\/b>/);
+  assert.ok(!main.includes('999'));assert.ok(!main.includes('价格走强'));assert.ok(!main.includes('首档容量不足'));
 });
 test('dual cards have no grades or new spot rules and retain original fields',()=>{
   const ui=harness().ThinkingPool,markup=ui.dualRow({...item,long_exchange:'Bybit',funding_previous:.01,funding_24h:.03,funding_3d:.09});

@@ -54,7 +54,7 @@ test('market sticky cells target only the symbol class, not rowspan continuation
   assert.ok(css.includes('td.symbol {position:sticky;left:0;'));
   assert.ok(!/td:first-child\s*\{[^}]*position:sticky/.test(css));
   assert.ok(css.includes('thead th {position:sticky;top:0;'));
-  assert.ok(css.includes('td.price-change-cell {vertical-align:top;'));
+  assert.ok(css.includes('td.price-change-cell {vertical-align:middle!important;'));
   assert.ok(script.includes("hint.className = 'layout-table-hint'"));
 });
 
@@ -74,10 +74,38 @@ test('movers have six desktop columns and labelled mobile values rather than dro
 test('layout assets load after the existing business assets, and risk has four independent cards',()=>{
   assert.ok(html.indexOf("filename='workspace-layout.css'")>html.indexOf("filename='style.css'"));
   assert.ok(html.indexOf("filename='workspace-layout.js'")>html.indexOf("filename='app.js'"));
-  assert.ok(html.includes("filename='workspace-layout.css') }}?v=20261020-spot-columns-v1"));
+  assert.ok(html.includes("filename='workspace-layout.css') }}?v=20261020-market-align-v1"));
   assert.ok(html.includes("filename='workspace-layout.js') }}?v=20261020-spot-no-guide-v1"));
   const risk=html.slice(html.indexOf('<section id="risk"'),html.indexOf('<section id="thinking"'));
   assert.equal((risk.match(/<article>/g)||[]).length,4);assert.ok(risk.includes('真实下单尚未开放'));
+});
+
+test('both scanners center coin-wide identity and trend cells with balanced vertical padding',()=>{
+  const shared=css.slice(css.indexOf('.layout-view:is(#spot-futures,#dual-futures) td.symbol'),
+    css.indexOf('.layout-view .layout-table-hint'));
+  assert.match(shared,/td\.symbol \{[^}]*vertical-align:middle;padding-block:8px\}/);
+  assert.match(shared,/td\.price-change-cell \{vertical-align:middle!important;padding-block:5px\}/);
+  assert.ok(shared.includes('.symbol-basis-opening:has(> .basis-opening-empty) {display:none}'));
+  // No later compact or responsive override may restore top alignment.
+  assert.ok(!/[^{}]*(?:#spot-futures|#dual-futures)[^{}]*\{[^{}]*vertical-align:top/.test(css));
+  assert.ok(!/td\.price-change-cell[^{}]*\{[^{}]*padding-top:/.test(css));
+});
+
+test('dual route cards center within each route without flexing table cells or removing their white frames',()=>{
+  const compact=css.slice(css.indexOf('/* Compact paired legs:'),css.indexOf('/* Spot scanner:'));
+  assert.ok(compact.includes('td {padding:5px 6px;font-size:12px;line-height:1.4;vertical-align:middle}'));
+  assert.ok(!/td(?:\.\w+)? \{[^{}]*display:(?:flex|grid)/.test(compact));
+  for(const selector of ['.dual-exchange-card {','.dual-result-panel {','.dual-funding-history {']){
+    const rule=compact.slice(compact.indexOf(selector)).split('}')[0];
+    assert.ok(rule.includes('border:1px solid'));assert.ok(rule.includes('border-radius:8px'));
+  }
+});
+
+test('equity market rows use the same middle alignment while research-card layouts stay independent',()=>{
+  assert.ok(css.includes('#equity-arbitrage .equity-table td {vertical-align:middle;padding:10px 12px}'));
+  assert.ok(!/[^{}]*#equity-arbitrage[^{}]*\{[^{}]*vertical-align:top/.test(css));
+  assert.ok(css.includes('.layout-view#thinking .thinking-columns {gap:16px;align-items:start}'));
+  assert.ok(css.includes('.layout-view#daily-trends .horn-symbol-cell {min-width:0;overflow-wrap:anywhere}'));
 });
 
 test('spot scanner ends after its live controls with no explanatory cards or empty wrapper',()=>{

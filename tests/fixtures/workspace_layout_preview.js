@@ -76,8 +76,15 @@
     network:['bsc','solana','base','eth'][index],chain_label:['BSC','Solana','Base','Ethereum'][index],dex_id:'preview-dex',pair_created_at:stamp,captured_at:stamp,
     price_usd:index===0?'0.0000000001234567890123456789':'1.23456789',opportunity_score:82-index*6,risk_level:index?'注意风险':'极高',score_components:{liquidity:22,activity:20,buy_pressure:12,momentum:28},
     price_change_5m:3.2,price_change_1h:7.8,price_change_6h:13.4,price_change_24h:22.1,liquidity_usd:4500000,volume_24h_usd:2700000,turnover:0.6,buy_ratio:63,source_url:'https://example.com/pool'}));
+  const equity = [
+    {...base,strategy:'spot_futures',symbol:'DEMO-EQUITY/USDT',spot_symbol:'DEMO-EQUITYX/USDT',futures_symbol:'DEMO-EQUITY/USDT',
+      product_name:'合成股票代币配对（非真实标的）',product:'合成布局样本',unit_basis:'合成每股报价',units_per_token:1,raw_long_ask:base.long_ask,
+      transfer_status:wallet('Gate'),short_funding_rate:.025,short_interval:4,short_basis:.83,fresh:true,captured_at_epoch:now()},
+    {...base,strategy:'futures_futures',symbol:'SAMPLE-EQUITY/USDT',long_exchange:'Bybit',long_funding_rate:.01,long_interval:8,long_basis:-.2,
+      short_funding_rate:.025,short_interval:4,short_basis:.83,fresh:true,captured_at_epoch:now()},
+  ];
   const fixtures = {
-    '/api/equity-arbitrage':{items:[],page:1,pages:1,total:0,available:{spot_futures:0,futures_futures:0},captured_at_epoch:now(),execution_enabled:false},
+    '/api/equity-arbitrage':{items:equity,page:1,pages:1,total:2,available:{spot_futures:1,futures_futures:1},captured_at_epoch:now(),execution_enabled:false},
     '/api/auth/me':{user_id:1,username:'preview_admin',is_admin:true,account_level:'lv3',csrf_token:'synthetic-only',device_lock_required:false,chat_nav_hidden:false},
     '/api/market-metadata/delisted-symbols':{symbols:[]},
     '/api/spot-futures':{symbols:spot,errors:{},updated_at:'10:30:00',captured_at_epoch:now(),total_symbols:spot.length,page:1,pages:1,next_refresh_in_seconds:5},
@@ -148,6 +155,11 @@
     }
     if (!(path in fixtures)) return Response.json({error:`未定义的合成接口 ${path}`}, {status:404});
     const payload = structuredClone(fixtures[path]);
+    if(path==='/api/equity-arbitrage'){
+      const strategy=url.searchParams.get('strategy')||'all',query=(url.searchParams.get('symbol')||'').toUpperCase();
+      payload.items=payload.items.filter(item=>(strategy==='all'||item.strategy===strategy)&&(!query||item.symbol.includes(query)));
+      payload.total=payload.items.length;
+    }
     if(new URLSearchParams(location.search).get('upstream_preview')==='1'&&['/api/spot-futures','/api/dual-futures'].includes(path)){
       const spotView=path==='/api/spot-futures',exchange=spotView?'Gate':'Bybit';
       payload.errors={[spotView?'gate_spot':'bybit_tickers']:'synthetic timeout'};

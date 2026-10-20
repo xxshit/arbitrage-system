@@ -98,8 +98,10 @@ aside#appSidebar .sidebar-account button:focus-visible {outline:2px solid #67d7c
 .layout-view:is(#spot-futures,#dual-futures) table {margin:0;border-collapse:separate;border-spacing:0}
 .layout-view:is(#spot-futures,#dual-futures) thead th {position:sticky;top:0;z-index:4;background:#eaf1ea;box-shadow:0 1px #ccd9cf;font-size:11px;line-height:1.5}
 .layout-view:is(#spot-futures,#dual-futures) thead th:first-child {left:0;z-index:6}
-.layout-view:is(#spot-futures,#dual-futures) td.symbol {position:sticky;left:0;z-index:2;background:#fafcf7;box-shadow:1px 0 #dce5da;min-width:134px;vertical-align:top;padding-top:16px}
-.layout-view:is(#spot-futures,#dual-futures) td.price-change-cell {vertical-align:top;padding-top:16px}
+.layout-view:is(#spot-futures,#dual-futures) td.symbol {position:sticky;left:0;z-index:2;background:#fafcf7;box-shadow:1px 0 #dce5da;min-width:134px;vertical-align:middle;padding-block:8px}
+.layout-view:is(#spot-futures,#dual-futures) .symbol-basis-opening:has(> .basis-opening-empty) {display:none}
+/* Center shared metrics across the whole coin's rowspan, not its first route. */
+.layout-view:is(#spot-futures,#dual-futures) td.price-change-cell {vertical-align:middle!important;padding-block:5px}
 .layout-view .layout-table-hint {margin:0 0 10px;font-size:11px;color:var(--desk-muted);line-height:1.7;overflow-wrap:anywhere}
 .layout-view:is(#spot-futures,#dual-futures) td {font-size:11px;line-height:1.65}
 .layout-view:is(#spot-futures,#dual-futures) td.numeric {white-space:nowrap;font-weight:700}
@@ -144,7 +146,7 @@ body:has(#dual-futures.active) main > header,
 .layout-view#dual-futures .dual-redesign-table th:nth-child(2) {width:210px}
 .layout-view#dual-futures .dual-redesign-table :is(th:nth-child(3),th:nth-child(4),.dual-leg-cell) {min-width:270px}
 .layout-view#dual-futures .dual-redesign-table :is(th:nth-child(5),.dual-result-cell) {min-width:270px}
-.layout-view#dual-futures td {padding:5px 6px;font-size:12px;line-height:1.4;vertical-align:top}
+.layout-view#dual-futures td {padding:5px 6px;font-size:12px;line-height:1.4;vertical-align:middle}
 .layout-view#dual-futures td.symbol {min-width:134px;padding:8px 6px}
 .layout-view#dual-futures .symbol-detail-trigger {max-width:136px;white-space:normal;overflow-wrap:anywhere;text-align:left}
 .layout-view#dual-futures td.symbol > .trend-lights,
@@ -154,7 +156,6 @@ body:has(#dual-futures.active) main > header,
 .layout-view#dual-futures .symbol-basis-opening {margin-top:5px}
 .layout-view#dual-futures .symbol-basis-opening .basis-opening {display:grid;grid-template-columns:max-content max-content;gap:2px 6px;padding:3px 5px;border-radius:4px}
 .layout-view#dual-futures .basis-opening > small {grid-column:1/-1}
-.layout-view#dual-futures td.price-change-cell {padding-top:8px;vertical-align:top!important}
 .layout-view#dual-futures .change-stack {grid-template-columns:repeat(2,max-content);gap:3px 9px;font-size:11px;line-height:1.35}
 .layout-view#dual-futures .change-item {grid-template-columns:36px max-content;gap:3px}
 .layout-view#dual-futures .dual-exchange-card {gap:3px;padding:3px 5px;border:1px solid #dfe8dc;border-radius:8px;box-shadow:none;background:linear-gradient(180deg,#fffef8,#f8fbf1)}
@@ -230,13 +231,12 @@ body:has(#spot-futures.active) main > header,
 .layout-view#spot-futures table {min-width:1300px}
 .layout-view#spot-futures thead th {padding:8px;line-height:1.35;white-space:nowrap}
 .layout-view#spot-futures td {padding:5px 8px;font-size:12px;line-height:1.4;vertical-align:middle}
-.layout-view#spot-futures td.symbol {min-width:134px;vertical-align:top;padding:8px}
+.layout-view#spot-futures td.symbol {min-width:134px;padding:8px}
 .layout-view#spot-futures td.symbol > div:first-child {gap:4px;flex-wrap:wrap}
 .layout-view#spot-futures .symbol-basis-opening {margin-top:6px}
 .layout-view#spot-futures .symbol-basis-opening .basis-opening {display:grid;grid-template-columns:max-content max-content;gap:2px 6px;padding:3px 5px;border-radius:4px}
 .layout-view#spot-futures .basis-opening > small {grid-column:1/-1}
 .layout-view#spot-futures .basis-opening-empty {display:none}
-.layout-view#spot-futures td.price-change-cell {padding-top:7px;vertical-align:top}
 .layout-view#spot-futures .change-stack {grid-template-columns:repeat(2,max-content);gap:2px 10px;font-size:11px;line-height:1.35}
 .layout-view#spot-futures .change-item {grid-template-columns:36px max-content;gap:3px}
 .layout-view#spot-futures .change-item:nth-child(n+5) {color:var(--desk-muted)}
@@ -798,7 +798,7 @@ body:has(#alerts.active) main > header .status {width:auto;min-height:20px;paddi
 #equity-arbitrage .table-wrap {max-height:calc(100dvh - 315px);min-height:160px;overflow:auto;scrollbar-gutter:stable}
 #equity-arbitrage .equity-table {min-width:940px;width:100%;font-variant-numeric:tabular-nums}
 #equity-arbitrage .equity-table th {position:sticky;top:0;z-index:2;background:#eaf1e8;white-space:nowrap}
-#equity-arbitrage .equity-table td {vertical-align:top;padding:10px 12px}
+#equity-arbitrage .equity-table td {vertical-align:middle;padding:10px 12px}
 #equity-arbitrage .equity-table td.symbol {position:sticky;left:0;z-index:1;background:#f7faf5;min-width:116px}
 #equity-arbitrage .equity-table td>span,#equity-arbitrage .equity-table td>strong,#equity-arbitrage .equity-table td>small {display:block;line-height:1.6}
 #equity-arbitrage .equity-table td>strong {font-size:13px;overflow-wrap:anywhere}

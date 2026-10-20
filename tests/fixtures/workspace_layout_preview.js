@@ -145,17 +145,32 @@
     if(path==='/api/spot-futures/history'){
       const period=url.searchParams.get('period')||'24h',duration=({'1h':3600,'6h':21600,'24h':86400,'3d':259200,'7d':604800,'15d':1296000})[period],end=now(),start=end-duration;
       const exchange=url.searchParams.get('exchange'),empty=exchange==='Bitget';
-      const series=Object.fromEntries(['open','basis'].map((metric,index)=>{
+      const series=Object.fromEntries(['open','close','basis'].map((metric,index)=>{
         const points=empty?[]:Array.from({length:240},(_,i)=>[start+duration*i/239,
-          index?-.12+Math.sin(i/15)*.04:.1+Math.sin(i/22)*.22+(i===144?1.2:0),
+          metric==='basis'?-.12+Math.sin(i/15)*.04:.1+Math.sin(i/22)*.22+(i===144?1.2:0)+(metric==='close'?.03:0),
           i===110]).filter((_,i)=>i<90||i>=110);
         return [metric,{points,first_at:points[0]?.[0]??null,last_at:points.at(-1)?.[0]??null,
           low:points.length?Math.min(...points.map(p=>p[1])):null,high:points.length?Math.max(...points.map(p=>p[1])):null}];
       }));
       return Response.json({symbol:url.searchParams.get('symbol'),exchange,period,start,end,retention_days:15,summary_seconds:Math.max(60,Math.ceil(duration/720/60)*60),series});
     }
+    if(path==='/api/arbitrage-thinking/book-history'){
+      return Response.json({samples:Array.from({length:12},(_,i)=>[now()-(11-i)*300,1.21,1.22,1.23,1.24,100,110,120,130,now()-(11-i)*300,now()-(11-i)*300])});
+    }
     if (!(path in fixtures)) return Response.json({error:`未定义的合成接口 ${path}`}, {status:404});
     const payload = structuredClone(fixtures[path]);
+    if(path==='/api/arbitrage-thinking/simple'){
+      payload.updated_at_epoch=now();
+      payload.spot_simple=Array.from({length:8},(_,i)=>({...simple[i%3],symbol:i<3?symbols[i]:`SAMPLE${i}/USDT`,
+        long_exchange:i%2?'Bitget':'Gate',grade:i===0?'A':i<3?'B':'C',grade_label:i===0?'优先':i<3?'关注':'低优先观察',
+        status:i===0?'opportunity':'watch',open_spread:i===0?1.5:.5,close_spread:i===0?1.55:.55,quoted_at:now(),
+        funding_current:i<3?.025:.005,funding:{count:6,above:i<3?2:0,total:.03,complete:true},
+        reasons:i<3?['本期预计 +0.0250% / 4H，高于基准 0.0050%','近24H已结算 6 期，其中 2 期高于基准']:['已采区间开差接近 +0.50%，常态溢价；等待更好的开平窗口','资费未明显脱离基准，低优先观察，不假定价差会归零'],
+        risks:i===2?['首档容量不足参考金额']:[],trend:i===1?'回撤正资费观察':'价格走强',
+        transfer_status:wallet(i%2?'Bitget':'Gate',{chains:[{name:'BSC',deposit_open:true,withdraw_open:true}]}),
+        capacity_usdt:i===2?500:15000,scenario:{exit_spread:.1,fee_budget:.66,slippage:.1,spread_net:i===0?.63:-.86,funding_net:i===0?.65:-.81,notional:1000,hold_hours:72,funding_income:.045},
+        history:{first_at:now()-86400,last_at:now(),low:0,high:1.5}}));
+    }
     if(path==='/api/equity-arbitrage'){
       const strategy=url.searchParams.get('strategy')||'all',query=(url.searchParams.get('symbol')||'').toUpperCase();
       payload.items=payload.items.filter(item=>(strategy==='all'||item.strategy===strategy)&&(!query||item.symbol.includes(query)));

@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20261018-workspace-refresh-v3">
   <link rel="stylesheet" href="{{ url_for('static', filename='workspace-layout.css') }}?v=20261020-market-align-v1">
   <link rel="stylesheet" href="{{ url_for('static', filename='spread-history.css') }}?v=20261020-spread-history-v1">
+  <link rel="stylesheet" href="{{ url_for('static', filename='thinking-pool.css') }}?v=20261021-opportunity-v1">
 </head>
 <body>
   <div id="mobileNavBackdrop" class="mobile-nav-backdrop" onclick="toggleMobileNav(false)" aria-hidden="true"></div>
@@ -118,7 +119,7 @@
         <article><small>04 · EVIDENCE</small><h3>观察信号不是确定性结论</h3><p>公开行情和链上热门池用于筛选观察候选。链上机会不含合约OI确认，推送验证与模拟交易仍是独立的研究记录。</p></article>
       </div>
     </section>
-    <section id="thinking" class="view"><div class="strategy-hero"><p class="eyebrow">MY ARBITRAGE THINKING</p><h2>我的套利思维</h2><p>先确认可成交的盘口价差，再确认资金费、流动性、结算周期与风险边界。信号是观察起点，不是自动下单理由。</p></div><div class="strategy-grid"><article class="panel"><p class="eyebrow">CORE PRINCIPLES</p><h3>核心原则</h3><div class="field-list"><span>只用买一、卖一计算开平差，避免最后成交价失真。</span><span>基差与开差异常必须连续确认，排除短时插针。</span><span>按流动性、资金费、结算时点综合判断机会质量。</span></div></article><article class="panel"><p class="eyebrow">EXECUTION DISCIPLINE</p><h3>执行纪律</h3><div class="field-list"><span>先做小额验证，确认双腿可成交与资金划转路径。</span><span>优先处理单腿风险，设置明确的撤退与平仓条件。</span><span>持续记录异常、实际滑点与资金费结果，复盘后再迭代阈值。</span></div></article></div></section>
+    <section id="thinking" class="view"></section>
     <section id="equity-arbitrage" class="view">
       <div class="panel equity-workspace">
         <div class="equity-toolbar">
@@ -143,8 +144,9 @@
   <div id="modal" class="modal hidden"><form class="dialog" onsubmit="saveStrategy(event)"><button type="button" class="close" onclick="closeModal()">×</button><p class="eyebrow">NEW STRATEGY</p><h2>创建监控策略</h2><label>策略名称<input id="name" required placeholder="例如：BTC 跨所价差"></label><label>套利类型<select id="strategyMode"><option>跨所合约套利</option><option>现货多/合约空</option><option>资金费率套利</option></select></label><label>交易对<select id="symbol"><option>BTC/USDT</option><option>ETH/USDT</option><option>SOL/USDT</option></select></label><button class="primary submit">创建策略</button></form></div>
   <section id="chatRemarkModal" class="modal hidden"><form class="dialog chat-remark-dialog" onsubmit="saveChatRemark(event)"><button type="button" class="close" onclick="closeChatRemarkEditor()">×</button><p class="eyebrow">PRIVATE CONTACT NOTE</p><h2>修改联系人备注</h2><p id="chatRemarkAccount" class="chat-remark-account"></p><label>备注名<input id="chatRemarkInput" maxlength="24" autocomplete="off" placeholder="例如：盘友小林"></label><small class="chat-remark-help">备注仅在你的账号中可见，不会修改对方真实账号名。</small><div class="chat-remark-actions"><button type="button" onclick="saveChatRemark(event,true)">清空备注</button><button class="primary" type="submit">保存备注</button></div></form></section>
   <section id="hedgePositionModal" class="modal hidden"><form class="dialog hedge-preview-dialog" onsubmit="event.preventDefault()"><button type="button" class="close" onclick="closeHedgePositionBuilder()">×</button><p class="eyebrow">TWO-LEG ORDER PREVIEW</p><h2 id="hedgePreviewTitle">建立对冲仓位</h2><p id="hedgePreviewRoute" class="hedge-preview-route"></p><div class="hedge-preview-fields"><label>投入金额（USDT）<input id="hedgeQuoteAmount" type="number" min="10" step="1" value="100" oninput="renderHedgePositionPreview()"></label><label>合约杠杆<input id="hedgeLeverage" type="number" min="1" max="10" step="1" value="1" oninput="renderHedgePositionPreview()"></label><label>最大允许滑点<input id="hedgeMaxSlippage" type="number" min="0" max="5" step="0.05" value="0.30" oninput="renderHedgePositionPreview()"><span>%</span></label></div><div id="hedgeOrderPreview" class="hedge-order-preview"></div><div class="hedge-preview-notice"><b>安全边界</b><span>价格和数量均为当前盘口估算；接入私有 API 后仍需在最终确认页核对两腿数量、实际成交、手续费和单腿失败处置。</span></div><button id="hedgeSubmitButton" class="primary submit" type="button" disabled>等待币安私有 API</button></form></section>
-  <script src="{{ url_for('static', filename='spread-history.js') }}?v=20261020-beijing-time-v1"></script>
+  <script src="{{ url_for('static', filename='spread-history.js') }}?v=20261021-opportunity-v1"></script>
   <script src="{{ url_for('static', filename='exchange-icons.js') }}?v=20261020-exchange-icons-v1"></script>
-  <script src="{{ url_for('static', filename='app.js') }}?v=20261020-beijing-time-v1"></script>
+  <script src="{{ url_for('static', filename='thinking-pool.js') }}?v=20261021-opportunity-v1"></script>
+  <script src="{{ url_for('static', filename='app.js') }}?v=20261021-opportunity-v1"></script>
   <script src="{{ url_for('static', filename='workspace-layout.js') }}?v=20261020-spot-no-guide-v1"></script>
 </body></html>

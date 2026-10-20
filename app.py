@@ -54,6 +54,8 @@ from spread_history import (
     VENUES as SPREAD_HISTORY_VENUES, observations as spread_history_observations,
     chart_series,
 )
+from opportunity_history import BookBuffer, ProfileCache
+from opportunity_pool import POLICY as OPPORTUNITY_POLICY, classify as classify_opportunity, funding_profile
 
 load_dotenv()
 
@@ -73,13 +75,17 @@ ALERT_HISTORY_INDEX = AlertHistoryIndex()
 LONG_TREND_REFERENCES = TrendReferenceCache()
 SPREAD_HISTORY_BUFFER = HistoryBuffer()
 SPREAD_HISTORY_STORE = HistoryStore(Path(app.instance_path) / "spread-history")
+OPPORTUNITY_BOOKS = BookBuffer()
+OPPORTUNITY_PROFILES = ProfileCache()
+OPPORTUNITY_FUNDING_CACHE = {"at": 0, "key": frozenset(), "events": {}}
+OPPORTUNITY_FUNDING_LOCK = threading.Lock()
 
 
 @app.after_request
 def compress_alert_market_response(response):
     # Only public market observations, never account/chat/security payloads.
     # Full-universe summaries are several MB before lossless HTTP compression.
-    if request.path == "/api/alerts" and response.status_code == 200 and response.mimetype == "application/json" and not response.is_streamed:
+    if request.path in {"/api/alerts", "/api/arbitrage-thinking/simple", "/api/arbitrage-thinking/book-history"} and response.status_code == 200 and response.mimetype == "application/json" and not response.is_streamed:
         response.vary.add("Accept-Encoding")
         if request.accept_encodings["gzip"] > 0 and not response.headers.get("Content-Encoding"):
             payload = response.get_data()
@@ -93,7 +99,7 @@ def compress_alert_market_response(response):
 
 @app.after_request
 def disable_live_view_response_cache(response):
-    if request.path in {"/api/dashboard", "/api/spot-futures", "/api/spot-futures/history", "/api/dual-futures", "/api/equity-arbitrage", "/api/alerts", "/api/hedge-positions", "/api/daily-report/listings", "/api/market-metadata/delisted-symbols"}:
+    if request.path in {"/api/dashboard", "/api/spot-futures", "/api/spot-futures/history", "/api/arbitrage-thinking/simple", "/api/arbitrage-thinking/book-history", "/api/dual-futures", "/api/equity-arbitrage", "/api/alerts", "/api/hedge-positions", "/api/daily-report/listings", "/api/market-metadata/delisted-symbols"}:
         response.headers["Cache-Control"] = "private, no-store"
     return response
 
@@ -2806,11 +2812,12 @@ def nearest_trend_points(history, key_builder, target_buckets, lag_buckets=2):
     return {key: value for key, (_bucket_at, value) in points.items()}
 
 
-def enrich_price_changes(groups):
+def enrich_price_changes(groups, windows=None):
     if not groups:
         return
+    windows = TREND_WINDOWS if windows is None else windows
     now_bucket = int(time.time()) // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
-    target_buckets = [now_bucket - seconds for seconds in TREND_WINDOWS.values()]
+    target_buckets = [now_bucket - seconds for seconds in windows.values()]
     symbols = [group["symbol"] for group in groups]
     history = FuturesPriceHistory.query.filter(
         FuturesPriceHistory.symbol.in_(symbols), FuturesPriceHistory.bucket_at.in_(trend_candidate_buckets(target_buckets))
@@ -2818,7 +2825,7 @@ def enrich_price_changes(groups):
     points = nearest_trend_points(history, lambda item: (item.symbol,), target_buckets)
     for group in groups:
         current = contract_mid_price(group)
-        for key, seconds in TREND_WINDOWS.items():
+        for key, seconds in windows.items():
             previous = points.get((group["symbol"], now_bucket - seconds))
             change = (current - previous) / previous * 100 if previous else None
             if key == "change_30d":
@@ -3913,6 +3920,10 @@ def spot_futures_snapshot():
         getattr(results, "observed_at", {}), errors, time.time()))
     rows_finished_at = time.perf_counter()
     evaluate_alerts(rows_by_symbol)
+    opportunity_paths = [("spot_futures", group["symbol"], row["long_exchange"], "Binance")
+                         for group in rows_by_symbol if not is_rwa_stock_pair(group["symbol"])
+                         for row in group["rows"]]
+    OPPORTUNITY_BOOKS.observe(ALERT_STREAM_HUB.screening_quotes(opportunity_paths), time.time())
     alerts_finished_at = time.perf_counter()
     captured_at = datetime.now()
     live_snapshot = {
@@ -7488,7 +7499,7 @@ def read_spot_spread_history(symbol, exchange, period, now=None):
     start = now - duration
     step = max(60, math.ceil(duration / 720 / 60) * 60)
     series = {}
-    for metric, venue in (("open", exchange), ("basis", "Binance")):
+    for metric, venue in (("open", exchange), ("close", exchange), ("basis", "Binance")):
         records = SPREAD_HISTORY_STORE.chunks(symbol, venue, metric, start, now)
         series[metric] = chart_series(records, start, now, step)
     return dict(symbol=symbol, exchange=exchange, period=period, start=start, end=now,
@@ -7504,6 +7515,35 @@ def spot_spread_history():
             or exchange not in SPREAD_HISTORY_VENUES or period not in SPREAD_HISTORY_PERIODS):
         return jsonify(error="请选择有效币种、现货交易所和最长15天的周期。"), 400
     return jsonify(read_spot_spread_history(symbol, exchange, period))
+
+
+@app.get("/api/arbitrage-thinking/book-history")
+def opportunity_book_history():
+    symbol = request.args.get("symbol", "").strip().upper()
+    exchange = request.args.get("exchange", "")
+    period = request.args.get("period", "24h")
+    if (len(symbol) > 30 or not re.fullmatch(r"[\w]+/USDT", symbol)
+            or exchange not in SPREAD_HISTORY_VENUES or period not in SPREAD_HISTORY_PERIODS):
+        return jsonify(error="请选择有效的现货路径和周期。"), 400
+    from collections import deque
+    from spread_history import decode_chunk
+    now = time.time()
+    start = now-SPREAD_HISTORY_PERIODS[period]
+    samples = deque(maxlen=288)
+    count = 0
+    for payload in SPREAD_HISTORY_STORE.chunks(symbol, exchange, "book", start, now):
+        records = decode_chunk(payload)
+        for key in sorted(records, key=int):
+            sample = records[key]
+            if start < sample[0] <= now:
+                samples.append(sample)
+                count += 1
+    return jsonify(symbol=symbol, exchange=exchange, period=period, sample_seconds=300,
+                   total_samples=count, truncated=count > len(samples), samples=list(samples),
+                   fields=["at", "spot_bid", "spot_ask", "future_bid", "future_ask",
+                           "spot_bid_qty", "spot_ask_qty", "future_bid_qty", "future_ask_qty",
+                           "spot_at", "future_at"],
+                   note="同步首档报价与数量，非全深度或逐笔成交；数量按相同标的单位归一，时间为UTC epoch，页面显示北京时间。")
 
 
 @app.get("/api/spot-futures")
@@ -13079,19 +13119,92 @@ def spot_futures_history_is_all_low_insurance(symbol, interval_hours):
     return all(is_low_insurance_funding(row.funding_rate, minimum) for row in rows)
 
 
+def opportunity_funding_events(groups):
+    symbols = frozenset(
+        row.get("alert_stream_route", {}).get("short_key", (None, group["symbol"].replace("/", "")))[1]
+        for group in groups for row in group["rows"])
+    with OPPORTUNITY_FUNDING_LOCK:
+        if symbols == OPPORTUNITY_FUNDING_CACHE["key"] and time.time()-OPPORTUNITY_FUNDING_CACHE["at"] < 30:
+            return OPPORTUNITY_FUNDING_CACHE["events"]
+        now = time.time()
+        events = {symbol: [] for symbol in symbols}
+        query = db.session.query(FundingRateRecord.symbol, FundingRateRecord.funding_time, FundingRateRecord.funding_rate).filter(
+            FundingRateRecord.symbol.in_(symbols),
+            FundingRateRecord.funding_time > int((now-48*3600)*1000),
+            FundingRateRecord.funding_time <= int(now*1000),
+        ).order_by(FundingRateRecord.funding_time).yield_per(500)
+        for symbol, stamp, rate in query:
+            events[symbol].append((stamp/1000, rate))
+        OPPORTUNITY_FUNDING_CACHE.update(at=now, key=symbols, events=events)
+        return events
+
+
+def spot_thinking_candidates(snapshot, notional, hold_hours):
+    if not snapshot:
+        return []
+    # Do not enrich or reorder shared five-second market-cache objects.
+    groups = [{"symbol": group["symbol"], "rows": [dict(row) for row in group["rows"]]}
+              for group in snapshot["symbols"] if not is_rwa_stock_pair(group["symbol"])]
+    enrich_transfer_networks(groups)
+    enrich_price_changes(groups, {"change_24h": 86400})
+    histories, _ = OPPORTUNITY_PROFILES.snapshot()
+    events = opportunity_funding_events(groups)
+    now = time.time()
+    paths = [("spot_futures", group["symbol"], row["long_exchange"], "Binance")
+             for group in groups for row in group["rows"]]
+    quotes = ALERT_STREAM_HUB.screening_quotes(paths, now)
+    items = []
+    profiles = {}
+    for group in groups:
+        for row in group["rows"]:
+            raw = row.get("alert_stream_route", {}).get("short_key", (None, group["symbol"].replace("/", "")))[1]
+            key = (raw, row.get("funding_interval_hours"))
+            if key not in profiles:
+                profiles[key] = funding_profile(events.get(raw, []), now, key[1])
+            item = dict(symbol=group["symbol"], long_exchange=row["long_exchange"],
+                        short_exchange="Binance", long_is_spot=True, short_is_spot=False,
+                        short_interval=row.get("funding_interval_hours"),
+                        long_volume=row.get("spot_volume"), short_volume=row.get("futures_volume"),
+                        basis=row.get("basis"), change_24h=row.get("change_24h"),
+                        transfer_status=row.get("transfer_status"))
+            items.append((item, row, profiles[key]))
+    aliases = symbol_alias_rows()
+    now_beijing = datetime.now(SHANGHAI_TZ).replace(tzinfo=None)
+    listings = ListingEvent.query.filter(
+        ListingEvent.event_type == "下架", ListingEvent.announcement.is_(True),
+        db.or_(ListingEvent.effective_at >= now_beijing-timedelta(days=1),
+               db.and_(ListingEvent.effective_at.is_(None),
+                       ListingEvent.occurred_at >= now_beijing-timedelta(days=30))),
+    ).all()
+    listing_risks = [(item.exchange, listing_market_scope(item), set(listing_event_symbols(item, aliases))) for item in listings]
+    output = []
+    for item, row, funding in items:
+        listing_review = any(item["symbol"] in symbols and (
+            (venue == item["long_exchange"] and scope in ("现货", "范围见原公告")) or
+            (venue == "Binance" and scope in ("合约", "USDT永续合约", "范围见原公告")))
+            for venue, scope, symbols in listing_risks)
+        result = classify_opportunity(
+            {**row, "listing_review": listing_review},
+            funding, histories.get((item["symbol"], item["long_exchange"])),
+            quotes.get(("spot_futures", item["symbol"], item["long_exchange"], "Binance")),
+            now, notional, hold_hours)
+        if result:
+            output.append({**item, **result})
+    return sorted(output, key=lambda item: (item["grade"], item["status"] != "opportunity",
+                  -(item["scenario"]["net"] if item["scenario"]["net"] is not None else -1e9),
+                  item["symbol"], item["long_exchange"]))
+
+
 @app.get("/api/arbitrage-thinking/simple")
 def simple_arbitrage_thinking():
-    spot_snapshot = load_latest_market_snapshot()
-    dual_snapshot = load_latest_dual_futures_snapshot()
-    spot_simple = []
-    if spot_snapshot:
-        enrich_funding_statistics(spot_snapshot["symbols"])
-        for group in spot_snapshot["symbols"]:
-            if is_rwa_stock_pair(group["symbol"]):
-                continue
-            for row in group["rows"]:
-                if row["open_spread"] > 0 and row["funding_rate"] > 0 and not spot_futures_history_is_all_low_insurance(group["symbol"], row.get("funding_interval_hours")):
-                    spot_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": "Binance", "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_rate"], "funding_current": row["funding_rate"], "funding_previous": row.get("funding_previous"), "funding_24h": row.get("funding_24h"), "funding_3d": row.get("funding_3d"), "long_is_spot": True, "short_is_spot": False, "long_interval": None, "short_interval": row.get("funding_interval_hours"), "long_open_interest": None, "short_open_interest": row.get("futures_open_interest"), "long_volume": row.get("spot_volume"), "short_volume": row.get("futures_volume")})
+    notional = request.args.get("notional", 1000, type=float)
+    hold_hours = request.args.get("hold_hours", 72, type=int)
+    strategy = request.args.get("strategy", "all")
+    if (not math.isfinite(notional) or not 100 <= notional <= 1_000_000
+            or hold_hours not in (24, 72, 168) or strategy not in ("all", "spot", "dual")):
+        return jsonify(error="参考金额需为100–1000000 USDT，测算持有期为24、72或168小时。"), 400
+    spot_simple = spot_thinking_candidates(load_latest_market_snapshot(), notional, hold_hours) if strategy != "dual" else []
+    dual_snapshot = load_latest_dual_futures_snapshot() if strategy != "spot" else None
     dual_simple = []
     if dual_snapshot:
         dual_stats = funding_statistics([group["symbol"].replace("/", "") for group in dual_snapshot["symbols"]])
@@ -13104,7 +13217,9 @@ def simple_arbitrage_thinking():
                     dual_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": row["short_exchange"], "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_difference"], "funding_current": row.get("funding_difference"), "funding_previous": stats.get("previous"), "funding_24h": stats.get("day_1"), "funding_3d": stats.get("day_3"), "long_is_spot": False, "short_is_spot": False, "long_interval": row.get("long_funding_interval_hours"), "short_interval": row.get("short_funding_interval_hours"), "long_open_interest": row.get("long_open_interest"), "short_open_interest": row.get("short_open_interest"), "long_volume": row.get("long_volume"), "short_volume": row.get("short_volume")})
     mark_delisting_items(spot_simple)
     mark_delisting_items(dual_simple)
-    return jsonify({"spot_simple": sorted(spot_simple, key=lambda item: item["open_spread"], reverse=True), "dual_simple": sorted(dual_simple, key=lambda item: item["open_spread"], reverse=True)})
+    return jsonify({"spot_simple": spot_simple, "dual_simple": sorted(dual_simple, key=lambda item: item["open_spread"], reverse=True),
+                    "policy": OPPORTUNITY_POLICY, "notional": notional, "hold_hours": hold_hours,
+                    "updated_at_epoch": time.time(), "history_summary_at": OPPORTUNITY_PROFILES.snapshot()[1]})
 
 
 def funding_trend_growth_metrics(symbol):
@@ -14949,18 +15064,27 @@ with app.app_context():
 
 def background_spread_history():
     last_cleanup = 0
+    last_profiles = 0
     warned_dropped = 0
+    warned_books = 0
     while True:
         started = time.monotonic()
         try:
             SPREAD_HISTORY_STORE.prune(time.time())
             persist_spread_history()
+            OPPORTUNITY_BOOKS.persist(SPREAD_HISTORY_STORE)
+            if time.time()-last_profiles >= 120:
+                OPPORTUNITY_PROFILES.refresh(SPREAD_HISTORY_STORE, time.time())
+                last_profiles = time.time()
             if time.time() - last_cleanup >= 3600 and SPREAD_HISTORY_STORE.directory.is_dir():
                 SPREAD_HISTORY_STORE.maintain(time.time())
                 last_cleanup = time.time()
             if SPREAD_HISTORY_BUFFER.dropped > warned_dropped:
                 app.logger.warning("Spread history persistence backlog exceeded bounded buffer; chart gaps retained")
                 warned_dropped = SPREAD_HISTORY_BUFFER.dropped
+            if OPPORTUNITY_BOOKS.dropped > warned_books:
+                app.logger.warning("Opportunity book history backlog exceeded bounded buffer; missing samples are not backfilled")
+                warned_books = OPPORTUNITY_BOOKS.dropped
         except Exception:
             app.logger.exception("Spread history persistence failed; bounded buffer retained for retry")
         time.sleep(max(1, 30 - (time.monotonic() - started)))

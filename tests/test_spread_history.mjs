@@ -85,12 +85,18 @@ test('refresh failure retains existing plot; interval requests do not overlap',a
   assert.equal(nodes.spreadChartPlot.innerHTML,'old plot');
   assert.equal(nodes.spreadChartStatus.textContent,'temporary failure');
 });
-test('modal has bounded periods, two independent toggles, focus/Escape and no execution endpoint',()=>{
+test('modal has bounded periods, three independent toggles, focus/Escape and no execution endpoint',()=>{
   const ui=harness();
   const periods=vm.runInContext('spreadChartPeriods.map(p=>p[0]).join(",")',ui);
   assert.equal(periods,'1h,6h,24h,3d,7d,15d');
-  for(const text of ['aria-modal="true"',"event.key==='Escape'","event.key==='Tab'",'spreadShow-open','spreadShow-basis','断档不补线']){
+  for(const text of ['aria-modal="true"',"event.key==='Escape'","event.key==='Tab'",'spreadShow-open','spreadShow-close','spreadShow-basis','断档不补线']){
     assert.ok(source.includes(text));
   }
   assert.ok(!/hedge|order\/create|lark/i.test(source));
+});
+test('old history lacking closing spread does not fabricate it or crash geometry',()=>{
+  const ui=harness(),data={start:0,end:60,series:{open:{points:[[0,.5,false],[30,.6,false]]}}};
+  assert.ok(ui.spreadChartGeometry(data,['open','close']));
+  assert.equal(ui.spreadChartGeometry(data,['close']),null);
+  assert.ok(ui.spreadHistoryButton('A/USDT','Gate','close',.55).includes('平差历史曲线'));
 });

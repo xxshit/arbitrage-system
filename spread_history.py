@@ -54,6 +54,9 @@ def observations(groups, observed, errors, now):
                 value = row.get("open_spread")
                 if when is not None and isinstance(value, (int, float)) and math.isfinite(value):
                     yield (symbol, exchange, "open"), when, value
+                closing = row.get("close_spread")
+                if when is not None and isinstance(closing, (int, float)) and not isinstance(closing, bool) and math.isfinite(closing):
+                    yield (symbol, exchange, "close"), when, closing
             if not basis_seen:
                 when, value = stamp("funding"), row.get("basis")
                 source_time = row.get("basis_source_at")

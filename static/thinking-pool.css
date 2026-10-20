@@ -1,0 +1,68 @@
+#thinking .strategy-hero {padding:16px 20px;margin-bottom:12px}
+#thinking .strategy-hero h2 {margin:0 0 6px;font-size:22px}
+#thinking .strategy-hero p {margin:0;max-width:none}
+#thinking .opportunity-workspace {padding:12px 14px}
+.opportunity-toolbar {display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.opportunity-toolbar label {display:flex;align-items:center;gap:6px;font-size:12px}
+.opportunity-toolbar input {width:160px}
+.opportunity-toolbar select,.opportunity-toolbar input {min-height:32px;padding:5px 8px}
+.opportunity-tabs {display:flex;gap:4px;background:#eef3f4;border:1px solid #c9dada;border-radius:7px;padding:3px}
+.opportunity-tabs button {border:0;background:transparent;padding:7px 14px}
+.opportunity-tabs button.active {background:#175d83;color:#fff}
+.opportunity-method {font-size:12px;margin-top:12px;color:#536e74}
+.opportunity-method summary {cursor:pointer;max-width:fit-content}
+.opportunity-method summary span {font-weight:normal;margin-left:8px}
+.opportunity-method form {display:flex;align-items:end;gap:16px;flex-wrap:wrap;margin:12px 0}
+.opportunity-method form label {display:grid;gap:6px}
+.opportunity-method p {line-height:1.7;max-width:1080px}
+.opportunity-notice {font-size:11px;color:#6c817d;margin:12px 0}
+.opportunity-scroll {overflow:auto;max-height:calc(100dvh - 310px);min-height:210px;scrollbar-gutter:stable}
+.opportunity-row {border:1px solid #d7e3d9;border-radius:7px;background:#fffef9;margin:0 0 8px;padding:12px}
+.opportunity-main {display:grid;grid-template-columns:95px minmax(165px,1fr) 92px 165px minmax(190px,1.5fr) 42px;gap:8px;align-items:center}
+.opportunity-priority,.opportunity-path,.opportunity-values,.opportunity-reasons {display:flex;flex-direction:column;gap:6px;min-width:0}
+.opportunity-grade {font-size:12px;line-height:1.5}
+.grade-A {color:#a86600}.grade-B {color:#175d83}.grade-C {color:#6a7984}
+.opportunity-state {width:fit-content;padding:3px 7px;font-size:11px;border-radius:4px;color:#617388;background:#eff2f6}
+.opportunity-state.is-current {color:#007b60;background:#dcf5e9}
+.opportunity-path .symbol-detail-trigger {align-self:flex-start;font-size:14px;font-weight:750}
+.opportunity-path>span {font-size:11px;display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.opportunity-path .exchange-logo {height:16px;width:16px;margin:0}
+.opportunity-path .transfer-status-control {align-self:flex-start}
+.opportunity-values {font-size:11px;font-variant-numeric:tabular-nums}
+.opportunity-values span {white-space:nowrap}
+.opportunity-values b {font-size:12px}
+.opportunity-reasons {font-size:12px;line-height:1.5;gap:2px}
+.opportunity-reasons small {font-size:10px;color:#768580}
+.opportunity-history {padding:6px;font-size:11px}
+.opportunity-details {margin-top:7px;font-size:11px}
+.opportunity-details summary {cursor:pointer;color:#69817f;max-width:fit-content}
+.opportunity-details[open] {border-top:1px solid #e2e8e0;padding-top:8px}
+.opportunity-details ul {padding-left:20px;line-height:1.8}
+.opportunity-evidence {display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:8px;background:#f4f7f1;padding:10px}
+.opportunity-evidence span {display:flex;justify-content:space-between;gap:10px}
+.opportunity-details p {color:#6a7a77;line-height:1.6}
+.opportunity-book-scroll {max-height:270px;overflow:auto}
+.opportunity-book-scroll table {font-size:11px;white-space:nowrap;width:100%}
+.opportunity-book-scroll th,.opportunity-book-scroll td {padding:7px}
+.opportunity-pagination {margin-bottom:0}
+.opportunity-dual {display:grid;grid-template-columns:1fr 120px 200px 1fr;gap:16px;align-items:center}
+.opportunity-dual p {font-size:12px;display:flex;align-items:center;gap:4px}
+.opportunity-spot-control[hidden],.opportunity-dual-control[hidden] {display:none!important}
+@media(max-width:1150px) {
+  .opportunity-main {grid-template-columns:108px minmax(180px,1fr) 95px 175px 48px}
+  .opportunity-reasons {grid-column:2 / -1;grid-row:2}
+  .opportunity-history {grid-column:5;grid-row:1}
+}
+@media(max-width:750px) {
+  #thinking .opportunity-workspace {padding:10px}
+  .opportunity-main {grid-template-columns:100px 1fr;gap:10px}
+  .opportunity-reasons {grid-column:1 / -1;grid-row:auto}
+  .opportunity-history {grid-column:2;grid-row:auto;justify-self:end}
+  .opportunity-values {font-size:10px}
+  .opportunity-values span {white-space:normal}
+  .opportunity-dual {grid-template-columns:1fr 1fr}
+  .opportunity-scroll {max-height:65dvh}
+  .opportunity-toolbar {gap:8px}
+  .opportunity-toolbar input {width:135px}
+  .opportunity-tabs button {padding:7px 10px}
+}

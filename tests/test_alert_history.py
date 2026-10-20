@@ -15,6 +15,8 @@ from anomaly_engine import PulseDetector
 class AlertHistoryTests(unittest.TestCase):
     def setUp(self):
         module.app.config.update(TESTING=True)
+        self.funding_live = patch.object(module, "FUNDING_ALERT_LIVE_STATES", {})
+        self.funding_live.start()
         self.now = datetime.now().replace(microsecond=0)
         fixed_now = self.now
 
@@ -48,6 +50,7 @@ class AlertHistoryTests(unittest.TestCase):
         self.clock.stop()
         self.epoch_clock.stop()
         self.rwa.stop()
+        self.funding_live.stop()
 
     def event(self, symbol="DEMO/USDT", **values):
         return module.AlertEvent(**dict(dict(symbol=symbol, strategy="spot_futures", alert_type="rapid_basis", message="确认后的合成报警", open_spread=0.8, basis=1.2, created_at=self.now - timedelta(minutes=3)), **values))

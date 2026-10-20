@@ -57,6 +57,7 @@ from spread_history import (
 from opportunity_history import BookBuffer, ProfileCache
 from opportunity_activity import ActivityLedger
 from opportunity_pool import POLICY as OPPORTUNITY_POLICY, classify as classify_opportunity, funding_profile
+from persistence_policy import funding_write_due
 
 load_dotenv()
 
@@ -1171,6 +1172,7 @@ DUAL_FUNDING_SYNC_CURSOR = None
 MARKET_REFRESH_SECONDS = 5
 EQUITY_MARKET_REFRESH_SECONDS = 15
 MARKET_DB_PERSIST_SECONDS = 15
+FUNDING_ALERT_LIVE_STATES = {}
 HORN_SCAN_HOUR = 8
 LAST_HORN_SCAN_DATE = None
 LAST_LARK_TREND_PUSH_DATE = None
@@ -15139,12 +15141,22 @@ def background_dual_market_refresh():
         time.sleep(max(0.25, interval - (time.monotonic() - cycle_started_at)))
 
 
+def funding_alert_states():
+    """Committed state plus latest successfully processed public observations."""
+    live = FUNDING_ALERT_LIVE_STATES  # Immutable dictionary swapped after commit.
+    states = {contract: json.loads(raw) for contract, raw in db.session.query(FundingAlertState.contract, FundingAlertState.state_json)}
+    for contract, state in states.items():
+        current = live.get(contract)
+        if current and current["observed_at"] >= state["observed_at"]:
+            states[contract] = current
+    return states
+
+
 def funding_alert_priority_symbols(now=None):
     """Reuse the existing 60-symbol history budget, never add private/API calls."""
     now = time.time() if now is None else now
     targets = []
-    for contract, raw in db.session.query(FundingAlertState.contract, FundingAlertState.state_json):
-        state = json.loads(raw)
+    for contract, state in funding_alert_states().items():
         if is_rwa_stock_pair(state["symbol"]):
             continue
         pending = [item for item in state.get("pending", []) if not item.get("resolved")
@@ -15156,6 +15168,7 @@ def funding_alert_priority_symbols(now=None):
 
 def refresh_funding_alerts():
     """One worker consumes existing public caches. HTTP reads never fetch/write."""
+    global FUNDING_ALERT_LIVE_STATES
     now = time.time()
     urls = {name: "https://fapi.binance.com/fapi/v1/" + endpoint for name, endpoint in
             (("instruments", "exchangeInfo"), ("rates", "premiumIndex"), ("info", "fundingInfo"))}
@@ -15181,11 +15194,15 @@ def refresh_funding_alerts():
     for contract, stamp, rate in db.session.query(FundingRateRecord.symbol, FundingRateRecord.funding_time, FundingRateRecord.funding_rate).filter(FundingRateRecord.funding_time >= int((now - 3660) * 1000), FundingRateRecord.funding_time <= int(now * 1000)):
         histories.setdefault(contract, []).append({"at": stamp / 1000, "rate": rate})
     count = 0
+    next_live = {key: value for key, value in FUNDING_ALERT_LIVE_STATES.items() if key in records}
     for observation in observations:
         record = records.get(observation["contract"])
-        old = json.loads(record.state_json) if record else {}
+        persisted = json.loads(record.state_json) if record else {}
+        live = next_live.get(observation["contract"], {})
+        old = live if record and live.get("observed_at", 0) >= persisted.get("observed_at", 0) else persisted
         state, events = advance_funding_alert(old, observation, histories.get(observation["contract"], ()))
-        if old and not events and now - old["observed_at"] < 15:
+        next_live[observation["contract"]] = state
+        if not funding_write_due(persisted, state, events):
             continue
         encoded = json.dumps(state, ensure_ascii=False, separators=(",", ":"))
         if record is None:
@@ -15197,12 +15214,13 @@ def refresh_funding_alerts():
                 db.session.add(FundingAlertEvent(id=event["id"], contract=event["contract"], observed_at_ms=int(event["observed_at"]*1000), evidence_json=json.dumps(event, ensure_ascii=False, separators=(",", ":"))))
                 count += 1
     db.session.commit()  # Both dedupe checkpoints and events commit, or neither does.
+    FUNDING_ALERT_LIVE_STATES = dict(list(next_live.items())[-2000:])
     return count
 
 
 def funding_alert_payload(now=None):
     now = time.time() if now is None else now
-    states = {contract: json.loads(raw) for contract, raw in db.session.query(FundingAlertState.contract, FundingAlertState.state_json)}
+    states = funding_alert_states()
     events = {}
     for contract, raw in db.session.query(FundingAlertEvent.contract, FundingAlertEvent.evidence_json).filter(FundingAlertEvent.observed_at_ms >= int((now - 86400)*1000), FundingAlertEvent.observed_at_ms <= int(now*1000)).order_by(FundingAlertEvent.observed_at_ms.desc(), FundingAlertEvent.id):
         events.setdefault(contract, []).append(json.loads(raw))

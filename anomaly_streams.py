@@ -160,6 +160,7 @@ class AlertStreamHub:
         self.routes, self.by_key, self.books, self.marks = {}, defaultdict(set), {}, {}
         self.detector = PulseDetector()
         self.pending, self.workers, self.fresh = {}, {}, {}
+        self.persisted_checkpoints = {}
         self.evaluated_at, self.dirty = {}, set()
         self.noise, self.live_quotes = {}, {}
         self.stream_isolated = set()
@@ -349,22 +350,35 @@ class AlertStreamHub:
                                     transfer_state=route.transfer_state)
             return output
 
-    def batch(self, limit=500):
+    def batch(self, limit=500, now=None):
+        from persistence_policy import pulse_write_due
+        now = time.time() if now is None else now
         with self.lock:
             # Round-robin: a busy first batch must not starve later pulses when
             # its versions keep advancing while the database is committing.
-            keys = list(self.pending)[:limit]
+            keys = []
+            for key, pulse in self.pending.items():
+                if pulse_write_due(self.persisted_checkpoints.get(key), pulse, now):
+                    keys.append(key)
+                    if len(keys) >= limit:
+                        break
             batch = [self.pending.pop(key) for key in keys]
             self.pending.update((item["id"], item) for item in batch)
             return deepcopy(batch)
 
-    def acknowledge(self, batch):
+    def acknowledge(self, batch, now=None):
+        from persistence_policy import pulse_checkpoint
+        now = time.time() if now is None else now
         with self.lock:
             for item in batch:
+                self.persisted_checkpoints.pop(item["id"], None)
+                self.persisted_checkpoints[item["id"]] = pulse_checkpoint(item, now)
                 if self.pending.get(item["id"], {}).get("version") == item["version"]:
                     self.pending.pop(item["id"], None)
+            while len(self.persisted_checkpoints) > 20000:
+                self.persisted_checkpoints.pop(next(iter(self.persisted_checkpoints)))
             self.persistence_error = False
-            self.last_persisted_at = time.time()
+            self.last_persisted_at = now
 
     def status(self, now=None):
         now = time.time() if now is None else now

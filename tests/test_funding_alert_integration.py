@@ -129,3 +129,26 @@ class FundingIntegrationTests(unittest.TestCase):
 
     def test_no_anonymous_access(self):
         self.assertEqual(module.app.test_client().get("/api/alerts?view=summary").status_code, 401)
+
+    def test_normal_updates_are_live_without_rewriting_database_until_checkpoint(self):
+        self.poll(interval=1)
+        with module.app.app_context():
+            initial = module.db.session.get(module.FundingAlertState, "DEMOUSDT").state_json
+        self.poll(30, rate=.004, interval=1)
+        with module.app.app_context():
+            self.assertEqual(module.db.session.get(module.FundingAlertState, "DEMOUSDT").state_json, initial)
+        self.assertAlmostEqual(self.payload(30)["groups"][0]["rate"], .4)
+        self.poll(60, rate=.004, interval=1)
+        with module.app.app_context():
+            self.assertNotEqual(module.db.session.get(module.FundingAlertState, "DEMOUSDT").state_json, initial)
+
+    def test_failed_commit_does_not_publish_uncommitted_live_state(self):
+        self.poll(interval=1)
+        before = module.FUNDING_ALERT_LIVE_STATES
+        with module.app.app_context():
+            with patch.object(module.db.session, "commit", side_effect=RuntimeError("failed")):
+                with self.assertRaises(RuntimeError):
+                    self.poll(5, rate=.01, interval=1)
+            module.db.session.rollback()
+        self.assertIs(module.FUNDING_ALERT_LIVE_STATES, before)
+        self.assertEqual(self.poll(5, rate=.01, interval=1), 1)

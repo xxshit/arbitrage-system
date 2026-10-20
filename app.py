@@ -58,6 +58,7 @@ from opportunity_history import BookBuffer, ProfileCache
 from opportunity_activity import ActivityLedger
 from opportunity_pool import POLICY as OPPORTUNITY_POLICY, classify as classify_opportunity, funding_profile
 from persistence_policy import funding_write_due
+from snapshot_persistence import changed_values, equity_payload_update, update_snapshots
 
 load_dotenv()
 
@@ -3084,25 +3085,27 @@ def refresh_okx_funding(inst_ids):
 
 def save_latest_dual_futures_snapshot(groups):
     captured_at = datetime.now()
-    current_keys = {(group["symbol"], row["long_exchange"], row["short_exchange"]) for group in groups for row in group["rows"]}
+    current = {(group["symbol"], row["long_exchange"], row["short_exchange"]): row for group in groups for row in group["rows"]}
     existing = {(item.symbol, item.long_exchange, item.short_exchange): item for item in LatestDualFuturesSnapshot.query.all()}
     for key, item in existing.items():
-        if key not in current_keys:
+        if key not in current:
             db.session.delete(item)
-    for group in groups:
-        for row in group["rows"]:
-            key = (group["symbol"], row["long_exchange"], row["short_exchange"])
-            values = {field: row.get(field) for field in (
-                "long_ask", "long_bid", "short_bid", "short_ask", "long_basis", "short_basis", "long_index", "short_index", "long_volume", "short_volume", "long_open_interest", "short_open_interest", "funding_difference",
-                "long_funding_rate", "short_funding_rate", "long_funding_interval_hours", "short_funding_interval_hours",
-                "long_next_funding_time", "short_next_funding_time", "open_spread", "close_spread",
-            )}
-            values["captured_at"] = captured_at
-            if key in existing:
-                for field, value in values.items():
-                    setattr(existing[key], field, value)
-            else:
-                db.session.add(LatestDualFuturesSnapshot(symbol=group["symbol"], long_exchange=row["long_exchange"], short_exchange=row["short_exchange"], **values))
+    updates, inserts = [], []
+    dialect = db.session.get_bind().dialect.name
+    for key, row in current.items():
+        values = {field: row.get(field) for field in (
+            "long_ask", "long_bid", "short_bid", "short_ask", "long_basis", "short_basis", "long_index", "short_index", "long_volume", "short_volume", "long_open_interest", "short_open_interest", "funding_difference",
+            "long_funding_rate", "short_funding_rate", "long_funding_interval_hours", "short_funding_interval_hours",
+            "long_next_funding_time", "short_next_funding_time", "open_spread", "close_spread",
+        )}
+        values["captured_at"] = captured_at
+        if key in existing:
+            updates.append({"id": existing[key].id, **changed_values(LatestDualFuturesSnapshot.__table__, existing[key], values, dialect)})
+        else:
+            inserts.append(dict(symbol=key[0], long_exchange=key[1], short_exchange=key[2], **values))
+    update_snapshots(db.session, LatestDualFuturesSnapshot.__table__, updates)
+    if inserts:
+        db.session.bulk_insert_mappings(LatestDualFuturesSnapshot, inserts)
     db.session.commit()
 
 
@@ -3701,6 +3704,7 @@ def enrich_basis_openings(groups, strategy):
 
 def save_latest_market_snapshot(groups):
     captured_at = datetime.now()
+    current = {(group["symbol"], row["long_exchange"]): row for group in groups for row in group["rows"]}
     symbols = [group["symbol"] for group in groups]
     existing = {
         (item.symbol, item.long_exchange): item for item in LatestMarketSnapshot.query.filter(
@@ -3708,17 +3712,15 @@ def save_latest_market_snapshot(groups):
         ).all()
     }
     updates, inserts = [], []
-    for group in groups:
-        for row in group["rows"]:
-            key = (group["symbol"], row["long_exchange"])
-            item = existing.get(key)
-            values = {"short_exchange": row["short_exchange"], "long_ask": row["long_ask"], "long_bid": row["long_bid"], "short_bid": row["short_bid"], "short_ask": row["short_ask"], "basis": row["basis"], "funding_rate": row["funding_rate"], "funding_interval_hours": row["funding_interval_hours"], "next_funding_time": row["next_funding_time"], "spot_volume": row.get("spot_volume"), "futures_volume": row.get("futures_volume"), "futures_open_interest": row.get("futures_open_interest"), "open_spread": row["open_spread"], "close_spread": row["close_spread"], "captured_at": captured_at}
-            if item:
-                updates.append({"id": item.id, **values})
-            else:
-                inserts.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], **values})
-    if updates:
-        db.session.bulk_update_mappings(LatestMarketSnapshot, updates)
+    dialect = db.session.get_bind().dialect.name
+    for key, row in current.items():
+        item = existing.get(key)
+        values = {"short_exchange": row["short_exchange"], "long_ask": row["long_ask"], "long_bid": row["long_bid"], "short_bid": row["short_bid"], "short_ask": row["short_ask"], "basis": row["basis"], "funding_rate": row["funding_rate"], "funding_interval_hours": row["funding_interval_hours"], "next_funding_time": row["next_funding_time"], "spot_volume": row.get("spot_volume"), "futures_volume": row.get("futures_volume"), "futures_open_interest": row.get("futures_open_interest"), "open_spread": row["open_spread"], "close_spread": row["close_spread"], "captured_at": captured_at}
+        if item:
+            updates.append({"id": item.id, **changed_values(LatestMarketSnapshot.__table__, item, values, dialect)})
+        else:
+            inserts.append({"symbol": key[0], "long_exchange": key[1], **values})
+    update_snapshots(db.session, LatestMarketSnapshot.__table__, updates)
     if inserts:
         db.session.bulk_insert_mappings(LatestMarketSnapshot, inserts)
     for compact_symbol, exchange in SPOT_CONTRACT_SYMBOL_MISMATCHES:
@@ -3796,7 +3798,7 @@ def refresh_equity_spot_snapshot(results, errors, urls):
             record = EquitySpotSnapshot(id=1, payload=snapshot)
             db.session.add(record)
         else:
-            record.payload, record.updated_at = snapshot, datetime.now()
+            equity_payload_update(db.session, EquitySpotSnapshot.__table__, record.payload, snapshot, datetime.now())
         db.session.commit()
         EQUITY_SPOT_CACHE["saved_at"] = time.time()
 

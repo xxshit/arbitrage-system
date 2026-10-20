@@ -45,6 +45,14 @@ test('empty and constant data do not produce invalid coordinates',()=>{
   const geometry=ui.spreadChartGeometry(data,['basis']);
   assert.ok(!/NaN|Infinity/.test(ui.spreadChartPath(data.series.basis.points,geometry)));
 });
+test('short accumulated history expands using real timestamps without fabricating earlier data',()=>{
+  const ui=harness(),points=[[86220,.1,false],[86390,.2,false]];
+  const data={start:0,end:86400,series:{open:{points}}};
+  const geometry=ui.spreadChartGeometry(data,['open']);
+  assert.equal(geometry.start,86220);assert.equal(geometry.x(86220),76);
+  assert.ok(geometry.x(86390)>800);
+  assert.equal(points.length,2);
+});
 test('late period response cannot overwrite a newer selection and closing aborts requests',async()=>{
   const nodes={spreadHistoryModal:{classList:{contains:()=>false,add:()=>{}},dataset:{symbol:'EPIC/USDT'}},
     spreadHistoryExchange:{value:'Gate'},spreadHistoryPeriod:{value:'24h'},spreadChartStatus:{},spreadChartSummary:{},

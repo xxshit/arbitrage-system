@@ -16,12 +16,13 @@ function spreadChartTime(epoch,short=false){
 function spreadChartGeometry(data,metrics,width=970){
   const points=metrics.flatMap(metric=>data.series[metric].points);
   if(!points.length)return null;
-  let low=Infinity,high=-Infinity;
-  for(const [,value] of points){low=Math.min(low,value);high=Math.max(high,value)}
+  let low=Infinity,high=-Infinity,first=Infinity;
+  for(const [t,value] of points){low=Math.min(low,value);high=Math.max(high,value);first=Math.min(first,t)}
   const pad=Math.max((high-low)*.12,.005);low-=pad;high+=pad;
-  const x=t=>76+(t-data.start)/(data.end-data.start)*(width-102);
+  const start=Math.max(data.start,Math.min(first,data.end-60));
+  const x=t=>76+(t-start)/(data.end-start)*(width-102);
   const y=value=>24+(high-value)/(high-low)*290;
-  return {low,high,x,y,width};
+  return {low,high,x,y,width,start};
 }
 function spreadChartPath(points,geometry){
   return points.map(([t,value,gap],index)=>`${index===0||gap?'M':'L'}${geometry.x(t).toFixed(2)},${geometry.y(value).toFixed(2)}`).join(' ');
@@ -40,10 +41,10 @@ function renderSpreadChart(){
     plot.innerHTML=`<div class="spread-chart-empty">${metrics.length?'所选周期暂无有效历史<br><small>从上线后开始积累，不用当前值补画过去</small>':'勾选开差或币安基差查看曲线'}</div>`;
     return;
   }
-  const {x,y,low,high,width}=geometry,right=width-26,ticks=width<380?1:width<600?2:4;
+  const {x,y,low,high,width,start}=geometry,right=width-26,ticks=width<380?1:width<600?2:4;
   let grid='';
   for(let i=0;i<5;i++){const value=low+(high-low)*i/4,py=y(value);grid+=`<line x1="76" x2="${right}" y1="${py}" y2="${py}" class="spread-grid"/><text x="66" y="${py+4}" text-anchor="end">${value.toFixed(2)}%</text>`}
-  for(let i=0;i<=ticks;i++){const t=data.start+(data.end-data.start)*i/ticks;grid+=`<text x="${x(t)}" y="344" text-anchor="${i===0?'start':i===ticks?'end':'middle'}">${spreadChartEscape(spreadChartTime(t,true))}</text>`}
+  for(let i=0;i<=ticks;i++){const t=start+(data.end-start)*i/ticks;grid+=`<text x="${x(t)}" y="344" text-anchor="${i===0?'start':i===ticks?'end':'middle'}">${spreadChartEscape(spreadChartTime(t,true))}</text>`}
   if(low<0&&high>0)grid+=`<line x1="76" x2="${right}" y1="${y(0)}" y2="${y(0)}" class="spread-zero"/>`;
   const lines=metrics.map(metric=>{
     const points=data.series[metric].points;
@@ -64,7 +65,7 @@ function renderSpreadChart(){
   }
   svg.addEventListener('pointermove',event=>{
     const box=svg.getBoundingClientRect(),px=(event.clientX-box.left)/box.width*width;
-    const t=data.start+Math.max(0,Math.min(1,(px-76)/(width-102)))*(data.end-data.start);
+    const t=start+Math.max(0,Math.min(1,(px-76)/(width-102)))*(data.end-start);
     inspectAt(t);
   });
   svg.addEventListener('pointerleave',()=>{cursor.setAttribute('hidden','');tooltip.hidden=true});
@@ -124,7 +125,7 @@ function openSpreadHistory(encoded,metric,trigger){
     <div class="spread-chart-legend"><label style="--series-color:${spreadChartColors.open}"><input id="spreadShow-open" type="checkbox" ${metric==='open'?'checked':''} onchange="renderSpreadChart()">开差</label><label style="--series-color:${spreadChartColors.basis}"><input id="spreadShow-basis" type="checkbox" checked onchange="renderSpreadChart()">币安基差</label><small>基差与现货路径无关 · 时间为本机时区</small></div>
     <div id="spreadChartSummary" class="spread-chart-summary"></div><div id="spreadChartPlot" class="spread-chart-plot"></div>
     <p id="spreadChartStatus" class="spread-chart-status" role="status"></p>
-    <p class="spread-chart-note">约5秒行情采样 · 每分钟保留首末及高低点，长周期合并并保留极值 · 最长15天 · 断档不补线</p>
+    <p class="spread-chart-note">按已有历史展开 · 约5秒行情采样，每分钟保留首末及高低点 · 长周期合并并保留极值 · 最长15天 · 断档不补线</p>
   </div>`;
   modal.querySelector('.close').focus();loadSpreadChart(true);
   spreadChartState.timer=setInterval(()=>{if(!document.hidden)loadSpreadChart()},30000);

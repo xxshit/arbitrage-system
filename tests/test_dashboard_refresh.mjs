@@ -99,7 +99,7 @@ test('indicator displays real source time and ages it even without another respo
   h.run('Object.assign(pageRefreshState("dashboard"),{completedAt:100000,sourceUpdatedAt:90000,sourceStale:false})');
   h.context.renderPageRefreshIndicator();
   const status=h.context.byId('updated');
-  assert.ok(status.textContent.includes(new Date(90000).toLocaleTimeString('zh-CN',{hour12:false})));
+  assert.ok(status.textContent.includes('08:01:30 北京时间'));
   assert.ok(!status.textContent.includes('行情延迟'));
   await h.advance(6000);h.context.renderPageRefreshIndicator();
   assert.ok(status.textContent.includes('行情延迟'));

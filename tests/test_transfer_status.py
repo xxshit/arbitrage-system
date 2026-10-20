@@ -182,12 +182,13 @@ class TransferStatusTests(unittest.TestCase):
             self.assertEqual(self.status(exchange="Gate")["state"], "fresh")
             self.assertEqual(self.status(exchange="Bitget")["state"], "fresh")
 
-    def test_current_fresh_data_includes_explicit_utc_capture_time(self):
+    def test_current_fresh_data_includes_beijing_capture_time_and_original_epoch(self):
         with module.app.app_context():
             self.record()
             status = self.status()
             self.assertEqual(status["state"], "fresh")
-            self.assertTrue(status["captured_at"].endswith(" UTC"))
+            self.assertEqual(status["captured_at"], (self.now + timedelta(hours=8)).strftime("%m-%d %H:%M:%S 北京时间"))
+            self.assertEqual(status["captured_at_epoch"], self.now.replace(tzinfo=timezone.utc).timestamp())
             self.assertIs(status["chains"][0]["deposit_open"], False)
             self.assertIs(status["chains"][0]["withdraw_open"], True)
 

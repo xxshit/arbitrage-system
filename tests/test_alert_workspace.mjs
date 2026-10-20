@@ -383,7 +383,7 @@ test('a refreshed summary updates ranges without clearing the selected history p
   assert.equal(h.run('selectedAlertSymbol'),'DEMO/USDT');assert.equal(h.run('alertDetailState.data.page'),2);assert.equal(h.scroll.scrollTop,210);
 });
 
-const wallet=(exchange='Gate',overrides={})=>({exchange,state:'fresh',chains:[{name:'BSC',deposit_open:false,withdraw_open:true}],captured_at:'10-18 11:30:00 UTC',reason:'',...overrides});
+const wallet=(exchange='Gate',overrides={})=>({exchange,state:'fresh',chains:[{name:'BSC',deposit_open:false,withdraw_open:true}],captured_at:'10-18 19:30:00 北京时间',reason:'',...overrides});
 
 test('wallet panel groups exchanges once per coin rather than repeating statuses on every historical event',async()=>{
   const h=harness(),coin=group();coin.transfer_statuses=[wallet(),wallet('Binance',{state:'unknown',chains:[],reason:'尚未接入该交易所的账户只读充提接口'})];h.context.renderAlertMasterDetail([coin]);await h.context.loadSelectedAlertHistory();
@@ -401,7 +401,7 @@ test('wallet strips omit the heading and visible capture times without discardin
     for(const unwanted of ['当前充提','UTC','11:30','快照采集'])assert.ok(!visible.includes(unwanted),`${state}: ${unwanted}`);
     assert.ok(!markup.includes('<time'));assert.ok(!markup.includes('alert-transfer-heading'));assert.ok(!markup.includes('transfer-updated'));
     const popover=h.context.transferPopoverMarkup(coin.transfer_statuses[0]);
-    assert.ok(popover.includes('快照采集：10-18 11:30:00 UTC'));assert.ok(popover.includes('来源：https://api.gateio.ws/api/v4/spot/currencies'));
+    assert.ok(popover.includes('快照采集：10-18 19:30:00 北京时间'));assert.ok(popover.includes('来源：https://api.gateio.ws/api/v4/spot/currencies'));
     assert.ok(visible.includes(state==='fresh'?'充提异常':'充提未知'));
   }
   assert.ok(!css.includes('.transfer-updated'));assert.ok(!css.includes('.alert-transfer-heading'));
@@ -433,8 +433,8 @@ test('per-chain labels never collapse partial closures into a claim that every c
 });
 
 test('stale snapshots show current unknowns and explicitly label last capture, never current open/closed colors',()=>{
-  const h=harness(),status=wallet('Bitget',{state:'stale',captured_at:'08-04 02:51:25 UTC'}),markup=h.context.transferStatusMarkup(status);
-  assert.ok(markup.includes('快照过期'));assert.ok(markup.includes('08-04 02:51:25 UTC'));assert.ok(markup.includes('充未知'));assert.ok(markup.includes('提未知'));
+  const h=harness(),status=wallet('Bitget',{state:'stale',captured_at:'08-04 10:51:25 北京时间'}),markup=h.context.transferStatusMarkup(status);
+  assert.ok(markup.includes('快照过期'));assert.ok(markup.includes('08-04 10:51:25 北京时间'));assert.ok(markup.includes('充未知'));assert.ok(markup.includes('提未知'));
   assert.ok(!markup.includes('class="transfer-open"'));assert.ok(!markup.includes('class="transfer-closed"'));assert.equal(h.context.transferHasRestriction(status),false);
 });
 
@@ -629,13 +629,15 @@ test('funding histories keep observations separate from actual settlement timest
   const markup=h.context.fundingDetailCard(item);assert.ok(markup.includes('实际结算触顶'));assert.ok(markup.includes('实际结算 '));assert.ok(!markup.includes('仅记录'));
 });
 
-test('funding alert next settlement uses Beijing but explicitly UTC event history remains UTC',()=>{
+test('funding alert next settlement and both event timestamps consistently use Beijing',()=>{
   const h=fundingHarness(),item=fundingGroup();item.next_at=1792512000;
   item.history=[{kind:'settled_cap',side:'positive',observed_at:1792497605,settlement_at:1792497600,rate:1,interval:4,notice:false}];
   const markup=h.context.fundingDetailCard(item);
   assert.ok(markup.includes('下次结算 10-21 00:00（北京时间）'));
-  assert.ok(markup.includes('发现时间（UTC）'));
-  assert.ok(markup.includes('实际结算 10-20 12:00:00 UTC'));
+  assert.ok(markup.includes('发现时间（北京时间）'));
+  assert.ok(markup.includes('10-20 20:00:05'));
+  assert.ok(markup.includes('实际结算 10-20 20:00:00 北京时间'));
+  assert.ok(!markup.includes('UTC'));
   assert.ok(!markup.includes('下次结算 10-20 16:00'));
 });
 

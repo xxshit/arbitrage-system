@@ -6,7 +6,7 @@ import test from 'node:test';
 const source=readFileSync(new URL('../static/app.js',import.meta.url),'utf8');
 const helpers=source.slice(source.indexOf('function divergenceLabel('),source.indexOf('function transferPopoverMarkup('));
 const escape=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-const risk={symbol:'GUA/USDT',long_exchange:'Gate',short_exchange:'Binance',state:'confirmed',long_ask:.12225,short_bid:.02814,index_price:.02804,open_spread:-76.981595,basis:.356633,blocked_chains:['BSC 充关'],blocked_transfers:[{exchange:'Gate',chain:'BSC',deposit_open:false,withdraw_open:true}],transfer_state:'fresh',observed_at:'10-19 00:00:00 UTC'};
+const risk={symbol:'GUA/USDT',long_exchange:'Gate',short_exchange:'Binance',state:'confirmed',long_ask:.12225,short_bid:.02814,index_price:.02804,open_spread:-76.981595,basis:.356633,blocked_chains:['BSC 充关'],blocked_transfers:[{exchange:'Gate',chain:'BSC',deposit_open:false,withdraw_open:true}],transfer_state:'fresh',observed_at:'10-19 08:00:00 北京时间'};
 function harness(){
   const nodes=new Map(['alertDivergenceRegister','alertDivergenceList','alertDivergenceCount'].map(id=>[id,{hidden:false,open:true,innerHTML:'',textContent:'',scrollTop:42}]));
   const context={escapeChatHtml:escape,byId:id=>nodes.get(id),transferStatusControl:()=>'<button>充提状态</button>'};vm.createContext(context);vm.runInContext(helpers,context);return {context,nodes};

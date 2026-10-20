@@ -11,7 +11,7 @@ function spreadHistoryButton(symbol,exchange,metric,value){
   return `<button type="button" class="spread-history-trigger" title="查看${spreadChartNames[metric]}历史曲线" aria-label="${spreadChartEscape(symbol)} ${spreadChartEscape(exchange)} ${spreadChartNames[metric]}历史" onclick="openSpreadHistory('${key}','${metric}',this)">${spreadChartPercent(value)}</button>`;
 }
 function spreadChartTime(epoch,short=false){
-  return new Date(epoch*1000).toLocaleString('zh-CN',short?{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}:{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+  return new Date(epoch*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',...(short?{}:{second:'2-digit'}),hourCycle:'h23'});
 }
 function spreadChartGeometry(data,metrics,width=970){
   const points=metrics.flatMap(metric=>data.series[metric].points);
@@ -122,7 +122,7 @@ function openSpreadHistory(encoded,metric,trigger){
     <h2 id="spreadHistoryTitle">${spreadChartEscape(symbol)} <span>开差 / 基差历史</span></h2>
     <div class="spread-history-controls"><label>路径 <select id="spreadHistoryExchange" onchange="loadSpreadChart(true)">${['Binance','Gate','Bitget'].map(name=>`<option ${name===exchange?'selected':''} value="${name}">${name}现货 → 币安合约</option>`).join('')}</select></label>
     <label>周期 <select id="spreadHistoryPeriod" onchange="loadSpreadChart(true)">${spreadChartPeriods.map(([value,name])=>`<option value="${value}" ${value==='24h'?'selected':''}>${name}</option>`).join('')}</select></label><button type="button" onclick="loadSpreadChart(true)">刷新</button></div>
-    <div class="spread-chart-legend"><label style="--series-color:${spreadChartColors.open}"><input id="spreadShow-open" type="checkbox" ${metric==='open'?'checked':''} onchange="renderSpreadChart()">开差</label><label style="--series-color:${spreadChartColors.basis}"><input id="spreadShow-basis" type="checkbox" checked onchange="renderSpreadChart()">币安基差</label><small>基差与现货路径无关 · 时间为本机时区</small></div>
+    <div class="spread-chart-legend"><label style="--series-color:${spreadChartColors.open}"><input id="spreadShow-open" type="checkbox" ${metric==='open'?'checked':''} onchange="renderSpreadChart()">开差</label><label style="--series-color:${spreadChartColors.basis}"><input id="spreadShow-basis" type="checkbox" checked onchange="renderSpreadChart()">币安基差</label><small>基差与现货路径无关 · 北京时间</small></div>
     <div id="spreadChartSummary" class="spread-chart-summary"></div><div id="spreadChartPlot" class="spread-chart-plot"></div>
     <p id="spreadChartStatus" class="spread-chart-status" role="status"></p>
     <p class="spread-chart-note">按已有历史展开 · 约5秒行情采样，每分钟保留首末及高低点 · 长周期合并并保留极值 · 最长15天 · 断档不补线</p>

@@ -86,7 +86,7 @@ class AlertHistoryTests(unittest.TestCase):
         group = self.get(view="summary")["events"][0]
         self.assertEqual(group["alert_count"], 27)
         self.assertEqual((group["move_peaks"]["open_spread"], group["move_peaks"]["basis"]), (-12, -8))
-        self.assertEqual(group["first_at"], (self.now - timedelta(hours=20)).strftime("%m-%d %H:%M:%S"))
+        self.assertEqual(group["first_at"], (self.now - timedelta(hours=12)).strftime("%m-%d %H:%M:%S"))
         self.assertEqual(group["timeline"], [])
         self.assertEqual(len(self.get()["events"][0]["timeline"]), 20)
 
@@ -99,6 +99,23 @@ class AlertHistoryTests(unittest.TestCase):
         self.assertEqual(len({row["id"] for row in rows}), 123)
         self.assertTrue(all(row["symbol"] == "DEMO/USDT" for row in rows))
         self.assertTrue(all(rows[i]["created_at_epoch"] >= rows[i+1]["created_at_epoch"] for i in range(len(rows)-1)))
+
+    def test_beijing_summary_and_detail_times_keep_original_epochs_and_database_values(self):
+        stamp = self.now - timedelta(minutes=3)
+        older = self.now - timedelta(hours=20)
+        self.insert([self.event(created_at=stamp), self.event(created_at=older, open_spread=-12, basis=-8)])
+        group = self.get()["events"][0]
+        text = lambda value: (value + timedelta(hours=8)).strftime("%m-%d %H:%M:%S")
+        self.assertEqual(group["latest"]["created_at"], text(stamp))
+        self.assertEqual(group["first_at"], text(older))
+        self.assertEqual(group["move_peaks"]["open_spread_at"], text(older))
+        self.assertEqual(group["move_peaks"]["basis_at"], text(older))
+        rows = self.get(view="detail", symbol="DEMO/USDT")["items"]
+        for row, original in zip(rows, [stamp, older]):
+            self.assertEqual(row["created_at"], text(original))
+            self.assertEqual(row["created_at_epoch"], original.replace(tzinfo=timezone.utc).timestamp())
+        with module.app.app_context():
+            self.assertEqual(module.AlertEvent.query.order_by(module.AlertEvent.created_at).first().created_at, older)
 
     def test_ranges_use_all_24h_confirmed_events_not_the_current_page_or_legacy_timeline(self):
         self.insert([self.event(created_at=self.now - timedelta(minutes=i + 1)) for i in range(90)] + [

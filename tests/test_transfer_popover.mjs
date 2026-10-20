@@ -6,7 +6,7 @@ import test from 'node:test';
 const source=readFileSync(new URL('../static/app.js',import.meta.url),'utf8');
 const helpers=source.slice(source.indexOf('function transferFlagText('),source.indexOf('function spotRows('));
 const css=readFileSync(new URL('../static/workspace-layout.css',import.meta.url),'utf8');
-const wallet=(overrides={})=>({exchange:'Gate',symbol:'DEMO/USDT',state:'fresh',chains:[{name:'BSC',deposit_open:true,withdraw_open:true}],captured_at:'10-18 12:00:00 UTC',...overrides});
+const wallet=(overrides={})=>({exchange:'Gate',symbol:'DEMO/USDT',state:'fresh',chains:[{name:'BSC',deposit_open:true,withdraw_open:true}],captured_at:'10-18 20:00:00 北京时间',...overrides});
 class Element {
   constructor(tag='div'){this.tagName=tag;this.children=[];this.dataset={};this.attributes={};this.className='';this.style={};this.scrollTop=0;this.writes=0;this.html='';this.classList={contains:key=>this.className.split(' ').includes(key)}}
   appendChild(node){node.remove();this.children.push(node);node.parentElement=this;return node}

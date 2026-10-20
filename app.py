@@ -2232,7 +2232,7 @@ def load_transfer_statuses(pairs, now=None, exact_assets=False):
             status["reason"] = "币安公开充提源暂未提供该币种数据，不能据此判断通道正常或关闭"
         if record:
             captured = record.captured_at
-            status.update(captured_at=captured.strftime("%m-%d %H:%M:%S UTC"), captured_at_epoch=captured.replace(tzinfo=timezone.utc).timestamp())
+            status.update(captured_at=format_shanghai_time(captured, "%m-%d %H:%M:%S 北京时间"), captured_at_epoch=captured.replace(tzinfo=timezone.utc).timestamp())
             try:
                 raw_chains = json.loads(record.chains_json)
                 if not isinstance(raw_chains, list) or not all(isinstance(chain, dict) for chain in raw_chains):
@@ -3193,7 +3193,7 @@ def load_latest_dual_futures_snapshot():
         row["captured_at_epoch"] = item.captured_at.replace(tzinfo=timezone.utc).timestamp()
         groups.setdefault(item.symbol, []).append(row)
     elapsed = max(0.0, (datetime.now() - captured_at).total_seconds())
-    return {"symbols": [{"symbol": symbol, "rows": entries} for symbol, entries in groups.items()], "errors": {}, "updated_at": captured_at.strftime("%H:%M:%S"), "captured_at_epoch": captured_at.timestamp(), "next_refresh_in_seconds": max(0, int(MARKET_REFRESH_SECONDS - elapsed + 0.999)), "stored": True}
+    return {"symbols": [{"symbol": symbol, "rows": entries} for symbol, entries in groups.items()], "errors": {}, "updated_at": format_shanghai_time(captured_at, "%H:%M:%S"), "captured_at_epoch": captured_at.timestamp(), "next_refresh_in_seconds": max(0, int(MARKET_REFRESH_SECONDS - elapsed + 0.999)), "stored": True}
 
 
 def fetch_price_history_from_binance(symbol):
@@ -3460,8 +3460,8 @@ def spot_divergence_payload(item, now=None):
             "path_id": json.dumps(["spot_futures", item.long_exchange, item.short_exchange], separators=(",", ":")),
             "state": "confirmed" if item.confirmed_at else "observing", "recovering": item.recovering_since is not None,
             "stale": not 0 <= (now - item.last_seen_at).total_seconds() <= 30,
-            "started_at": item.started_at.strftime("%m-%d %H:%M:%S UTC"),
-            "observed_at": item.last_seen_at.strftime("%m-%d %H:%M:%S UTC"), **evidence}
+            "started_at": format_shanghai_time(item.started_at, "%m-%d %H:%M:%S 北京时间"),
+            "observed_at": format_shanghai_time(item.last_seen_at, "%m-%d %H:%M:%S 北京时间"), **evidence}
 
 
 def spot_alert_exchange(item):
@@ -3680,10 +3680,10 @@ def enrich_basis_openings(groups, strategy):
         logs = logs_by_tracking.get(tracking.id, [])
         opening_basis = tracking.opening_basis if tracking.opening_basis is not None else (logs[0].observed_basis if logs else tracking.max_basis)
         group["basis_opening"] = {
-            "opened_at": tracking.started_at.strftime("%m-%d %H:%M:%S"),
+            "opened_at": format_shanghai_time(tracking.started_at, "%m-%d %H:%M:%S"),
             "opened_basis": opening_basis,
             "max_basis": tracking.max_basis,
-            "max_at": tracking.max_at.strftime("%m-%d %H:%M:%S"),
+            "max_at": format_shanghai_time(tracking.max_at, "%m-%d %H:%M:%S"),
             "open_count": len(logs),
         }
 
@@ -3730,7 +3730,7 @@ def load_latest_market_snapshot():
         groups[item.symbol][-1]["captured_at_epoch"] = item.captured_at.replace(tzinfo=timezone.utc).timestamp()
     elapsed = max(0.0, (datetime.now() - captured_at).total_seconds())
     next_refresh_in_seconds = max(0, int(MARKET_REFRESH_SECONDS - elapsed + 0.999))
-    return {"symbols": [{"symbol": symbol, "rows": entries} for symbol, entries in groups.items()], "errors": {}, "updated_at": captured_at.strftime("%H:%M:%S"), "captured_at_epoch": captured_at.timestamp(), "next_refresh_in_seconds": next_refresh_in_seconds, "stored": True}
+    return {"symbols": [{"symbol": symbol, "rows": entries} for symbol, entries in groups.items()], "errors": {}, "updated_at": format_shanghai_time(captured_at, "%H:%M:%S"), "captured_at_epoch": captured_at.timestamp(), "next_refresh_in_seconds": next_refresh_in_seconds, "stored": True}
 
 
 def load_equity_spot_snapshot():
@@ -3919,7 +3919,7 @@ def spot_futures_snapshot():
         "symbols": rows_by_symbol,
         "errors": {key: value for key, value in errors.items() if key not in EQUITY_SPOT_URLS},
         "upstream_delays": snapshot_delays(rows_by_symbol, {key: value for key, value in errors.items() if key not in EQUITY_SPOT_URLS}, getattr(results, "observed_at", {}), "spot_futures"),
-        "updated_at": captured_at.strftime("%H:%M:%S"),
+        "updated_at": format_shanghai_time(captured_at, "%H:%M:%S"),
         "captured_at_epoch": captured_at.timestamp(),
         "next_refresh_in_seconds": MARKET_REFRESH_SECONDS,
         "stored": True,
@@ -3943,7 +3943,7 @@ def spot_futures_snapshot():
         "network_seconds": round(network_seconds, 3),
         "processing_seconds": round(total_seconds - network_seconds, 3),
         "total_seconds": round(total_seconds, 3),
-        "last_success_at": datetime.now().strftime("%H:%M:%S"),
+        "last_success_at": format_shanghai_time(utc_now_naive(), "%H:%M:%S"),
         "last_error": None,
         "stages": {
             "open_interest": round(oi_finished_at - stage_at - network_seconds, 3),
@@ -4094,7 +4094,7 @@ def dual_futures_snapshot():
         "symbols": groups,
         "errors": errors,
         "upstream_delays": snapshot_delays(groups, errors, getattr(results, "observed_at", {}), "futures_futures"),
-        "updated_at": captured_at.strftime("%H:%M:%S"),
+        "updated_at": format_shanghai_time(captured_at, "%H:%M:%S"),
         "captured_at_epoch": captured_at.timestamp(),
         "next_refresh_in_seconds": MARKET_REFRESH_SECONDS,
         "stored": True,
@@ -4124,7 +4124,7 @@ def opportunities():
             "spread": round(spread, 3),
             "estimated_profit": round(estimated, 3),
             "funding": details["funding"],
-            "updated_at": datetime.now().strftime("%H:%M:%S"),
+            "updated_at": format_shanghai_time(utc_now_naive(), "%H:%M:%S"),
         })
     return sorted(rows, key=lambda item: item["estimated_profit"], reverse=True)
 
@@ -4435,11 +4435,11 @@ def device_payload(row, current_binding_id=None):
         "kind_label": "手机端" if row.device_kind == "mobile" else "电脑端",
         "display_id": row.display_id,
         "client_label": row.client_label,
-        "first_bound_at": row.first_bound_at.strftime("%Y-%m-%d %H:%M:%S") if row.first_bound_at else None,
-        "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
+        "first_bound_at": format_shanghai_time(row.first_bound_at) if row.first_bound_at else None,
+        "last_login_at": format_shanghai_time(row.last_login_at) if row.last_login_at else None,
         "last_ip": row.last_ip,
         "last_location": row.last_location,
-        "last_seen_at": row.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_seen_at else None,
+        "last_seen_at": format_shanghai_time(row.last_seen_at) if row.last_seen_at else None,
         "current": row.id == current_binding_id,
     }
 
@@ -4874,7 +4874,7 @@ def runtime_rule_payload(row):
         "schedule_type": row.schedule_type, "value": row.value, "unit": row.unit,
         "min_value": row.min_value, "max_value": row.max_value,
         "editable": row.editable, "enabled": row.enabled, "description": row.description,
-        "updated_at": row.updated_at.strftime("%Y-%m-%d %H:%M:%S") if row.updated_at else None,
+        "updated_at": format_shanghai_time(row.updated_at) if row.updated_at else None,
         "automation": automation_payload(status_key) if status_key else None,
     }
 
@@ -4933,8 +4933,8 @@ def symbol_alias_payload(row):
         "verified": bool(row.verified),
         "note": row.note,
         "seeded": key in seeded_symbol_alias_keys(),
-        "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
-        "updated_at": row.updated_at.strftime("%Y-%m-%d %H:%M:%S") if row.updated_at else None,
+        "created_at": format_shanghai_time(row.created_at) if row.created_at else None,
+        "updated_at": format_shanghai_time(row.updated_at) if row.updated_at else None,
     }
 
 
@@ -5097,9 +5097,9 @@ def list_invites():
         "code": row.code_value if not row.used_at and (not row.expires_at or row.expires_at >= now) else None,
         "status": "used" if row.used_at else ("expired" if row.expires_at and row.expires_at < now else "available"),
         "used_by": usernames.get(row.used_by),
-        "used_at": row.used_at.strftime("%Y-%m-%d %H:%M:%S") if row.used_at else None,
-        "expires_at": row.expires_at.strftime("%Y-%m-%d %H:%M") if row.expires_at else None,
-        "created_at": row.created_at.strftime("%Y-%m-%d %H:%M"),
+        "used_at": format_shanghai_time(row.used_at) if row.used_at else None,
+        "expires_at": format_shanghai_time(row.expires_at, "%Y-%m-%d %H:%M") if row.expires_at else None,
+        "created_at": format_shanghai_time(row.created_at, "%Y-%m-%d %H:%M"),
     } for row in rows]})
 
 
@@ -5115,7 +5115,7 @@ def create_invite():
         created_by=current_user().id, expires_at=expires_at,
     ))
     db.session.commit()
-    return jsonify({"ok": True, "code": code, "expires_at": expires_at.strftime("%Y-%m-%d %H:%M")})
+    return jsonify({"ok": True, "code": code, "expires_at": format_shanghai_time(expires_at, "%Y-%m-%d %H:%M")})
 
 
 @app.get("/api/admin/users")
@@ -5134,10 +5134,10 @@ def list_users():
         "device_lock_required": device_lock_required(row),
         "last_login_ip": row.last_login_ip,
         "last_login_location": row.last_login_location,
-        "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
-        "last_login_at": row.last_login_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_login_at else None,
-        "last_seen_at": row.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if row.last_seen_at else None,
-        "password_changed_at": row.password_changed_at.strftime("%Y-%m-%d %H:%M:%S") if row.password_changed_at else None,
+        "created_at": format_shanghai_time(row.created_at) if row.created_at else None,
+        "last_login_at": format_shanghai_time(row.last_login_at) if row.last_login_at else None,
+        "last_seen_at": format_shanghai_time(row.last_seen_at) if row.last_seen_at else None,
+        "password_changed_at": format_shanghai_time(row.password_changed_at) if row.password_changed_at else None,
         "devices": [device_payload(device, current_binding_id) for device in devices_by_user.get(row.id, [])],
     } for row in rows]})
 
@@ -5229,7 +5229,7 @@ def list_login_security_alerts():
             "client_label": row.client_label,
             "source_ip": row.source_ip,
             "source_location": row.source_location,
-            "created_at": row.created_at.strftime("%Y-%m-%d %H:%M:%S") if row.created_at else None,
+            "created_at": format_shanghai_time(row.created_at) if row.created_at else None,
             "read": bool(row.read_at),
         } for row in rows],
     })
@@ -5284,7 +5284,7 @@ def set_user_active(user_id):
         "username": target.username,
         "active": bool(target.active),
         "signed_out": True,
-        "changed_at": changed_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "changed_at": format_shanghai_time(changed_at),
     })
 
 
@@ -5322,7 +5322,7 @@ def reset_user_password(user_id):
         "ok": True,
         "user_id": target.id,
         "username": target.username,
-        "password_changed_at": changed_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "password_changed_at": format_shanghai_time(changed_at),
         "temporary_password": new_password if generate_temporary else None,
         "signed_out": True,
     })
@@ -6753,7 +6753,7 @@ def load_momentum_scores(force=False):
                 if item:
                     item["label"] = momentum_score_label(item["score"])
                     item["reason"] = momentum_score_reason(item)
-                    item["evaluated_at"] = datetime.now().strftime("%H:%M:%S")
+                    item["evaluated_at"] = format_shanghai_time(utc_now_naive(), "%H:%M:%S")
                     scored.append(item)
         scored.sort(key=lambda item: (item["score"], item["candidate_score"]), reverse=True)
         if scored:
@@ -6983,7 +6983,7 @@ def load_open_interest_market_cap_opportunities(force=False):
             OI_MARKET_CAP_CACHE.update({
                 "ts": now_ts,
                 "items": items,
-                "updated_at": datetime.now().strftime("%H:%M:%S"),
+                "updated_at": format_shanghai_time(utc_now_naive(), "%H:%M:%S"),
                 "coverage": sum(
                     match_market_cap_record(item, market_rows) is not None
                     or match_market_cap_record(item, alternate_rows) is not None
@@ -9273,7 +9273,7 @@ def daily_report_trends():
         "last_price": item.last_price,
     }
     early_updated = max((item.created_at for item in early_rows), default=None)
-    updated_at = early_updated.strftime("%Y-%m-%d %H:%M:%S") if early_updated else snapshot["updated_at"]
+    updated_at = format_shanghai_time(early_updated) if early_updated else snapshot["updated_at"]
     return jsonify({"updated_at": updated_at, "rising": sorted(valid, key=lambda item: item["change_24h"], reverse=True)[:20], "falling": sorted(valid, key=lambda item: item["change_24h"])[:20], "horn_30m": [signal_payload(item) for item in horn_rows if item.timeframe == "30m"], "horn_4h": [signal_payload(item) for item in horn_rows if item.timeframe == "4h"], "horn_continue": [signal_payload(item) for item in horn_rows if item.timeframe == "continue"], "early_focus": [early_payload(item) for item in early_rows], "automation_status": automation_statuses("intraday_early_trend_scan", "daily_horn_scan", "daily_lark_trend_push")})
 
 
@@ -9337,6 +9337,17 @@ THOUGHT_WATCH_SEED = {
 }
 
 
+def thought_watch_datetime(row, field):
+    """Resolve legacy Beijing seed dates without shifting UTC web-created dates."""
+    value = getattr(row, field, None)
+    if value is None or value.tzinfo is not None:
+        return value
+    seed = THOUGHT_WATCH_SEED.get(row.symbol)
+    if field == "started_at" and seed and value == datetime.strptime(seed[0], "%Y-%m-%d %H:%M"):
+        return value.replace(tzinfo=SHANGHAI_TZ)
+    return value.replace(tzinfo=timezone.utc)
+
+
 def first_thought_watch_price(symbol, fallback=None):
     if fallback:
         return fallback
@@ -9376,7 +9387,7 @@ def thought_watch_config(symbol):
     row = ThoughtWatch.query.filter_by(symbol=symbol).first()
     return {
         "entry": None,
-        "entry_time": row.started_at.strftime("%Y-%m-%d %H:%M") if row else "网页新增盯盘",
+        "entry_time": format_shanghai_time(thought_watch_datetime(row, "started_at"), "%Y-%m-%d %H:%M") if row else "网页新增盯盘",
         "side": "watch",
         "fallback": {},
     }
@@ -9630,7 +9641,7 @@ def thought_fast_snapshot(symbol):
         try:
             payload = json.loads(latest.payload_json)
             if isinstance(payload, dict):
-                payload["updated_at"] = latest.captured_at.strftime("%Y-%m-%d %H:%M:%S")
+                payload["updated_at"] = format_shanghai_time(latest.captured_at)
                 payload["source"] = "thought_live_db"
                 return {**fallback, **payload}
         except (TypeError, ValueError):
@@ -9661,7 +9672,7 @@ def thought_market_context(symbol):
             "spot_volume": None,
             "futures_volume": dual.long_volume if binance_is_long else dual.short_volume,
             "futures_spot_volume_ratio": None,
-            "updated_at": dual.captured_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "updated_at": format_shanghai_time(dual.captured_at),
         }
     preferred = next((row for row in market_rows if row.long_exchange == "Binance"), None) or market_rows[0]
     futures_mid = ((preferred.short_bid or 0) + (preferred.short_ask or 0)) / 2 if preferred.short_bid and preferred.short_ask else None
@@ -9678,7 +9689,7 @@ def thought_market_context(symbol):
         "spot_volume": spot_volume,
         "futures_volume": futures_volume,
         "futures_spot_volume_ratio": volume_ratio,
-        "updated_at": preferred.captured_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": format_shanghai_time(preferred.captured_at),
     }
 
 
@@ -12309,7 +12320,7 @@ def early_trend_thought_item(row):
     stage_note = f"【{row.stage_label}】{row.stage_reason}"
     return {
         "symbol": row.symbol, "trade_side": "观察", "trade_status": row.stage_label,
-        "entry": None, "entry_time": row.created_at.strftime("%Y-%m-%d %H:%M"),
+        "entry": None, "entry_time": format_shanghai_time(row.created_at, "%Y-%m-%d %H:%M"),
         "exit": None, "exit_time": None, "last": row.last_price, "profit_pct": None,
         "realized_profit_pct": None, "support": None, "resistance": None,
         "oi_value": None, "oi_change_pct": row.oi_change_5, "ratio_value": None,
@@ -12338,10 +12349,10 @@ def thought_watchlist_payload():
     rows = ThoughtWatch.query.order_by(ThoughtWatch.active.desc(), ThoughtWatch.started_at.desc()).all()
     history_conditions = []
     for row in rows:
-        start_bucket = int(row.started_at.replace(tzinfo=SHANGHAI_TZ).timestamp())
+        start_bucket = int(thought_watch_datetime(row, "started_at").timestamp())
         condition = and_(FuturesPriceHistory.symbol == row.symbol, FuturesPriceHistory.bucket_at >= start_bucket)
         if not row.active and row.stopped_at:
-            stop_bucket = int(row.stopped_at.replace(tzinfo=SHANGHAI_TZ).timestamp())
+            stop_bucket = int(thought_watch_datetime(row, "stopped_at").timestamp())
             condition = and_(condition, FuturesPriceHistory.bucket_at <= stop_bucket)
         history_conditions.append(condition)
     history_ranges = {}
@@ -12373,12 +12384,12 @@ def thought_watchlist_payload():
         high_price = high_recorded if high_recorded is not None else effective_price
         low_price = low_recorded if low_recorded is not None else effective_price
         latest_push = latest_pushes.get(row.symbol)
-        end_at = datetime.now() if row.active else (row.stopped_at or datetime.now())
+        end_at = datetime.now(timezone.utc) if row.active else (thought_watch_datetime(row, "stopped_at") or datetime.now(timezone.utc))
         items.append({
             "symbol": row.symbol,
             "active": row.active,
-            "started_at": row.started_at.strftime("%Y-%m-%d %H:%M"),
-            "stopped_at": row.stopped_at.strftime("%Y-%m-%d %H:%M") if row.stopped_at else None,
+            "started_at": format_shanghai_time(thought_watch_datetime(row, "started_at"), "%Y-%m-%d %H:%M"),
+            "stopped_at": format_shanghai_time(thought_watch_datetime(row, "stopped_at"), "%Y-%m-%d %H:%M"),
             "start_price": start_price,
             "current_price": current_price,
             "stop_price": row.stop_price,
@@ -12387,9 +12398,9 @@ def thought_watchlist_payload():
             "high_change_pct": percent_delta(high_price, start_price) if high_price and start_price else None,
             "low_price": low_price,
             "low_change_pct": percent_delta(low_price, start_price) if low_price and start_price else None,
-            "duration_seconds": max(int((end_at - row.started_at).total_seconds()), 0),
+            "duration_seconds": max(int((end_at - thought_watch_datetime(row, "started_at")).total_seconds()), 0),
             "note": row.note,
-            "last_push_at": latest_push.sent_at.strftime("%Y-%m-%d %H:%M:%S") if latest_push and latest_push.sent_at else None,
+            "last_push_at": format_shanghai_time(latest_push.sent_at) if latest_push else None,
             "last_direction": latest_push.direction if latest_push else None,
         })
     db.session.commit()
@@ -13453,7 +13464,7 @@ def alerts():
             pulse = {key: value for key, value in pulse.items() if key in {"id", "episode", "ordinal", "metric", "direction", "baseline", "baseline_at", "triggered_at", "peak", "peak_at", "current", "current_at", "state", "retrace_at", "ended_at", "quality", "notice_version"}}
         notice_key = ticket["key"] if ticket else None
         assessment = attention[item.id]
-        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "pulse": pulse, "round_id": round_ids[item.id], "notice_key": notice_key, "reminder": {"eligible": bool(ticket), "count": reminder_count({"reminder": reminder}, screening_now), "record_only": not bool(reminder["notices"])} if reminder is not None else None, "attention": assessment, "audible": bool(ticket) and assessment["tier"] == "candidate" and assessment["live"], "funding_rate": item.funding_rate, "created_at": item.created_at.strftime("%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int((30 if assessment.get("transient") else 120) - (screening_now - notice_epoch(item)))), **alert_context(item)}
+        return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "pulse": pulse, "round_id": round_ids[item.id], "notice_key": notice_key, "reminder": {"eligible": bool(ticket), "count": reminder_count({"reminder": reminder}, screening_now), "record_only": not bool(reminder["notices"])} if reminder is not None else None, "attention": assessment, "audible": bool(ticket) and assessment["tier"] == "candidate" and assessment["live"], "funding_rate": item.funding_rate, "created_at": format_shanghai_time(item.created_at, "%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int((30 if assessment.get("transient") else 120) - (screening_now - notice_epoch(item)))), **alert_context(item)}
 
     if view == "detail":
         filtered = [item for item in all_events if (not selected_strategy or alert_context(item)["strategy"] == selected_strategy) and (selected_path is None or path_key(item) == selected_path)]
@@ -13494,14 +13505,14 @@ def alerts():
             "symbol": symbol,
             "attention": attention[max(items, key=priority).id],
             "latest": latest,
-            "first_at": items[-1].created_at.strftime("%m-%d %H:%M:%S"),
+            "first_at": format_shanghai_time(items[-1].created_at, "%m-%d %H:%M:%S"),
             "alert_count": count_reminders(items),
             "observation_count": len(items),
             "move_peaks": {
                 "open_spread": absolute_peak("open_spread", max_spread_item.open_spread if max_spread_item else None),
-                "open_spread_at": max_spread_item.created_at.strftime("%m-%d %H:%M:%S") if max_spread_item else None,
+                "open_spread_at": format_shanghai_time(max_spread_item.created_at, "%m-%d %H:%M:%S") if max_spread_item else None,
                 "basis": absolute_peak("basis", max_basis_item.basis if max_basis_item else None),
-                "basis_at": max_basis_item.created_at.strftime("%m-%d %H:%M:%S") if max_basis_item else None,
+                "basis_at": format_shanghai_time(max_basis_item.created_at, "%m-%d %H:%M:%S") if max_basis_item else None,
             },
             "value_ranges": value_ranges(items),
             "paths": paths,
@@ -13522,7 +13533,7 @@ def alerts():
         "isolated_paths": [spot_divergence_payload(item, now) for item in sorted(isolated, key=lambda item: (item.symbol, item.long_exchange))],
         "events": [alert_group_payload(symbol, items) for symbol, items in grouped_events.items()],
         "active_events": [event_payload(item) for item in active_events],
-        "basis_tracking": [{"symbol": item.symbol, "strategy": item.strategy or "spot_futures", "direction": item.direction, "started_at": item.started_at.strftime("%m-%d %H:%M:%S"), "opening_basis": item.opening_basis, "last_level": item.last_recorded_level, "max_basis": item.max_basis, "max_at": item.max_at.strftime("%m-%d %H:%M:%S")} for item in tracking],
+        "basis_tracking": [{"symbol": item.symbol, "strategy": item.strategy or "spot_futures", "direction": item.direction, "started_at": format_shanghai_time(item.started_at, "%m-%d %H:%M:%S"), "opening_basis": item.opening_basis, "last_level": item.last_recorded_level, "max_basis": item.max_basis, "max_at": format_shanghai_time(item.max_at, "%m-%d %H:%M:%S")} for item in tracking],
     })
 
 
@@ -13787,7 +13798,7 @@ def validation_candles(symbol, limit=None, sync=True):
     if not rows:
         rows = list(reversed(FuturesPriceHistory.query.filter_by(symbol=symbol).order_by(FuturesPriceHistory.bucket_at.desc()).limit(288).all()))
         return [{
-            "time": datetime.fromtimestamp(row.bucket_at).strftime("%m-%d %H:%M"),
+            "time": format_shanghai_time(datetime.fromtimestamp(row.bucket_at, timezone.utc), "%m-%d %H:%M"),
             "open": row.price,
             "high": row.price,
             "low": row.price,
@@ -13795,7 +13806,7 @@ def validation_candles(symbol, limit=None, sync=True):
             "volume": None,
         } for row in rows]
     return [{
-        "time": datetime.fromtimestamp(row.bucket_at).strftime("%m-%d %H:%M"),
+        "time": format_shanghai_time(datetime.fromtimestamp(row.bucket_at, timezone.utc), "%m-%d %H:%M"),
         "open": row.open,
         "high": row.high,
         "low": row.low,
@@ -14692,9 +14703,9 @@ def trade_validation():
             "thesis": plan.thesis,
             "current_price": price,
             "pnl": validation_pnl(plan, price),
-            "created_at": plan.created_at.strftime("%m-%d %H:%M:%S") if plan.created_at else None,
-            "opened_at": plan.opened_at.strftime("%m-%d %H:%M:%S") if plan.opened_at else None,
-            "closed_at": plan.closed_at.strftime("%m-%d %H:%M:%S") if plan.closed_at else None,
+            "created_at": format_shanghai_time(plan.created_at, "%m-%d %H:%M:%S") if plan.created_at else None,
+            "opened_at": format_shanghai_time(plan.opened_at, "%m-%d %H:%M:%S") if plan.opened_at else None,
+            "closed_at": format_shanghai_time(plan.closed_at, "%m-%d %H:%M:%S") if plan.closed_at else None,
             "exit_price": plan.exit_price,
             "exit_reason": plan.exit_reason,
             "events": replay_events.get(plan.id, []),
@@ -14740,9 +14751,9 @@ def trade_validation_detail(plan_id):
         "thesis": plan.thesis,
         "current_price": price,
         "pnl": validation_pnl(plan, price),
-        "created_at": plan.created_at.strftime("%m-%d %H:%M:%S") if plan.created_at else None,
-        "opened_at": plan.opened_at.strftime("%m-%d %H:%M:%S") if plan.opened_at else None,
-        "closed_at": plan.closed_at.strftime("%m-%d %H:%M:%S") if plan.closed_at else None,
+        "created_at": format_shanghai_time(plan.created_at, "%m-%d %H:%M:%S") if plan.created_at else None,
+        "opened_at": format_shanghai_time(plan.opened_at, "%m-%d %H:%M:%S") if plan.opened_at else None,
+        "closed_at": format_shanghai_time(plan.closed_at, "%m-%d %H:%M:%S") if plan.closed_at else None,
         "exit_price": plan.exit_price,
         "exit_reason": plan.exit_reason,
         "events": events,

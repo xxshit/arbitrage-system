@@ -129,7 +129,8 @@ class DashboardRefreshTests(unittest.TestCase):
         with patch.object(module, "BACKGROUND_WORKERS_STARTED", False), patch("app.threading.Thread") as thread:
             module.start_background_workers()
             module.start_background_workers()
-        lanes = [call.kwargs for call in thread.call_args_list if call.kwargs.get("target") is module.background_dashboard_cache_refresh]
+        lanes = [call.kwargs for call in thread.call_args_list if getattr(call.kwargs.get("target"), "__wrapped__", None) is module.background_dashboard_cache_refresh]
+        self.assertTrue(all(hasattr(call.kwargs["target"], "__wrapped__") for call in thread.call_args_list))
         self.assertEqual(len(lanes), 4)
         self.assertEqual({lane["name"] for lane in lanes}, {"dashboard-quotes", "dashboard-major-analysis", "dashboard-momentum", "dashboard-oi-market-cap"})
         self.assertEqual(lanes[0]["args"][1:], (5, "spot_market_refresh", False, False))

@@ -5,6 +5,7 @@ independent of notification cadence. A retracement updates a pulse; it never
 undoes it. New pulses use the post-retracement turning point, not an old high.
 """
 from collections import deque
+import struct
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import timezone
@@ -114,6 +115,75 @@ class HistorySample:
         return dict(zip(HISTORY_FIELDS[self.metric], (self.first, self.second)))
 
 
+class HistoryBucket:
+    """Lossless doubles instead of hundreds of thousands of boxed floats.
+
+    Preserve the SAME two extrema, timestamps and supporting quotes. Materialize
+    samples only on a potential trigger, not for every idle path/second.
+    """
+    __slots__ = ("metric", "data")
+    formats = {"basis": struct.Struct("4d"), "spread": struct.Struct("8d"), "price": struct.Struct("8d")}
+
+    def __init__(self, sample):
+        self.metric = sample.metric
+        self.replace(sample)
+
+    def values(self, sample):
+        return (sample.at, sample.value) if self.metric == "basis" else (sample.at, sample.value, sample.first, sample.second)
+
+    def replace(self, sample):
+        point = self.values(sample)
+        self.data = self.formats[self.metric].pack(*(point + point))
+
+    def same_quote(self, sample):
+        values = self.formats[self.metric].unpack(self.data)
+        width = len(values)//2
+        point = self.values(sample)
+        return values[1:width] == point[1:] == values[width+1:]
+
+    def update(self, sample):
+        values = self.formats[self.metric].unpack(self.data)
+        width = len(values)//2
+        low, high = values[:width], values[width:]
+        point = self.values(sample)
+        if sample.value < low[1]:
+            low = point
+        if sample.value > high[1]:
+            high = point
+        self.data = self.formats[self.metric].pack(*(low + high))
+
+    def __iter__(self):
+        values = self.formats[self.metric].unpack(self.data)
+        width = len(values)//2
+        for offset in (0, width):
+            at, value, *support = values[offset:offset+width]
+            yield HistorySample(at, value, self.metric, *support)
+
+    def __getitem__(self, index):
+        values = self.formats[self.metric].unpack(self.data)
+        width = len(values)//2
+        if index not in (0, 1):
+            raise IndexError(index)
+        at, value, *support = values[index*width:(index+1)*width]
+        return HistorySample(at, value, self.metric, *support)
+
+    @property
+    def first_at(self):
+        return struct.unpack_from("d", self.data, 0)[0]
+
+    @property
+    def high_at(self):
+        return struct.unpack_from("d", self.data, len(self.data)//2)[0]
+
+    def contains_extreme(self, low, high):
+        values = self.formats[self.metric].unpack(self.data)
+        return values[1] in (low, high) or values[len(values)//2+1] in (low, high)
+
+    def bounds(self):
+        values = self.formats[self.metric].unpack(self.data)
+        return values[1], values[len(values)//2+1]
+
+
 @dataclass
 class Track:
     # One-second buckets retain BOTH extrema and their original timestamps.
@@ -145,27 +215,24 @@ class Track:
         # Trigger, peak and current pulse evidence still retain full contexts.
         fields = HISTORY_FIELDS[metric]
         sample = HistorySample(sample.at, sample.value, metric, *(sample.context[name] for name in fields))
-        if self.history and all((item.value, item.first, item.second) == (sample.value, sample.first, sample.second) for item in self.history[-1]):
+        if self.history and self.history[-1].same_quote(sample):
             # A flat plateau needs only its latest real observation. Earlier
             # different extrema remain; this never coalesces a peak with a dip.
-            self.history[-1] = [sample, sample]
-        elif not self.history or int(self.history[-1][0].at) != int(sample.at):
-            self.history.append([sample, sample])
+            self.history[-1].replace(sample)
+        elif not self.history or int(self.history[-1].first_at) != int(sample.at):
+            self.history.append(HistoryBucket(sample))
         else:
-            bucket = self.history[-1]
-            if sample.value < bucket[0].value:
-                bucket[0] = sample
-            if sample.value > bucket[1].value:
-                bucket[1] = sample
+            self.history[-1].update(sample)
         self.low = sample.value if self.low is None else min(self.low, sample.value)
         self.high = sample.value if self.high is None else max(self.high, sample.value)
         expired_extreme = False
-        while self.history and sample.at - self.history[0][1].at > 120:
+        while self.history and sample.at - self.history[0].high_at > 120:
             expired = self.history.popleft()
-            expired_extreme |= any(item.value in (self.low, self.high) for item in expired)
+            expired_extreme |= expired.contains_extreme(self.low, self.high)
         if expired_extreme:
-            self.low = min(item.value for bucket in self.history for item in bucket)
-            self.high = max(item.value for bucket in self.history for item in bucket)
+            bounds = [bucket.bounds() for bucket in self.history]
+            self.low = min(low for low, _ in bounds)
+            self.high = max(high for _, high in bounds)
         self.last = sample
 
 

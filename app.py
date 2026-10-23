@@ -1,4 +1,5 @@
 import os
+import logging
 import random
 import json
 import gzip
@@ -59,6 +60,7 @@ from opportunity_activity import ActivityLedger
 from opportunity_pool import POLICY as OPPORTUNITY_POLICY, classify as classify_opportunity, funding_profile
 from persistence_policy import funding_write_due
 from snapshot_persistence import changed_values, equity_payload_update, update_snapshots
+from background_runtime import WorkerRuntime, memory_status, mysql_engine_options
 
 load_dotenv()
 
@@ -67,12 +69,17 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "local-development-key")
 app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", "sqlite:///arbitrage_hub.db")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = mysql_engine_options(app.config["SQLALCHEMY_DATABASE_URI"])
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes", "on"}
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
+BACKGROUND_RUNTIME = WorkerRuntime()
+with app.app_context():
+    sa_event.listen(db.engine, "checkout", BACKGROUND_RUNTIME.checkout)
+    sa_event.listen(db.engine, "checkin", BACKGROUND_RUNTIME.checkin)
 ALERT_STREAM_HUB = AlertStreamHub()
 ALERT_HISTORY_INDEX = AlertHistoryIndex()
 LONG_TREND_REFERENCES = TrendReferenceCache()
@@ -1963,6 +1970,8 @@ def scan_exchange_announcements():
                 elif detail_page is None and exists.effective_at is None:
                     exists.effective_time_status = "retry"
                     exists.details_checked_at = datetime.now()
+            # Finish this public entry before another potentially slow HTTP read.
+            db.session.commit()
         db.session.commit()
 
 
@@ -2096,6 +2105,18 @@ def mark_automation_status(task_key, state, error=None, label=None):
         status.last_error_at = now
         status.last_error = str(error)[:1000] if error else "unknown error"
     db.session.commit()
+    BACKGROUND_RUNTIME.progress(state)
+
+
+def report_background_error(task_key, error):
+    """A failed DB error reporter must not kill the collection thread as well."""
+    BACKGROUND_RUNTIME.progress("error")
+    app.logger.warning("background_cycle_failed task=%s reason=%s", task_key, type(error).__name__)
+    try:
+        with app.app_context():
+            mark_automation_status(task_key, "error", type(error).__name__)
+    except Exception as status_error:
+        app.logger.warning("background_status_unavailable task=%s reason=%s", task_key, type(status_error).__name__)
 
 
 def automation_payload(task_key):
@@ -3261,6 +3282,7 @@ def backfill_price_history(groups, batch_size=2):
     batch = integrity["missing_symbols"][:batch_size]
     if not batch:
         return
+    db.session.rollback()  # Finished scalar reads; release the connection before network waits.
     fetched = []
     with ThreadPoolExecutor(max_workers=batch_size) as executor:
         futures = [executor.submit(fetch_price_history_from_binance, symbol) for symbol in batch]
@@ -6761,6 +6783,7 @@ def load_momentum_scores(force=False):
         return MOMENTUM_SCORE_CACHE
     try:
         candidates = momentum_price_candidates()
+        db.session.rollback()
         scored = []
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(fetch_momentum_structure, item) for item in candidates]
@@ -6982,6 +7005,7 @@ def load_open_interest_market_cap_opportunities(force=False):
     try:
         candidates = open_interest_market_candidates()
         symbols = [pair_base(item["symbol"]) for item in candidates]
+        db.session.rollback()
         try:
             source_errors = []
             try:
@@ -7917,6 +7941,12 @@ def refresh_diagnostics():
                     "dual_delays": (DUAL_FUTURES_CACHE.get("snapshot") or {}).get("upstream_delays", {})})
 
 
+@app.get("/api/runtime-health")
+@admin_required
+def runtime_health():
+    return jsonify({**BACKGROUND_RUNTIME.snapshot(), **memory_status()})
+
+
 def percent_delta(current, previous):
     return (current - previous) / previous * 100 if previous else None
 
@@ -8339,6 +8369,7 @@ def scan_daily_horn_signals():
         for timeframe in ("30m", "4h"):
             candidates.append((priority, group["symbol"], timeframe))
     candidates = sorted(candidates, reverse=True)[:360]
+    db.session.rollback()
     signals = []
     early_signals = []
     with ThreadPoolExecutor(max_workers=8) as executor:
@@ -8397,6 +8428,7 @@ def scan_intraday_early_trends():
             priority = row.get("futures_volume") or 0
             symbols.append((priority, group["symbol"]))
         symbols = [symbol for _, symbol in sorted(symbols, reverse=True)]
+        db.session.rollback()
         early_signals = []
         metric_count = 0
         with ThreadPoolExecutor(max_workers=6) as executor:
@@ -8917,6 +8949,7 @@ def scan_intraday_sudden_pumps():
             return 0
         threshold = runtime_number("sudden_pump_threshold", 15.0)
         symbols = sudden_pump_rough_candidates(snapshot, threshold)
+        db.session.rollback()
         if not symbols:
             return 0
         SUDDEN_PUMP_FAST_SCAN_UNTIL = max(
@@ -15105,6 +15138,7 @@ def background_spread_history():
             if OPPORTUNITY_BOOKS.dropped > warned_books:
                 app.logger.warning("Opportunity book history backlog exceeded bounded buffer; missing samples are not backfilled")
                 warned_books = OPPORTUNITY_BOOKS.dropped
+            BACKGROUND_RUNTIME.progress("success")
         except Exception:
             app.logger.exception("Spread history persistence failed; bounded buffer retained for retry")
         time.sleep(max(1, 30 - (time.monotonic() - started)))
@@ -15119,6 +15153,7 @@ def background_spot_market_refresh():
                 interval = runtime_interval("spot_market_refresh", MARKET_REFRESH_SECONDS)
                 db.session.remove()
                 spot_futures_snapshot()
+                BACKGROUND_RUNTIME.progress("success")
         except Exception as exc:
             MARKET_REFRESH_METRICS["last_error"] = f"{type(exc).__name__}: {exc}"
             with app.app_context():
@@ -15137,6 +15172,7 @@ def background_dual_market_refresh():
                 interval = runtime_interval("dual_market_refresh", MARKET_REFRESH_SECONDS)
                 db.session.remove()
                 dual_futures_snapshot()
+                BACKGROUND_RUNTIME.progress("success")
         except Exception:
             with app.app_context():
                 db.session.rollback()
@@ -15435,6 +15471,7 @@ def background_funding_history_sync(exchange="Binance"):
         with app.app_context():
             try:
                 run_funding_sync_batch(exchange, schedule)
+                BACKGROUND_RUNTIME.progress("success")
             except Exception:
                 db.session.rollback()
                 app.logger.exception("funding_history_batch_failed exchange=%s", exchange)
@@ -15529,6 +15566,7 @@ def background_long_trend_references():
                 if symbol is not None:
                     stage = "refresh"
                     sync_long_trend_reference(symbol, *targets[symbol], now)
+                    BACKGROUND_RUNTIME.progress("success")
             except Exception as error:
                 db.session.rollback()
                 if symbol:
@@ -15564,8 +15602,10 @@ def background_price_history_backfill():
                             seen.add(group["symbol"])
                 if groups:
                     backfill_price_history(groups)
-        except Exception:
-            db.session.rollback()
+                BACKGROUND_RUNTIME.progress("success")
+        except Exception as exc:
+            # The app context has already closed/rolled back the failed session.
+            report_background_error("price_history_backfill", exc)
         time.sleep(runtime_interval("price_history_backfill", PRICE_BACKFILL_SYNC_SECONDS))
 
 
@@ -15582,9 +15622,7 @@ def background_announcement_scan():
                     mark_automation_status("announcement_scan", "success")
                 LAST_ANNOUNCEMENT_SCAN_DATE = now.date()
             except Exception as exc:
-                with app.app_context():
-                    db.session.rollback()
-                    mark_automation_status("announcement_scan", "error", exc)
+                report_background_error("announcement_scan", exc)
         time.sleep(60)
 
 
@@ -15613,9 +15651,7 @@ def background_daily_horn_scan():
                     if lark_daily_trend_already_pushed(report_date):
                         LAST_LARK_TREND_PUSH_DATE = now.date()
             except Exception as exc:
-                with app.app_context():
-                    db.session.rollback()
-                    mark_automation_status("daily_horn_scan", "error", exc)
+                report_background_error("daily_horn_scan", exc)
         time.sleep(60)
 
 
@@ -15634,9 +15670,7 @@ def background_intraday_early_trend_scan():
                     mark_automation_status("intraday_early_trend_scan", "success")
                 last_slot = slot
         except Exception as exc:
-            with app.app_context():
-                db.session.rollback()
-                mark_automation_status("intraday_early_trend_scan", "error", exc)
+            report_background_error("intraday_early_trend_scan", exc)
         time.sleep(20)
 
 
@@ -15650,9 +15684,7 @@ def background_intraday_sudden_pump_scan():
                 scan_intraday_sudden_pumps()
                 mark_automation_status("intraday_sudden_pump_scan", "success")
         except Exception as exc:
-            with app.app_context():
-                db.session.rollback()
-                mark_automation_status("intraday_sudden_pump_scan", "error", exc)
+            report_background_error("intraday_sudden_pump_scan", exc)
         configured_delay = runtime_interval("sudden_pump_scan", 10)
         time.sleep(sudden_pump_scan_delay(configured_delay))
 
@@ -15666,9 +15698,7 @@ def background_transfer_network_sync():
                 refresh_public_transfer_networks()
                 mark_automation_status("transfer_network_sync", "success")
         except Exception as exc:
-            with app.app_context():
-                db.session.rollback()
-                mark_automation_status("transfer_network_sync", "error", exc)
+            report_background_error("transfer_network_sync", exc)
         time.sleep(runtime_interval("transfer_network_sync", TRANSFER_NETWORK_SYNC_SECONDS))
 
 
@@ -15681,9 +15711,7 @@ def background_index_component_sync():
                 refresh_index_components()
                 mark_automation_status("index_component_sync", "success")
         except Exception as exc:
-            with app.app_context():
-                db.session.rollback()
-                mark_automation_status("index_component_sync", "error", exc)
+            report_background_error("index_component_sync", exc)
         time.sleep(runtime_interval("index_component_sync", INDEX_COMPONENT_REFRESH_SECONDS))
 
 
@@ -15697,9 +15725,7 @@ def background_onchain_opportunity_refresh():
                 refresh_onchain_opportunities()
                 mark_automation_status("onchain_opportunity_refresh", "success")
         except Exception as exc:
-            with app.app_context():
-                db.session.rollback()
-                mark_automation_status("onchain_opportunity_refresh", "error", exc)
+            report_background_error("onchain_opportunity_refresh", exc)
         time.sleep(runtime_interval("onchain_opportunity_refresh", ONCHAIN_OPPORTUNITY_REFRESH_SECONDS))
 
 
@@ -15712,9 +15738,7 @@ def background_thought_analysis_push():
                 send_thought_analysis_push()
                 mark_automation_status("thought_analysis_push", "success")
         except Exception as exc:
-            with app.app_context():
-                db.session.rollback()
-                mark_automation_status("thought_analysis_push", "error", exc)
+            report_background_error("thought_analysis_push", exc)
         time.sleep(runtime_interval("thought_watch_scan", 300))
 
 
@@ -15729,9 +15753,7 @@ def background_hei_risk_watch():
                     send_thought_analysis_push(only_symbols={"HEI/USDT"})
                 mark_automation_status("hei_risk_watch", "success")
         except Exception as exc:
-            with app.app_context():
-                db.session.rollback()
-                mark_automation_status("hei_risk_watch", "error", exc)
+            report_background_error("hei_risk_watch", exc)
         time.sleep(runtime_interval("hei_watch_scan", 30))
 
 
@@ -15747,9 +15769,7 @@ def background_trend_horizon_validation():
                 ensure_ake_horizon_validation()
                 mark_automation_status("trend_horizon_validation", "success")
         except Exception as exc:
-            with app.app_context():
-                db.session.rollback()
-                mark_automation_status("trend_horizon_validation", "error", exc)
+            report_background_error("trend_horizon_validation", exc)
         time.sleep(60)
 
 
@@ -15763,9 +15783,7 @@ def background_push_signal_validation():
                 refresh_push_signal_validations()
                 mark_automation_status("push_signal_validation", "success")
         except Exception as exc:
-            with app.app_context():
-                db.session.rollback()
-                mark_automation_status("push_signal_validation", "error", exc)
+            report_background_error("push_signal_validation", exc)
         time.sleep(60)
 
 
@@ -15779,9 +15797,7 @@ def background_chat_retention_cleanup():
                 cleanup_expired_chat_history()
                 mark_automation_status("chat_retention_cleanup", "success")
         except Exception as exc:
-            with app.app_context():
-                db.session.rollback()
-                mark_automation_status("chat_retention_cleanup", "error", exc)
+            report_background_error("chat_retention_cleanup", exc)
         time.sleep(6 * 60 * 60)
 
 
@@ -15875,9 +15891,7 @@ def background_turnover_basis_watch():
                 with app.app_context():
                     mark_automation_status("turnover_basis_watch", "success")
         except Exception as exc:
-            with app.app_context():
-                db.session.rollback()
-                mark_automation_status("turnover_basis_watch", "error", exc)
+            report_background_error("turnover_basis_watch", exc)
         status_tick += 1
         time.sleep(5)
 
@@ -15900,9 +15914,27 @@ def background_dashboard_cache_refresh(refresh, seconds, rule_key=None, force=Fa
                     refresh(force=True)
                 else:
                     refresh()
+                BACKGROUND_RUNTIME.progress("success")
         except Exception:
             app.logger.warning("Dashboard cache refresh failed: %s", refresh.__name__)
         time.sleep(max(0.25, interval - (time.monotonic() - started_at)))
+
+
+def background_runtime_health():
+    logger = logging.getLogger("arbitrage.runtime")
+    logger.setLevel(logging.INFO)
+    while True:
+        state = {**BACKGROUND_RUNTIME.snapshot(), **memory_status()}
+        workers = state.pop("workers")
+        state.update(workers=len(workers), dead=[name for name, row in workers.items() if not row["alive"]],
+                     restarts=sum(row["restarts"] for row in workers.values()))
+        logger.info("runtime_health %s", json.dumps(state, separators=(",", ":")))
+        time.sleep(60)
+
+
+def background_thread(target, args=(), daemon=True, name=None):
+    return threading.Thread(target=BACKGROUND_RUNTIME.guard(target, app.logger), args=args,
+                            daemon=daemon, name=name)
 
 
 def start_background_workers():
@@ -15910,37 +15942,38 @@ def start_background_workers():
     if BACKGROUND_WORKERS_STARTED:
         return
     BACKGROUND_WORKERS_STARTED = True
-    threading.Thread(target=background_alert_pulses, daemon=True, name="alert-pulse-writer").start()
+    background_thread(target=background_runtime_health, daemon=True, name="runtime-health").start()
+    background_thread(target=background_alert_pulses, daemon=True, name="alert-pulse-writer").start()
     for name, refresh, seconds, rule_key, requires_metadata in (
         ("quotes", refresh_dashboard_opportunities, MARKET_REFRESH_SECONDS, "spot_market_refresh", False),
         ("major-analysis", fetch_major_market_overview, MAJOR_MARKET_CACHE_SECONDS, None, False),
         ("momentum", load_momentum_scores, MOMENTUM_SCORE_CACHE_SECONDS, None, True),
         ("oi-market-cap", load_open_interest_market_cap_opportunities, OI_MARKET_CAP_CACHE_SECONDS, None, True),
     ):
-        threading.Thread(target=background_dashboard_cache_refresh, args=(refresh, seconds, rule_key, rule_key is None, requires_metadata), daemon=True, name=f"dashboard-{name}").start()
-    threading.Thread(target=background_spot_market_refresh, daemon=True, name="spot-market-refresh").start()
-    threading.Thread(target=background_spread_history, daemon=True, name="spot-spread-history").start()
-    threading.Thread(target=background_dual_market_refresh, daemon=True, name="dual-market-refresh").start()
+        background_thread(target=background_dashboard_cache_refresh, args=(refresh, seconds, rule_key, rule_key is None, requires_metadata), daemon=True, name=f"dashboard-{name}").start()
+    background_thread(target=background_spot_market_refresh, daemon=True, name="spot-market-refresh").start()
+    background_thread(target=background_spread_history, daemon=True, name="spot-spread-history").start()
+    background_thread(target=background_dual_market_refresh, daemon=True, name="dual-market-refresh").start()
     for exchange in ("Binance", "Bybit", "OKX"):
-        threading.Thread(target=background_funding_history_sync, args=(exchange,), daemon=True,
+        background_thread(target=background_funding_history_sync, args=(exchange,), daemon=True,
                          name="funding-history-" + exchange.lower()).start()
-    threading.Thread(target=background_binance_settlement_tail, daemon=True, name="binance-settlement-tail").start()
-    threading.Thread(target=background_funding_alerts, daemon=True, name="funding-alerts").start()
-    threading.Thread(target=background_price_history_backfill, daemon=True, name="price-history-backfill").start()
-    threading.Thread(target=background_long_trend_references, daemon=True, name="long-trend-references").start()
-    threading.Thread(target=background_index_component_sync, daemon=True, name="index-component-sync").start()
-    threading.Thread(target=background_onchain_opportunity_refresh, daemon=True, name="onchain-opportunity-refresh").start()
-    threading.Thread(target=background_announcement_scan, daemon=True, name="announcement-scan").start()
-    threading.Thread(target=background_daily_horn_scan, daemon=True, name="daily-horn-scan").start()
-    threading.Thread(target=background_intraday_sudden_pump_scan, daemon=True, name="intraday-sudden-pump-scan").start()
-    threading.Thread(target=background_intraday_early_trend_scan, daemon=True, name="intraday-early-trend-scan").start()
-    threading.Thread(target=background_transfer_network_sync, daemon=True, name="transfer-network-sync").start()
-    threading.Thread(target=background_thought_analysis_push, daemon=True, name="thought-analysis-push").start()
-    threading.Thread(target=background_hei_risk_watch, daemon=True, name="hei-risk-watch").start()
-    threading.Thread(target=background_trend_horizon_validation, daemon=True, name="trend-horizon-validation").start()
-    threading.Thread(target=background_push_signal_validation, daemon=True, name="push-signal-validation").start()
-    threading.Thread(target=background_chat_retention_cleanup, daemon=True, name="chat-retention-cleanup").start()
-    threading.Thread(target=background_turnover_basis_watch, daemon=True, name="turnover-basis-watch").start()
+    background_thread(target=background_binance_settlement_tail, daemon=True, name="binance-settlement-tail").start()
+    background_thread(target=background_funding_alerts, daemon=True, name="funding-alerts").start()
+    background_thread(target=background_price_history_backfill, daemon=True, name="price-history-backfill").start()
+    background_thread(target=background_long_trend_references, daemon=True, name="long-trend-references").start()
+    background_thread(target=background_index_component_sync, daemon=True, name="index-component-sync").start()
+    background_thread(target=background_onchain_opportunity_refresh, daemon=True, name="onchain-opportunity-refresh").start()
+    background_thread(target=background_announcement_scan, daemon=True, name="announcement-scan").start()
+    background_thread(target=background_daily_horn_scan, daemon=True, name="daily-horn-scan").start()
+    background_thread(target=background_intraday_sudden_pump_scan, daemon=True, name="intraday-sudden-pump-scan").start()
+    background_thread(target=background_intraday_early_trend_scan, daemon=True, name="intraday-early-trend-scan").start()
+    background_thread(target=background_transfer_network_sync, daemon=True, name="transfer-network-sync").start()
+    background_thread(target=background_thought_analysis_push, daemon=True, name="thought-analysis-push").start()
+    background_thread(target=background_hei_risk_watch, daemon=True, name="hei-risk-watch").start()
+    background_thread(target=background_trend_horizon_validation, daemon=True, name="trend-horizon-validation").start()
+    background_thread(target=background_push_signal_validation, daemon=True, name="push-signal-validation").start()
+    background_thread(target=background_chat_retention_cleanup, daemon=True, name="chat-retention-cleanup").start()
+    background_thread(target=background_turnover_basis_watch, daemon=True, name="turnover-basis-watch").start()
 
 
 if __name__ == "__main__":

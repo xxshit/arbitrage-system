@@ -1,5 +1,6 @@
 import os
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -108,6 +109,25 @@ class PersonalOpportunityTests(unittest.TestCase):
         self.assertEqual(item['watch_state'],'unavailable')
         self.assertIsNone(item['open_spread']);self.assertIsNone(item['score'])
         self.assertFalse(item['scenario'])
+
+    def test_live_dual_watch_uses_actual_futures_futures_route_namespace(self):
+        self.assertEqual(self.put(strategy='dual',long_exchange='Bybit').status_code,200)
+        snapshot={'symbols':[{'symbol':'DEMO/USDT','rows':[dict(long_exchange='Bybit',short_exchange='Binance',
+                  open_spread=-.1,close_spread=-.08,funding_difference=-.002)]}]}
+        now=time.time()
+        path=('futures_futures','DEMO/USDT','Bybit','Binance')
+        quote=dict(long=dict(bid=100,ask=100.1,bid_qty=100,ask_qty=100),
+                   short=dict(bid=101,ask=101.1,bid_qty=100,ask_qty=100),long_at=now,short_at=now)
+        with patch.object(module,'load_latest_dual_futures_snapshot',return_value=snapshot), \
+                patch.object(module,'funding_statistics',return_value={}),patch.object(module,'mark_delisting_items'), \
+                patch.object(module.ALERT_STREAM_HUB,'screening_quotes',return_value={path:quote}) as read:
+            response=self.client.get('/api/arbitrage-thinking/simple?strategy=dual&scope=watched')
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(read.call_args.args[0],[path])
+        item=response.json['dual_simple'][0]
+        self.assertEqual(item['watch_state'],'outside')
+        self.assertAlmostEqual(item['open_spread'],100*(101/100.1-1))
+        self.assertAlmostEqual(item['close_spread'],1.1)
 
     def test_validation_route_is_read_only_scoped_and_has_no_fake_results(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(module,'OPPORTUNITY_VALIDATION',ValidationLedger(temp)):

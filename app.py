@@ -13433,7 +13433,7 @@ def simple_arbitrage_thinking():
                 if saved[0] == mode and saved not in current:
                     items.append(dict(symbol=saved[1],long_exchange=saved[2],short_exchange=saved[3],
                                       candidate=False,unavailable=True,score=None))
-            paths = [("spot_futures" if mode == "spot" else "dual_futures",i["symbol"],i["long_exchange"],i["short_exchange"]) for i in items]
+            paths = [("spot_futures" if mode == "spot" else "futures_futures",i["symbol"],i["long_exchange"],i["short_exchange"]) for i in items]
             now = time.time()
             quotes = ALERT_STREAM_HUB.screening_quotes(paths, now)
             for item,path in zip(items,paths):

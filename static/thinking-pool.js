@@ -43,17 +43,17 @@
   function reviewMarkup(data){
     const count=v=>Number.isFinite(v)?String(v):'—';
     const rows=(data.cohorts||[]).map(c=>`<details class="opportunity-review-record"><summary><b>${esc(c.symbol)}</b> · ${esc(c.long_exchange)} → ${esc(c.short_exchange)} · 当时 ${count(c.score)}分 · ${time(c.entered_at)}</summary>
-      <p>v${count(c.model)} · ${money(c.entry?.notional)} · 入选时现货卖一 ${qty(c.entry?.spot_ask)} / 合约买一 ${qty(c.entry?.future_bid)}；评分参数持有${count(c.entry?.score_hold_hours/24)}天，冻结不回改。</p>
+      <p>v${count(c.model)} · ${money(c.entry?.notional)} · 入选时现货卖一 ${qty(c.entry?.spot_ask)} / 合约买一 ${qty(c.entry?.future_bid)}；评分参数持有${count(c.entry?.score_hold_hours/24)}天，冻结不回改。首档参考容量 ${money(c.entry?.capacity)}${c.entry?.entry_size_ok===false?' · 不足或未知，仅观察行情':''}。</p>
       <div class="opportunity-book-scroll"><table class="opportunity-evidence-table"><thead><tr><th>之后</th><th>价差净测算</th><th>覆盖</th><th>已见净值范围</th><th>资费率累计（独立）</th></tr></thead><tbody>${Object.entries(reviewLabels).map(([h,label])=>{
         const r=c.outcomes?.[h],pending=(data.as_of<c.entered_at+Number(h))?'待到期':'待采集核验';
-        return `<tr><th>${label}</th><td>${r?.status==='observed'?`<b class="${color(r.net)}">${pct(r.net)}</b>`:esc(r?.reason||pending)}</td><td>${r?`${(Number(r.coverage)*100).toFixed(0)}%`:'—'}</td><td>${r?`${pct(r.low)} ～ ${pct(r.high)}`:'—'}</td><td>${r?.funding?`${pct(r.funding.total,4)} · ${Number(r.funding.count)||0}期${r.funding.complete?'':' · 部分记录'}`:'—'}</td></tr>`;
+        return `<tr><th>${label}</th><td>${r?.status==='observed'?`<b class="${color(r.net)}">${pct(r.net)}</b>`:Number.isFinite(r?.price_net)?`行情 ${pct(r.price_net)}<br><small>${esc(r.reason)}</small>`:esc(r?.reason||pending)}</td><td>${r?`${(Number(r.coverage)*100).toFixed(0)}%`:'—'}</td><td>${r?`${pct(r.low)} ～ ${pct(r.high)}`:'—'}</td><td>${r?.funding?`${pct(r.funding.total,4)} · ${Number(r.funding.count)||0}期${r.funding.complete?'':' · 部分记录'}`:'—'}</td></tr>`;
       }).join('')}</tbody></table></div><p>范围仅为有效首档已见值，可能漏见瞬间极值；到期覆盖不足不计为有效样本。${(c.entry?.risks||[]).map(esc).join('；')}</p></details>`).join('');
     return `<div class="opportunity-review-controls"><label>验证周期 <select onchange="ThinkingPool.reviewPeriod(this.value)">${Object.entries(reviewLabels).map(([h,label])=>`<option value="${h}" ${Number(h)===data.horizon?'selected':''}>${label}</option>`).join('')}</select></label><button type="button" onclick="ThinkingPool.reviewPeriod()">刷新记录</button></div>
       <p>近90天 · 冻结评分v${count(data.model)} · 标准${money(data.notional)} / ${count(data.score_hold_hours/24)}天评分参数；与当前个人测算设置独立。</p>
-      <p>样本 ${count(data.total)} · 待到期 ${count(data.pending)} · 有效观测 ${count(data.observed)} · 数据不足 ${count(data.insufficient)} · 待采集核验 ${count(data.awaiting_collection)}</p>
-      <div class="opportunity-book-scroll"><table class="opportunity-evidence-table"><thead><tr><th>当时评分</th><th>样本</th><th>有效观测</th><th>净价差为正</th><th>净价差中位数</th></tr></thead><tbody>${(data.bands||[]).map(b=>`<tr><th>${esc(b.label)}</th><td>${count(b.total)}</td><td>${count(b.observed)}</td><td>${count(b.positive)} / ${count(b.observed)}</td><td class="${color(b.median_net)}">${pct(b.median_net)}</td></tr>`).join('')}</tbody></table></div>
+      <p>样本 ${count(data.total)} · 待到期 ${count(data.pending)} · 行情完整 ${count(data.price_observed)} · 首档达标 ${count(data.observed)} · 数据或容量不足 ${count(data.insufficient)} · 待采集核验 ${count(data.awaiting_collection)}</p>
+      <div class="opportunity-book-scroll"><table class="opportunity-evidence-table"><thead><tr><th>当时评分</th><th>样本</th><th>行情完整</th><th>行情净价差中位数</th><th>首档达标</th><th>达标且净价差为正</th></tr></thead><tbody>${(data.bands||[]).map(b=>`<tr><th>${esc(b.label)}</th><td>${count(b.total)}</td><td>${count(b.price_observed)}</td><td class="${color(b.median_price_net)}">${pct(b.median_price_net)}</td><td>${count(b.observed)}</td><td>${count(b.positive)} / ${count(b.observed)}</td></tr>`).join('')}</tbody></table></div>
       <p>这是首档价格与冻结成本下的事后情景，不是成交收益或胜率。等数量双腿按实际后续价格测算；资费率累计独立显示，未按结算标记价换算成真实收入。观察期未结束、覆盖不足和配对变更都不算赢或输。</p>
-      <p>样本仅纳入入选时同步首档容量足够的路径，同路径7天一轮，包含低分；每120秒检查新入选，不能覆盖瞬时出现的全部候选。最早1小时才有结果，评分不会自动改写。${data.capacity_limited?'存储/路径上限已到，新样本暂停，旧样本保留。':''}</p>
+      <p>所有有新鲜同步报价的候选均可冻结，包含低分；同路径7天一轮，每120秒检查新入选，不能覆盖全部瞬间候选。行情观察保留容量不足样本；只有入选及终点首档足量、覆盖达标才计“首档达标”，不足不计可用收益。首个样本满1小时后才有结果，评分不会自动改写。${data.capacity_limited?'存储/路径上限已到，新样本暂停，旧样本保留。':''}</p>
       ${rows||'<p>尚无已冻结样本，后台将在有效同步报价出现后自动记录，不补造历史评分。</p>'}`;
   }
   function qualified(item,now=Date.now()/1000){

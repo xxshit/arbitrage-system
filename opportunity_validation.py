@@ -30,12 +30,13 @@ def packed(value):
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
 
 
-def close_scenario(entry, quote):
+def close_scenario(entry, quote, require_size=True):
     """Equal BASE quantity P/L; never subtract percentages with different bases."""
     quantity = entry["notional"]/entry["spot_ask"]
     long, short = quote["long"], quote["short"]
-    if any(not number(leg.get(field)) or leg[field]*.5 < quantity
-           for leg, field in ((long, "bid_qty"), (short, "ask_qty"))):
+    size_ok = all(number(leg.get(field)) and leg[field]*.5 >= quantity
+                  for leg, field in ((long, "bid_qty"), (short, "ask_qty")))
+    if require_size and not size_ok:
         return None
     spot, future = long["bid"], short["ask"]
     gross = 100*((spot-entry["spot_ask"])+(entry["future_bid"]-future))/entry["spot_ask"]
@@ -45,7 +46,7 @@ def close_scenario(entry, quote):
         return None
     return dict(gross=gross, fees=fees, slippage=entry["policy"]["slippage"],
                 net=gross-fees-entry["policy"]["slippage"],
-                spot_bid=spot, future_ask=future, quoted_at=quote["at"])
+                spot_bid=spot, future_ask=future, quoted_at=quote["at"], size_ok=size_ok)
 
 
 class ValidationLedger:
@@ -129,12 +130,13 @@ class ValidationLedger:
                 quote = item.get("_validation_quote")
                 source = item.get("_validation_source")
                 if (not quote or not source or not number(item.get("score"))
-                        or not number(quote.get("at")) or not 0 <= now-quote["at"] <= 4
-                        or quote.get("capacity") is None or quote["capacity"] < NOTIONAL):
+                        or not number(quote.get("at")) or not 0 <= now-quote["at"] <= 4):
                     continue
-                entry = dict(notional=NOTIONAL, score_hold_hours=HOLD_HOURS,
+                entry = dict(protocol=2, notional=NOTIONAL, score_hold_hours=HOLD_HOURS,
                     policy={k: POLICY[k] for k in ("spot_fee","futures_fee","slippage")},
                     spot_ask=quote["long"]["ask"], future_bid=quote["short"]["bid"],
+                    capacity=quote.get("capacity"),
+                    entry_size_ok=number(quote.get("capacity")) and quote["capacity"] >= NOTIONAL,
                     quoted_at=quote["at"], source=deepcopy(source),
                     raw_symbol=item["_validation_raw"], interval=item.get("short_interval"),
                     score_parts=deepcopy(item.get("score_parts", {})),
@@ -168,7 +170,9 @@ class ValidationLedger:
                                   and identities[path] != entry["source"])
                 if changed_source:
                     quote = None
-                value = close_scenario(entry, quote) if quote else None
+                # Observe price trajectories even when top-level size cannot
+                # support the reference amount; never count them as usable P/L.
+                value = close_scenario(entry, quote, require_size=False) if quote else None
                 at = quote["at"] if value else None
                 for horizon in HORIZONS:
                     key, due = str(horizon), record["entered"]+horizon
@@ -185,17 +189,21 @@ class ValidationLedger:
                             window["samples"] += 1
                             window["low"] = min(window["low"], value["net"]) if window["low"] is not None else value["net"]
                             window["high"] = max(window["high"], value["net"]) if window["high"] is not None else value["net"]
-                    terminal = value is not None and due <= at <= due+GRACE
+                    terminal = value is not None and now >= due and due <= at <= due+GRACE
                     if terminal or now > due+GRACE or changed_source:
                         if not terminal:
                             window["max_gap"] = max(window["max_gap"], max(0,min(now,due)-progress["last_at"]))
                         coverage = min(1,window["covered"]/horizon)
-                        valid = bool(terminal and coverage >= .8 and window["max_gap"] <= 300)
-                        reason = ("配对发生变更" if changed_source else "到期缺少足量同步首档" if not terminal
-                                  else "观测覆盖不足" if not valid else None)
+                        price_valid = bool(terminal and coverage >= .8 and window["max_gap"] <= 300)
+                        valid = bool(price_valid and entry.get("entry_size_ok", True) and value["size_ok"])
+                        reason = ("配对发生变更" if changed_source else "到期缺少同步首档" if not terminal
+                                  else "观测覆盖不足" if not price_valid
+                                  else "入选首档容量不足或未知，仅观察行情" if not entry.get("entry_size_ok", True)
+                                  else "终点首档容量不足，仅观察行情" if not value["size_ok"] else None)
                         progress["results"][key] = dict(due_at=due, observed_at=at if terminal else None,
                             status="observed" if valid else "insufficient", reason=reason,
                             net=value["net"] if valid else None,
+                            price_net=value["net"] if price_valid else None,
                             terminal=deepcopy(value) if terminal else None,
                             coverage=coverage, max_gap=window["max_gap"], samples=window["samples"],
                             low=window["low"], high=window["high"], funding=None, funding_final=changed_source)
@@ -263,9 +271,9 @@ class ValidationLedger:
     def read(self, now, symbol=None, exchange=None, horizon=86400, model=2):
         response = dict(model=model, horizon=horizon, as_of=now, notional=NOTIONAL,
             score_hold_hours=HOLD_HOURS, cohorts=[], bands=[], total=0, pending=0,
-            observed=0, insufficient=0, awaiting_collection=0, capacity_limited=self.capacity_limited,
+            observed=0, price_observed=0, insufficient=0, awaiting_collection=0, capacity_limited=self.capacity_limited,
             last_enrollment_at=self.last_enrollment_at,
-            note="上线后标准1000 USDT前瞻样本；同路径7天一轮。首档测算不等于成交或胜率，资费率累计未计入价差净测算。")
+            note="标准1000 USDT评分，所有同步候选七天一轮；行情观察与两端首档容量达标分别统计，均不等于成交或胜率，资费率独立。")
         conn = self.connect()
         if conn is None:
             return response
@@ -276,19 +284,27 @@ class ValidationLedger:
                 where += " AND c.strategy='spot' AND c.symbol=? AND c.long_exchange=? AND c.short_exchange='Binance'"
                 params += [symbol,exchange]
             buckets = {label: dict(label=label, total=0,pending=0,observed=0,insufficient=0,
-                                  awaiting_collection=0, positive=0, values=[]) for label in ("0–39","40–59","60–79","80–100")}
-            for score, entered, status, net in conn.execute(
-                    f"SELECT c.score,c.entered,o.status,o.net FROM cohorts c LEFT JOIN outcomes o ON o.id=c.id AND o.horizon=? WHERE {where}", [horizon,*params]):
+                                  awaiting_collection=0, positive=0, values=[],price_values=[]) for label in ("0–39","40–59","60–79","80–100")}
+            for score, entered, status, net, payload in conn.execute(
+                    f"SELECT c.score,c.entered,o.status,o.net,o.payload FROM cohorts c LEFT JOIN outcomes o ON o.id=c.id AND o.horizon=? WHERE {where}", [horizon,*params]):
                 label = "0–39" if score < 40 else "40–59" if score < 60 else "60–79" if score < 80 else "80–100"
                 bucket = buckets[label]
                 bucket["total"] += 1
                 state = status or ("pending" if now < entered+horizon else "awaiting_collection")
                 bucket[state] += 1
+                evidence = json.loads(payload) if payload else {}
+                price_net = evidence.get("price_net", net)
+                if number(price_net):
+                    bucket["price_values"].append(price_net)
                 if state == "observed" and number(net):
                     bucket["positive"] += net > 0
                     bucket["values"].append(net)
             for bucket in buckets.values():
                 values = bucket.pop("values")
+                prices = bucket.pop("price_values")
+                bucket["price_observed"] = len(prices)
+                bucket["median_price_net"] = statistics.median(prices) if prices else None
+                response["price_observed"] += len(prices)
                 bucket["median_net"] = statistics.median(values) if values else None
                 for field in ("total","pending","observed","insufficient","awaiting_collection"):
                     response[field] += bucket[field]

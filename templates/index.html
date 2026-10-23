@@ -11,7 +11,7 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20261018-workspace-refresh-v3">
   <link rel="stylesheet" href="{{ url_for('static', filename='workspace-layout.css') }}?v=20261020-market-align-v1">
   <link rel="stylesheet" href="{{ url_for('static', filename='spread-history.css') }}?v=20261020-spread-history-v1">
-    <link rel="stylesheet" href="{{ url_for('static', filename='thinking-pool.css') }}?v=20261023-thinking-evidence-v1">
+    <link rel="stylesheet" href="{{ url_for('static', filename='thinking-pool.css') }}?v=20261023-thinking-evidence-v2">
 </head>
 <body>
   <div id="mobileNavBackdrop" class="mobile-nav-backdrop" onclick="toggleMobileNav(false)" aria-hidden="true"></div>
@@ -146,7 +146,7 @@
   <section id="hedgePositionModal" class="modal hidden"><form class="dialog hedge-preview-dialog" onsubmit="event.preventDefault()"><button type="button" class="close" onclick="closeHedgePositionBuilder()">×</button><p class="eyebrow">TWO-LEG ORDER PREVIEW</p><h2 id="hedgePreviewTitle">建立对冲仓位</h2><p id="hedgePreviewRoute" class="hedge-preview-route"></p><div class="hedge-preview-fields"><label>投入金额（USDT）<input id="hedgeQuoteAmount" type="number" min="10" step="1" value="100" oninput="renderHedgePositionPreview()"></label><label>合约杠杆<input id="hedgeLeverage" type="number" min="1" max="10" step="1" value="1" oninput="renderHedgePositionPreview()"></label><label>最大允许滑点<input id="hedgeMaxSlippage" type="number" min="0" max="5" step="0.05" value="0.30" oninput="renderHedgePositionPreview()"><span>%</span></label></div><div id="hedgeOrderPreview" class="hedge-order-preview"></div><div class="hedge-preview-notice"><b>安全边界</b><span>价格和数量均为当前盘口估算；接入私有 API 后仍需在最终确认页核对两腿数量、实际成交、手续费和单腿失败处置。</span></div><button id="hedgeSubmitButton" class="primary submit" type="button" disabled>等待币安私有 API</button></form></section>
   <script src="{{ url_for('static', filename='spread-history.js') }}?v=20261021-opportunity-v1"></script>
   <script src="{{ url_for('static', filename='exchange-icons.js') }}?v=20261020-exchange-icons-v1"></script>
-<script src="{{ url_for('static', filename='thinking-pool.js') }}?v=20261023-thinking-evidence-v1"></script>
+<script src="{{ url_for('static', filename='thinking-pool.js') }}?v=20261023-thinking-evidence-v2"></script>
   <script src="{{ url_for('static', filename='app.js') }}?v=20261021-thinking-score-v2"></script>
   <script src="{{ url_for('static', filename='workspace-layout.js') }}?v=20261020-spot-no-guide-v1"></script>
 </body></html>

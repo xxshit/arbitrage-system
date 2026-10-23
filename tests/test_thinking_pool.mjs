@@ -170,3 +170,15 @@ test('personal bookmarks separate strategy and direction and keep missing paths 
   assert.match(source,/method:'PUT'/);
   assert.match(source,/'X-CSRF-Token':token/);
 });
+
+test('thin-book price trajectories are labelled observation and never displayed as capacity-qualified gains',()=>{
+  const ui=harness().ThinkingPool;
+  const html=ui.reviewMarkup({model:2,horizon:3600,notional:1000,score_hold_hours:72,as_of:4000,
+    total:1,price_observed:1,observed:0,pending:0,insufficient:1,awaiting_collection:0,
+    bands:[{label:'60–79',total:1,price_observed:1,observed:0,positive:0,median_price_net:.4}],
+    cohorts:[{symbol:'DEMO/USDT',long_exchange:'Gate',short_exchange:'Binance',score:72,entered_at:1,model:2,
+      entry:{notional:1000,score_hold_hours:72,capacity:50,entry_size_ok:false},
+      outcomes:{3600:{status:'insufficient',price_net:.4,net:null,coverage:1,reason:'入选首档容量不足或未知，仅观察行情'}}}]});
+  for(const s of ['行情 +0.40%','50 USDT','仅观察行情','首档达标 0','0 / 0','行情净价差中位数'])assert.ok(html.includes(s),s);
+  assert.ok(!html.includes('<b class="positive">+0.40%</b>'));
+});

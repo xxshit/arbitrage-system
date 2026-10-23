@@ -126,19 +126,42 @@ class ValidationTests(unittest.TestCase):
         self.ledger.observe({PATH:live(NOW+3722)},NOW+3722,{PATH:SOURCE})
         self.assertEqual(before,record["progress"]["results"]["3600"])
 
-    def test_insufficient_exit_size_and_stale_quotes_do_not_count(self):
+    def test_insufficient_exit_size_can_observe_price_but_stale_quotes_do_not_count(self):
         record=self.enroll()
         self.ledger.observe({PATH:live(NOW+5,quantity=1)},NOW+5,{PATH:SOURCE})
         self.ledger.observe({PATH:live(NOW+5)},NOW+20,{PATH:SOURCE})
-        self.assertEqual(record["progress"]["windows"]["3600"]["samples"],0)
+        self.assertEqual(record["progress"]["windows"]["3600"]["samples"],1)
         self.assertIsNone(close_scenario(record["entry"],quote_metrics(live(NOW,quantity=1),NOW)))
 
-    def test_unknown_entry_size_future_time_or_no_identity_skips_admission(self):
+    def test_unknown_entry_size_records_evidence_but_never_usable_returns(self):
         item=candidate();item["_validation_quote"]["capacity"]=None
-        self.assertEqual(self.ledger.enroll([item],NOW),0)
+        self.assertEqual(self.ledger.enroll([item],NOW),1)
+        self.tick_hour();self.ledger.persist(NOW+3600)
+        record=next(iter(self.ledger.active.values()))
+        self.assertFalse(record['entry']['entry_size_ok'])
+        result=record['progress']['results']['3600']
+        self.assertGreater(result['price_net'],0);self.assertIsNone(result['net'])
+        self.assertEqual(result['status'],'insufficient')
+        data=self.ledger.read(NOW+3600,horizon=3600)
+        self.assertEqual(data['price_observed'],1);self.assertEqual(data['observed'],0)
+        self.assertEqual(data['bands'][2]['positive'],0)
+
+    def test_future_time_or_no_identity_never_freezes_a_candidate(self):
         self.assertEqual(self.ledger.enroll([candidate(NOW+1)],NOW),0)
         item=candidate();item["_validation_source"]=None
         self.assertEqual(self.ledger.enroll([item],NOW),0)
+
+    def test_thin_exit_quotes_track_prices_but_do_not_count_as_size_qualified(self):
+        record=self.enroll()
+        for second in range(5,3601,5):
+            self.ledger.observe({PATH:live(NOW+second,100,100.1,quantity=1)},NOW+second,{PATH:SOURCE})
+        result=record['progress']['results']['3600']
+        self.assertEqual(result['coverage'],1);self.assertGreater(result['price_net'],0)
+        self.assertIsNone(result['net']);self.assertIn('终点首档容量不足',result['reason'])
+
+    def test_future_skew_does_not_finish_a_horizon_before_local_due_time(self):
+        self.enroll();self.ledger.observe({PATH:live(NOW+3600)},NOW+3599,{PATH:SOURCE})
+        self.assertFalse(next(iter(self.ledger.active.values()))['progress']['results'])
 
     def test_changed_mapping_invalidates_only_that_path(self):
         self.ledger.enroll([candidate(),candidate(venue="Bitget")],NOW)

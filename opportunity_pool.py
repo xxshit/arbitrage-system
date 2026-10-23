@@ -120,7 +120,7 @@ def quote_metrics(live, now):
                 at=min(stamps), long=long, short=short)
 
 
-def classify(row, funding, history, live, now, notional=1000, hold_hours=72, activity=None):
+def classify(row, funding, history, live, now, notional=1000, hold_hours=72, activity=None, include_unqualified=False):
     """Return a path-local candidate; a flat premium stays low-scored."""
     if row.get("price_divergence") or row.get("is_delisting"):
         return None
@@ -150,7 +150,8 @@ def classify(row, funding, history, live, now, notional=1000, hold_hours=72, act
                     and number(funding.get("total")) and funding["total"] > 0)
     funding_watch = higher or recent_above
     spread_watch = active or (number(opening) and opening >= .30)
-    if not funding_watch and not spread_watch:
+    eligible = bool(funding_watch or spread_watch)
+    if not eligible and not include_unqualified:
         return None
     reasons, risks, notes = [], [], []
     drivers = []
@@ -212,7 +213,7 @@ def classify(row, funding, history, live, now, notional=1000, hold_hours=72, act
     if funding_watch and not funding.get("complete"):
         # Incomplete funding must not veto an independently qualified spread.
         notes.append("结算历史覆盖不足，资费仅作观察，不计入净空间")
-    current = not risks and max(v for v in (spread_net, funding_net, -math.inf) if v is not None) >= POLICY["min_net"]
+    current = eligible and not risks and max(v for v in (spread_net, funding_net, -math.inf) if v is not None) >= POLICY["min_net"]
     net = max((v for v in (spread_net, funding_net) if v is not None), default=None)
     if current:
         reasons.append("当前盘口与历史退出情景扣除费用预算后仍有空间")
@@ -222,7 +223,7 @@ def classify(row, funding, history, live, now, notional=1000, hold_hours=72, act
     if row.get("listing_review"):
         scored["score"] = max(0, scored["score"]-20)
         scored["score_parts"]["deductions"] += 20
-    return dict(**scored,
+    return dict(**scored, candidate=eligible,
                 status="opportunity" if current else "watch",
                 status_label="当前有机会" if current else "值得观察",
                 reasons=reasons, risks=risks, notes=notes, drivers=drivers, trend=trend,

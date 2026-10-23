@@ -14,6 +14,7 @@ import math
 import io
 import base64
 import struct
+import sqlite3
 import ipaddress
 from html.parser import HTMLParser
 from functools import lru_cache, wraps
@@ -57,6 +58,8 @@ from spread_history import (
 )
 from opportunity_history import BookBuffer, ProfileCache
 from opportunity_activity import ActivityLedger
+from opportunity_validation import ValidationLedger, HORIZONS as VALIDATION_HORIZONS
+from opportunity_funding import funding_quality, funding_window
 from opportunity_pool import POLICY as OPPORTUNITY_POLICY, classify as classify_opportunity, funding_profile
 from persistence_policy import funding_write_due
 from snapshot_persistence import changed_values, equity_payload_update, update_snapshots
@@ -88,13 +91,17 @@ SPREAD_HISTORY_STORE = HistoryStore(Path(app.instance_path) / "spread-history")
 OPPORTUNITY_BOOKS = BookBuffer()
 OPPORTUNITY_PROFILES = ProfileCache()
 OPPORTUNITY_ACTIVITY = ActivityLedger(SPREAD_HISTORY_STORE.directory)
+OPPORTUNITY_VALIDATION = ValidationLedger(SPREAD_HISTORY_STORE.directory)
+OPPORTUNITY_QUALITY = {"at": 0, "data": {}}
+OPPORTUNITY_QUALITY_LOCK = threading.Lock()
 OPPORTUNITY_FUNDING_CACHE = {"at": 0, "key": frozenset(), "events": {}}
 OPPORTUNITY_FUNDING_LOCK = threading.Lock()
 
 
 @app.after_request
 def compress_alert_market_response(response):
-    # Only public market observations, never account/chat/security payloads.
+    # Market research (including personal path flags), never account/chat/secrets.
+    # Personal research responses remain authenticated and private, no-store.
     # Full-universe summaries are several MB before lossless HTTP compression.
     if request.path in {"/api/alerts", "/api/arbitrage-thinking/simple", "/api/arbitrage-thinking/book-history"} and response.status_code == 200 and response.mimetype == "application/json" and not response.is_streamed:
         response.vary.add("Accept-Encoding")
@@ -110,7 +117,7 @@ def compress_alert_market_response(response):
 
 @app.after_request
 def disable_live_view_response_cache(response):
-    if request.path in {"/api/dashboard", "/api/spot-futures", "/api/spot-futures/history", "/api/arbitrage-thinking/simple", "/api/arbitrage-thinking/book-history", "/api/dual-futures", "/api/equity-arbitrage", "/api/alerts", "/api/hedge-positions", "/api/daily-report/listings", "/api/market-metadata/delisted-symbols"}:
+    if request.path.startswith("/api/arbitrage-thinking/") or request.path in {"/api/dashboard", "/api/spot-futures", "/api/spot-futures/history", "/api/dual-futures", "/api/equity-arbitrage", "/api/alerts", "/api/hedge-positions", "/api/daily-report/listings", "/api/market-metadata/delisted-symbols"}:
         response.headers["Cache-Control"] = "private, no-store"
     return response
 
@@ -897,6 +904,19 @@ class UserAccount(db.Model):
     password_changed_at = db.Column(db.DateTime, default=datetime.now, nullable=True)
     chat_nav_hidden = db.Column(db.Boolean, nullable=False, default=False)
     created_at = db.Column(db.DateTime, default=datetime.now, nullable=False)
+
+
+class OpportunityWatch(db.Model):
+    """Personal route bookmark. Never enables ThoughtWatch, alerts or trading."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user_account.id"), nullable=False, index=True)
+    strategy = db.Column(db.String(8), nullable=False)
+    symbol = db.Column(db.String(30), nullable=False)
+    long_exchange = db.Column(db.String(30), nullable=False)
+    short_exchange = db.Column(db.String(30), nullable=False)
+    created_at = db.Column(db.DateTime, default=utc_now_naive, nullable=False)
+    __table_args__ = (db.UniqueConstraint("user_id", "strategy", "symbol", "long_exchange",
+                                        "short_exchange", name="uq_personal_opportunity_path"),)
 
 
 class HedgePosition(db.Model):
@@ -3954,6 +3974,9 @@ def spot_futures_snapshot():
     opportunity_quotes = ALERT_STREAM_HUB.screening_quotes(opportunity_paths)
     OPPORTUNITY_BOOKS.observe(opportunity_quotes, time.time())
     OPPORTUNITY_ACTIVITY.observe(opportunity_quotes, time.time())
+    OPPORTUNITY_VALIDATION.observe(opportunity_quotes, time.time(), {
+        ("spot_futures", group["symbol"], row["long_exchange"], "Binance"): opportunity_source(row)
+        for group in rows_by_symbol for row in group["rows"]})
     alerts_finished_at = time.perf_counter()
     captured_at = datetime.now()
     live_snapshot = {
@@ -13160,6 +13183,126 @@ def spot_futures_history_is_all_low_insurance(symbol, interval_hours):
     return all(is_low_insurance_funding(row.funding_rate, minimum) for row in rows)
 
 
+def opportunity_source(row):
+    route = row.get("alert_stream_route")
+    if not route or not route.get("long_key") or not route.get("short_key"):
+        return None
+    return dict(long_key=list(route["long_key"]), short_key=list(route["short_key"]),
+                long_factor=route.get("long_factor", 1), short_factor=route.get("short_factor", 1))
+
+
+def refresh_opportunity_quality(now):
+    """Stream one symbol at a time. Retain only small summaries, not 8D ORM rows."""
+    snapshot = load_latest_market_snapshot() or {"symbols": []}
+    intervals = {}
+    for group in snapshot["symbols"]:
+        if is_rwa_stock_pair(group["symbol"]):
+            continue
+        for row in group["rows"]:
+            raw = row.get("alert_stream_route", {}).get("short_key", (None, group["symbol"].replace("/", "")))[1]
+            intervals[raw] = row.get("funding_interval_hours")
+    requests = OPPORTUNITY_VALIDATION.funding_requests(now)
+    by_symbol = {}
+    for identity, horizon, raw, start, end in requests:
+        by_symbol.setdefault(raw, []).append((identity, horizon, start, end))
+    symbols = set(intervals) | set(by_symbol)
+    profiles, rows, previous, seen = {}, [], None, set()
+
+    def consume(raw, events):
+        seen.add(raw)
+        if raw in intervals:
+            profiles[raw] = funding_quality(events, now, intervals[raw])
+        for identity, horizon, start, end in by_symbol.get(raw, ()):
+            # Historical measurement end, not current cadence or future prints.
+            OPPORTUNITY_VALIDATION.set_funding(identity, horizon, funding_window(events, start, end), now)
+
+    try:
+        query = db.session.query(FundingRateRecord.symbol, FundingRateRecord.funding_time, FundingRateRecord.funding_rate).filter(
+            FundingRateRecord.symbol.in_(symbols), FundingRateRecord.funding_time >= int((now-8*86400)*1000),
+            FundingRateRecord.funding_time <= int(now*1000),
+        ).order_by(FundingRateRecord.symbol, FundingRateRecord.funding_time).yield_per(500)
+        for raw, stamp, rate in query:
+            if raw != previous:
+                if previous is not None:
+                    consume(previous, rows)
+                previous, rows = raw, []
+            rows.append((stamp/1000, rate))
+        if previous is not None:
+            consume(previous, rows)
+        for raw in symbols-seen:
+            consume(raw, [])
+    finally:
+        db.session.remove()
+    with OPPORTUNITY_QUALITY_LOCK:
+        OPPORTUNITY_QUALITY.update(at=now, data=profiles)
+
+
+@app.get("/api/arbitrage-thinking/validation")
+def opportunity_validation_api():
+    symbol, exchange = request.args.get("symbol"), request.args.get("exchange")
+    horizon = request.args.get("horizon", 86400, type=int)
+    if (horizon not in VALIDATION_HORIZONS or (symbol is None) != (exchange is None)
+            or (symbol is not None and (len(symbol) > 30 or not re.fullmatch(r"[\w]+/USDT", symbol)
+                                       or exchange not in SPREAD_HISTORY_VENUES))):
+        return jsonify(error="请选择有效现货路径及1小时、1天、3天或7天验证周期。"), 400
+    try:
+        return jsonify(OPPORTUNITY_VALIDATION.read(time.time(), symbol, exchange, horizon))
+    except (OSError, sqlite3.Error):
+        return jsonify(error="验证记录暂不可读，请稍后重试。"), 503
+
+
+def personal_opportunity_paths():
+    user = current_user()
+    if not user:
+        return []  # Pure helpers/tests; HTTP still requires the normal login middleware.
+    return [(row.strategy, row.symbol, row.long_exchange, row.short_exchange)
+            for row in OpportunityWatch.query.filter_by(user_id=user.id).order_by(OpportunityWatch.id).limit(200)]
+
+
+@app.route("/api/arbitrage-thinking/watchlist", methods=["GET", "PUT"])
+def opportunity_watchlist_api():
+    if request.method == "GET":
+        return jsonify(paths=personal_opportunity_paths())
+    if not session.get("csrf_token") or not valid_admin_csrf():
+        return jsonify(error="请求校验失败，请刷新后重试。"), 403
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or set(payload) != {"strategy","symbol","long_exchange","short_exchange","watched"}:
+        return jsonify(error="关注参数无效。"), 400
+    strategy, symbol, long, short = (payload[k] for k in ("strategy","symbol","long_exchange","short_exchange"))
+    if (strategy not in ("spot", "dual") or not isinstance(symbol, str) or len(symbol) > 30
+            or not re.fullmatch(r"[\w]+/USDT", symbol) or type(payload["watched"]) is not bool
+            or not isinstance(long, str) or not isinstance(short, str)
+            or (strategy == "spot" and (long not in SPREAD_HISTORY_VENUES or short != "Binance"))
+            or (strategy == "dual" and (long not in ("Binance","Bybit","OKX")
+                                       or short not in ("Binance","Bybit","OKX") or long == short))):
+        return jsonify(error="请选择有效策略和完整交易路径。"), 400
+    if payload["watched"]:
+        snapshot = load_latest_market_snapshot() if strategy == "spot" else load_latest_dual_futures_snapshot()
+        found = any(group["symbol"] == symbol and any(row["long_exchange"] == long and
+                    (strategy == "spot" or row["short_exchange"] == short) for row in group["rows"])
+                    for group in (snapshot or {}).get("symbols", []))
+        if not found or is_rwa_stock_pair(symbol):
+            return jsonify(error="当前市场中没有这条有效路径。"), 400
+    user = current_user()
+    # A user-scoped row lock serializes the cap without changing account fields.
+    db.session.query(UserAccount.id).filter(UserAccount.id == user.id).with_for_update().one()
+    saved = OpportunityWatch.query.filter_by(user_id=user.id).with_for_update().all()
+    row = next((r for r in saved if (r.strategy,r.symbol,r.long_exchange,r.short_exchange) == (strategy,symbol,long,short)), None)
+    if payload["watched"] and row is None:
+        if len(saved) >= 200:
+            return jsonify(error="每个账号最多关注200条路径。"), 400
+        db.session.add(OpportunityWatch(user_id=user.id,strategy=strategy,symbol=symbol,long_exchange=long,short_exchange=short))
+    elif not payload["watched"] and row is not None:
+        db.session.delete(row)
+    db.session.flush()
+    # MySQL repeatable-read may have an older authentication snapshot; read the
+    # locked current set before releasing this user's serialization lock.
+    paths = [(r.strategy,r.symbol,r.long_exchange,r.short_exchange) for r in
+             OpportunityWatch.query.filter_by(user_id=user.id).order_by(OpportunityWatch.id).with_for_update().all()]
+    db.session.commit()
+    return jsonify(ok=True, paths=paths)
+
+
 def opportunity_funding_events(groups):
     symbols = frozenset(
         row.get("alert_stream_route", {}).get("short_key", (None, group["symbol"].replace("/", "")))[1]
@@ -13180,7 +13323,7 @@ def opportunity_funding_events(groups):
         return events
 
 
-def spot_thinking_candidates(snapshot, notional, hold_hours):
+def spot_thinking_candidates(snapshot, notional, hold_hours, include_paths=(), for_validation=False):
     if not snapshot:
         return []
     # Do not enrich or reorder shared five-second market-cache objects.
@@ -13193,6 +13336,8 @@ def spot_thinking_candidates(snapshot, notional, hold_hours):
     enrich_price_changes(groups, {"change_24h": 86400})
     histories, _ = OPPORTUNITY_PROFILES.snapshot()
     activities = OPPORTUNITY_ACTIVITY.snapshot()
+    with OPPORTUNITY_QUALITY_LOCK:
+        qualities = OPPORTUNITY_QUALITY["data"]
     events = opportunity_funding_events(groups)
     now = time.time()
     paths = [("spot_futures", group["symbol"], row["long_exchange"], "Binance")
@@ -13211,6 +13356,7 @@ def spot_thinking_candidates(snapshot, notional, hold_hours):
                         short_interval=row.get("funding_interval_hours"),
                         long_volume=row.get("spot_volume"), short_volume=row.get("futures_volume"),
                         basis=row.get("basis"), change_24h=row.get("change_24h"),
+                        funding_quality=qualities.get(raw),
                         transfer_status=row.get("transfer_status"),
                         **{field: row.get(field) for field in (
                             "funding_previous", "funding_24h", "funding_3d",
@@ -13236,8 +13382,14 @@ def spot_thinking_candidates(snapshot, notional, hold_hours):
             funding, histories.get((item["symbol"], item["long_exchange"])),
             quotes.get(("spot_futures", item["symbol"], item["long_exchange"], "Binance")),
             now, notional, hold_hours,
-            activity=activities.get((item["symbol"], item["long_exchange"])))
+            activity=activities.get((item["symbol"], item["long_exchange"])),
+            include_unqualified=("spot", item["symbol"], item["long_exchange"], "Binance") in include_paths)
         if result:
+            if for_validation:
+                from opportunity_pool import quote_metrics
+                result["_validation_quote"] = quote_metrics(quotes.get(("spot_futures", item["symbol"], item["long_exchange"], "Binance")), now)
+                result["_validation_source"] = opportunity_source(row)
+                result["_validation_raw"] = row.get("alert_stream_route", {}).get("short_key", (None, item["symbol"].replace("/", "")))[1]
             output.append({**item, **result})
     return sorted(output, key=lambda item: (-item["score"], item["status"] != "opportunity",
                   -(item["scenario"]["net"] if item["scenario"]["net"] is not None else -1e9),
@@ -13249,10 +13401,15 @@ def simple_arbitrage_thinking():
     notional = request.args.get("notional", 1000, type=float)
     hold_hours = request.args.get("hold_hours", 72, type=int)
     strategy = request.args.get("strategy", "all")
+    scope = request.args.get("scope", "all")
     if (not math.isfinite(notional) or not 100 <= notional <= 1_000_000
-            or hold_hours not in (24, 72, 168) or strategy not in ("all", "spot", "dual")):
+            or hold_hours not in (24, 72, 168) or strategy not in ("all", "spot", "dual") or scope not in ("all", "watched")):
         return jsonify(error="参考金额需为100–1000000 USDT，测算持有期为24、72或168小时。"), 400
-    spot_simple = spot_thinking_candidates(load_latest_market_snapshot(), notional, hold_hours) if strategy != "dual" else []
+    watched = personal_opportunity_paths()
+    watched_set = set(watched)
+    spot_snapshot = load_latest_market_snapshot() if strategy != "dual" else None
+    spot_simple = spot_thinking_candidates(spot_snapshot, notional, hold_hours,
+        include_paths=watched_set if scope == "watched" else ()) if strategy != "dual" else []
     dual_snapshot = load_latest_dual_futures_snapshot() if strategy != "spot" else None
     dual_simple = []
     if dual_snapshot:
@@ -13262,11 +13419,36 @@ def simple_arbitrage_thinking():
             for row in group["rows"]:
                 # Current net funding must be positive and the Binance settlement side
                 # must also have remained positive across recent periods.
-                if row["open_spread"] > 0 and (row.get("funding_difference") or 0) > 0.005 and positive_binance_funding_streak(group["symbol"], minimum=0, periods=3):
-                    dual_simple.append({"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": row["short_exchange"], "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_difference"], "funding_current": row.get("funding_difference"), "funding_previous": stats.get("previous"), "funding_24h": stats.get("day_1"), "funding_3d": stats.get("day_3"), "long_is_spot": False, "short_is_spot": False, "long_interval": row.get("long_funding_interval_hours"), "short_interval": row.get("short_funding_interval_hours"), "long_open_interest": row.get("long_open_interest"), "short_open_interest": row.get("short_open_interest"), "long_volume": row.get("long_volume"), "short_volume": row.get("short_volume")})
+                eligible = row["open_spread"] > 0 and (row.get("funding_difference") or 0) > 0.005 and positive_binance_funding_streak(group["symbol"], minimum=0, periods=3)
+                if eligible or (scope == "watched" and ("dual",group["symbol"],row["long_exchange"],row["short_exchange"]) in watched_set):
+                    dual_simple.append({"candidate":bool(eligible),"symbol": group["symbol"], "long_exchange": row["long_exchange"], "short_exchange": row["short_exchange"], "open_spread": row["open_spread"], "close_spread": row["close_spread"], "funding": row["funding_difference"], "funding_current": row.get("funding_difference"), "funding_previous": stats.get("previous"), "funding_24h": stats.get("day_1"), "funding_3d": stats.get("day_3"), "long_is_spot": False, "short_is_spot": False, "long_interval": row.get("long_funding_interval_hours"), "short_interval": row.get("short_funding_interval_hours"), "long_open_interest": row.get("long_open_interest"), "short_open_interest": row.get("short_open_interest"), "long_volume": row.get("long_volume"), "short_volume": row.get("short_volume")})
+    if scope == "watched":
+        from opportunity_pool import quote_metrics
+        for mode, items, snapshot in (("spot",spot_simple,spot_snapshot),("dual",dual_simple,dual_snapshot)):
+            if strategy not in ("all",mode):
+                continue
+            items[:] = [item for item in items if (mode,item["symbol"],item["long_exchange"],item["short_exchange"]) in watched_set]
+            current = {(mode,i["symbol"],i["long_exchange"],i["short_exchange"]) for i in items}
+            for saved in watched:
+                if saved[0] == mode and saved not in current:
+                    items.append(dict(symbol=saved[1],long_exchange=saved[2],short_exchange=saved[3],
+                                      candidate=False,unavailable=True,score=None))
+            paths = [("spot_futures" if mode == "spot" else "dual_futures",i["symbol"],i["long_exchange"],i["short_exchange"]) for i in items]
+            now = time.time()
+            quotes = ALERT_STREAM_HUB.screening_quotes(paths, now)
+            for item,path in zip(items,paths):
+                live = quote_metrics(quotes.get(path), now)
+                if not live:
+                    # A saved path remains removable but never retains stale actionable prices.
+                    item.update(open_spread=None,close_spread=None,quoted_at=None,score=None,status="watch",
+                                scenario={},watch_state="unavailable")
+                else:
+                    item.update(open_spread=live["open_spread"],close_spread=live["close_spread"],quoted_at=live["at"],
+                                watch_state="candidate" if item.get("candidate") else "outside")
     mark_delisting_items(spot_simple)
     mark_delisting_items(dual_simple)
-    return jsonify({"spot_simple": spot_simple, "dual_simple": sorted(dual_simple, key=lambda item: item["open_spread"], reverse=True),
+    return jsonify({"spot_simple": spot_simple, "dual_simple": sorted(dual_simple, key=lambda item: item.get("open_spread") if item.get("open_spread") is not None else -math.inf, reverse=True),
+                    "watch_paths":watched,"scope":scope,
                     "policy": OPPORTUNITY_POLICY, "notional": notional, "hold_hours": hold_hours,
                     "updated_at_epoch": time.time(), "history_summary_at": OPPORTUNITY_PROFILES.snapshot()[1]})
 
@@ -15116,6 +15298,7 @@ def background_spread_history():
     last_profiles = 0
     warned_dropped = 0
     warned_books = 0
+    last_research = 0
     while True:
         started = time.monotonic()
         try:
@@ -15128,9 +15311,28 @@ def background_spread_history():
             if not OPPORTUNITY_ACTIVITY.ready:
                 OPPORTUNITY_ACTIVITY.restore()
             OPPORTUNITY_ACTIVITY.persist(time.time())
+            # Research failures cannot interrupt the original history writer.
+            try:
+                if not OPPORTUNITY_VALIDATION.ready:
+                    OPPORTUNITY_VALIDATION.restore()
+                OPPORTUNITY_VALIDATION.observe({}, time.time())  # Expire missed endpoints after outages.
+                if time.time()-last_research >= 120:
+                    with app.app_context():
+                        refresh_opportunity_quality(time.time())
+                        candidates = spot_thinking_candidates(load_latest_market_snapshot(), 1000, 72, for_validation=True)
+                        db.session.remove()
+                    OPPORTUNITY_VALIDATION.enroll(candidates, time.time())
+                    last_research = time.time()
+                OPPORTUNITY_VALIDATION.persist(time.time())
+            except Exception as exc:
+                app.logger.warning("Opportunity research update failed: %s", type(exc).__name__)
             if time.time() - last_cleanup >= 3600 and SPREAD_HISTORY_STORE.directory.is_dir():
                 SPREAD_HISTORY_STORE.maintain(time.time())
                 OPPORTUNITY_ACTIVITY.checkpoint()
+                try:
+                    OPPORTUNITY_VALIDATION.checkpoint()
+                except Exception as exc:
+                    app.logger.warning("Opportunity validation checkpoint failed: %s", type(exc).__name__)
                 last_cleanup = time.time()
             if SPREAD_HISTORY_BUFFER.dropped > warned_dropped:
                 app.logger.warning("Spread history persistence backlog exceeded bounded buffer; chart gaps retained")

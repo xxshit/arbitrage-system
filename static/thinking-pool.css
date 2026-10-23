@@ -22,6 +22,25 @@
 .opportunity-score {display:flex;flex-direction:column;align-items:center;gap:3px;padding:9px 3px;border-radius:8px;background:#eaf2f5;color:#175d83}
 .opportunity-score b {font-size:25px;line-height:1.1;font-variant-numeric:tabular-nums}
 .opportunity-score span {font-size:10px}
+.opportunity-score {border:0;cursor:pointer;min-width:0;width:100%}
+.opportunity-score:hover {background:#dcecf3}
+.opportunity-symbol-line {display:flex;align-items:center;gap:5px;min-width:0}
+.opportunity-watch {border:0;background:transparent;padding:0 2px;line-height:1;font-size:21px;color:#849c9b;cursor:pointer;flex-shrink:0}
+.opportunity-watch.saved {color:#be8300}
+.opportunity-watch:hover {background:transparent;color:#a67100}
+.opportunity-personal-controls {display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:#6c817d}
+.opportunity-personal-controls label {display:flex;align-items:center;gap:5px}
+.opportunity-personal-controls input {width:auto}
+.opportunity-personal-controls button {padding:4px 8px;font-size:11px}
+.opportunity-quality {padding:0;margin-top:6px;border:0;background:transparent;color:#607c87;font-size:10px;cursor:pointer;text-align:left;white-space:normal}
+.opportunity-quality:hover {background:transparent;text-decoration:underline}
+.opportunity-evidence-table {border-collapse:collapse;text-align:left}
+.opportunity-evidence-table th {color:#65828c}
+.opportunity-evidence-table td,.opportunity-evidence-table th {border-bottom:1px solid #e4ebe3}
+.opportunity-review-controls {display:flex;gap:12px;align-items:center;font-size:12px}
+.opportunity-review-record {border-top:1px solid #dfe8df;padding:12px 0}
+.opportunity-review-record summary {cursor:pointer;font-size:12px;line-height:1.6}
+.opportunity-path small,.opportunity-dual small {color:#8a7757;font-size:10px}
 .opportunity-interval {display:inline-block;padding:2px 6px;border-radius:4px;background:#fff0ce;color:#946200;font-size:10px;line-height:1.4;white-space:nowrap}
 .opportunity-actions {display:flex;flex-direction:column;gap:6px}
 .opportunity-spread {min-width:0;font-size:11px;font-variant-numeric:tabular-nums}

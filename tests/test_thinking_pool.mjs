@@ -128,3 +128,45 @@ test('period changes show different real ranges and observed counts without chan
   assert.ok(week.includes('历史未满'));assert.ok(week.includes('已见'));assert.equal(data.score,77);
   assert.ok(!ui.spreadEvidence(item).includes('正 0 次'));
 });
+
+test('multi-day funding quality distinguishes classified periods, gaps and stale summaries',()=>{
+  const ui=harness().ThinkingPool;
+  const w={count:8,classified:6,above:3,above_ratio:.5,negative:2,total:-.03,
+    recent_positive_streak:1,unknown_count:2,complete:false};
+  const sample={...item,funding_quality:{as_of:1000,windows:{'24h':w,'3d':w,'7d':w}}};
+  assert.match(ui.qualitySummary(sample,1001),/3D 3\/6 · 7D 3\/6/);
+  const html=ui.qualityMarkup(sample,1001);
+  for(const s of ['-0.0300%','3 / 6 期','50%','2 / 8 期','2期周期不明','覆盖不足','不是保底'])assert.ok(html.includes(s),s);
+  assert.match(ui.qualitySummary(sample,1361),/待更新/);
+  assert.match(ui.qualityMarkup(sample,1361),/仅供历史参考/);
+  assert.match(ui.qualitySummary(item,1000),/采集中/);
+  assert.ok(!ui.qualityMarkup(item,1000).includes('0.0000%'));
+});
+
+test('validation presentation never invents wins or conflates settled funding with price returns',()=>{
+  const ui=harness().ThinkingPool;
+  const data={model:2,horizon:3600,notional:1000,score_hold_hours:72,as_of:5000,
+    total:1,pending:0,observed:0,insufficient:1,awaiting_collection:0,
+    cohorts:[{symbol:'<bad>/USDT',long_exchange:'Gate',short_exchange:'Binance',score:19,entered_at:1,
+      model:2,entry:{notional:1000,score_hold_hours:72,risks:['<script>x</script>']},
+      outcomes:{3600:{status:'insufficient',reason:'覆盖不足',coverage:.1,net:null,low:-.5,high:1,
+        funding:{total:-.02,count:1,complete:false}}}}],bands:[{label:'0–39',total:1,observed:0,positive:0,median_net:null}]};
+  const html=ui.reviewMarkup(data);
+  for(const s of ['覆盖不足','-0.0200%','部分记录','同路径7天一轮','不是成交收益或胜率','未按结算标记价换算','&lt;bad&gt;','&lt;script&gt;'])assert.ok(html.includes(s),s);
+  assert.ok(!html.includes('<script>'));
+  assert.ok(!html.includes('100%胜率'));
+  assert.match(html,/待到期/);
+  assert.match(ui.reviewMarkup({...data,cohorts:[]}),/不补造历史评分/);
+});
+
+test('personal bookmarks separate strategy and direction and keep missing paths removable',()=>{
+  const ui=harness().ThinkingPool;
+  assert.notEqual(ui.watchKey(item,'spot'),ui.watchKey(item,'dual'));
+  assert.notEqual(ui.watchKey(item,'dual'),ui.watchKey({...item,long_exchange:'Binance',short_exchange:'Gate'},'dual'));
+  const row=ui.spotRow({...item,score:null,open_spread:null,close_spread:null,scenario:{},watch_state:'unavailable'});
+  assert.match(row,/路径暂无有效行情或已隔离/);
+  assert.match(row,/data-watch-strategy="spot"/);
+  assert.ok(!row.includes('>+0.50%</b>'));
+  assert.match(source,/method:'PUT'/);
+  assert.match(source,/'X-CSRF-Token':token/);
+});

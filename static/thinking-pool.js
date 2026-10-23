@@ -1,9 +1,10 @@
-/* Read-only, path-local research. Strategy tabs remain spot/dual, not drivers. */
+/* Path-local research with personal bookmarks; never orders or notifications. */
 (() => {
   'use strict';
-  const state={strategy:'spot',min_score:'all',status:'all',period:'7d',search:'',page:1,notional:1000,hold_hours:72,
+  const state={strategy:'spot',scope:'all',min_score:'all',status:'all',period:'7d',search:'',page:1,notional:1000,hold_hours:72,
     dual_sort:'open_spread',dual_direction:'desc',
-    data:null,error:'',controller:null,version:0,order:[],books:new Map(),bookPending:new Set()};
+    data:null,error:'',controller:null,version:0,order:[],books:new Map(),bookPending:new Set(),
+    watchPaths:[],watchPending:new Set(),auxVersion:0,reviewQuery:{},reviewController:null};
   const $=id=>document.getElementById(id);
   const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const pct=(value,digits=2)=>Number.isFinite(value)?`${value>0?'+':''}${value.toFixed(digits)}%`:'—';
@@ -13,6 +14,48 @@
   const key=item=>JSON.stringify([item.symbol,item.long_exchange,item.short_exchange]);
   const attr=item=>esc(encodeURIComponent(key(item)));
   const color=value=>Number.isFinite(value)?value>0?'positive':value<0?'negative':'neutral':'neutral';
+  const watchKey=(item,mode)=>JSON.stringify([mode,item.symbol,item.long_exchange,item.short_exchange]);
+  function watchButton(item,mode){
+    const k=watchKey(item,mode),saved=state.watchPaths.some(path=>JSON.stringify(path)===k);
+    return `<button type="button" class="opportunity-watch ${saved?'saved':''}" data-opportunity-key="${attr(item)}" data-watch-strategy="${mode}" onclick="ThinkingPool.watch(this)" aria-pressed="${saved}" title="${saved?'取消':'添加'}本策略、本交易路径的个人关注；不会开启报警或Lark" aria-label="${saved?'取消关注':'关注'} ${esc(item.symbol)} ${esc(item.long_exchange)} → ${esc(item.short_exchange)}" ${state.watchPending.has(k)?'disabled':''}>${saved?'★':'☆'}</button>`;
+  }
+  function qualityReady(item,now=Date.now()/1000){
+    const at=item.funding_quality?.as_of;
+    return Number.isFinite(at)&&now>=at&&now-at<=360;
+  }
+  function qualitySummary(item,now=Date.now()/1000){
+    const data=item.funding_quality,ready=qualityReady(item,now);
+    const part=key=>{const w=data?.windows?.[key];return w?.classified?`${w.above}/${w.classified}`:'—'};
+    return `<button type="button" class="opportunity-quality" data-opportunity-key="${attr(item)}" onclick="ThinkingPool.fundingQuality(this)" title="高于周期基准的已结算期数／可判定期数；点击查看负费率、覆盖和连续性">${ready?`超基准 3D ${part('3d')} · 7D ${part('7d')}`:data?'资费质量待更新':'资费质量采集中'} ›</button>`;
+  }
+  function qualityMarkup(item,now=Date.now()/1000){
+    const data=item.funding_quality;
+    if(!data)return '<p>正在整理实际结算记录，不将缺失值当作0或低保。</p>';
+    return `<p>统计截至 ${time(data.as_of)} 北京时间${qualityReady(item,now)?'':' · 汇总已过期，以下仅供历史参考'}</p>
+      <div class="opportunity-book-scroll"><table class="opportunity-evidence-table"><thead><tr><th>周期</th><th>已采累计</th><th>超基准 / 可判定</th><th>负费期</th><th>最近连正</th><th>覆盖</th></tr></thead><tbody>${[['24h','1天'],['3d','3天'],['7d','7天']].map(([key,label])=>{
+        const w=data.windows?.[key];if(!w)return `<tr><th>${label}</th><td colspan="5">未采集</td></tr>`;
+        return `<tr><th>${label}</th><td class="${color(w.total)}">${pct(w.total,4)}</td><td>${Number(w.above)||0} / ${Number(w.classified)||0} 期${Number.isFinite(w.above_ratio)?` · ${(w.above_ratio*100).toFixed(0)}%`:''}</td><td>${Number(w.negative)||0} / ${Number(w.count)||0} 期</td><td>${Number(w.recent_positive_streak)||0} 期</td><td>${w.complete?'推断覆盖齐备':'覆盖不足'}${w.unknown_count?` · ${Number(w.unknown_count)}期周期不明`:''}</td></tr>`;
+      }).join('')}</tbody></table></div>
+      <p>只统计已结算记录，保留负值；超基准比例的分母是周期可判定的期数，不把缺口当低保。基准按每日0.03%折算（4H为0.005%），不是保底。</p>
+      <p>历史周期来自相邻结算间隔推断，变长或缺采会保守标为不明；“覆盖齐备”不是交易所全量证明。最近连正遇负值、零值或周期不明即中断。当前评分权重不因这项新展示自动改变。</p>`;
+  }
+  const reviewLabels={3600:'1小时',86400:'1天',259200:'3天',604800:'7天'};
+  function reviewMarkup(data){
+    const count=v=>Number.isFinite(v)?String(v):'—';
+    const rows=(data.cohorts||[]).map(c=>`<details class="opportunity-review-record"><summary><b>${esc(c.symbol)}</b> · ${esc(c.long_exchange)} → ${esc(c.short_exchange)} · 当时 ${count(c.score)}分 · ${time(c.entered_at)}</summary>
+      <p>v${count(c.model)} · ${money(c.entry?.notional)} · 入选时现货卖一 ${qty(c.entry?.spot_ask)} / 合约买一 ${qty(c.entry?.future_bid)}；评分参数持有${count(c.entry?.score_hold_hours/24)}天，冻结不回改。</p>
+      <div class="opportunity-book-scroll"><table class="opportunity-evidence-table"><thead><tr><th>之后</th><th>价差净测算</th><th>覆盖</th><th>已见净值范围</th><th>资费率累计（独立）</th></tr></thead><tbody>${Object.entries(reviewLabels).map(([h,label])=>{
+        const r=c.outcomes?.[h],pending=(data.as_of<c.entered_at+Number(h))?'待到期':'待采集核验';
+        return `<tr><th>${label}</th><td>${r?.status==='observed'?`<b class="${color(r.net)}">${pct(r.net)}</b>`:esc(r?.reason||pending)}</td><td>${r?`${(Number(r.coverage)*100).toFixed(0)}%`:'—'}</td><td>${r?`${pct(r.low)} ～ ${pct(r.high)}`:'—'}</td><td>${r?.funding?`${pct(r.funding.total,4)} · ${Number(r.funding.count)||0}期${r.funding.complete?'':' · 部分记录'}`:'—'}</td></tr>`;
+      }).join('')}</tbody></table></div><p>范围仅为有效首档已见值，可能漏见瞬间极值；到期覆盖不足不计为有效样本。${(c.entry?.risks||[]).map(esc).join('；')}</p></details>`).join('');
+    return `<div class="opportunity-review-controls"><label>验证周期 <select onchange="ThinkingPool.reviewPeriod(this.value)">${Object.entries(reviewLabels).map(([h,label])=>`<option value="${h}" ${Number(h)===data.horizon?'selected':''}>${label}</option>`).join('')}</select></label><button type="button" onclick="ThinkingPool.reviewPeriod()">刷新记录</button></div>
+      <p>近90天 · 冻结评分v${count(data.model)} · 标准${money(data.notional)} / ${count(data.score_hold_hours/24)}天评分参数；与当前个人测算设置独立。</p>
+      <p>样本 ${count(data.total)} · 待到期 ${count(data.pending)} · 有效观测 ${count(data.observed)} · 数据不足 ${count(data.insufficient)} · 待采集核验 ${count(data.awaiting_collection)}</p>
+      <div class="opportunity-book-scroll"><table class="opportunity-evidence-table"><thead><tr><th>当时评分</th><th>样本</th><th>有效观测</th><th>净价差为正</th><th>净价差中位数</th></tr></thead><tbody>${(data.bands||[]).map(b=>`<tr><th>${esc(b.label)}</th><td>${count(b.total)}</td><td>${count(b.observed)}</td><td>${count(b.positive)} / ${count(b.observed)}</td><td class="${color(b.median_net)}">${pct(b.median_net)}</td></tr>`).join('')}</tbody></table></div>
+      <p>这是首档价格与冻结成本下的事后情景，不是成交收益或胜率。等数量双腿按实际后续价格测算；资费率累计独立显示，未按结算标记价换算成真实收入。观察期未结束、覆盖不足和配对变更都不算赢或输。</p>
+      <p>样本仅纳入入选时同步首档容量足够的路径，同路径7天一轮，包含低分；每120秒检查新入选，不能覆盖瞬时出现的全部候选。最早1小时才有结果，评分不会自动改写。${data.capacity_limited?'存储/路径上限已到，新样本暂停，旧样本保留。':''}</p>
+      ${rows||'<p>尚无已冻结样本，后台将在有效同步报价出现后自动记录，不补造历史评分。</p>'}`;
+  }
   function qualified(item,now=Date.now()/1000){
     return item.status==='opportunity'&&Number.isFinite(item.quoted_at)&&now-item.quoted_at<=10&&now>=item.quoted_at-2;
   }
@@ -73,6 +116,7 @@
       <label class="opportunity-spot-control">价差周期 <select id="opportunityPeriod" onchange="ThinkingPool.period(this.value)"><option value="24h">1天</option><option value="3d">3天</option><option value="7d" selected>7天</option><option value="15d">15天</option></select></label>
       <label class="opportunity-dual-control" hidden>排序 <select aria-label="期多期空候选排序" onchange="ThinkingPool.filter('dual_sort',this.value)">${[['open_spread','开差'],['close_spread','平差'],['funding_current','当前资费'],['funding_previous','上期资费'],['funding_24h','24H资费'],['funding_3d','3D资费']].map(([value,label])=>`<option value="${value}">${label}</option>`).join('')}</select><button type="button" id="opportunityDualDirection" onclick="ThinkingPool.direction()">↓</button></label>
       <button type="button" onclick="ThinkingPool.reorder()">重新排序</button></div>
+      <div class="opportunity-personal-controls"><label><input id="opportunityWatchOnly" type="checkbox" onchange="ThinkingPool.scope(this.checked)">我的关注</label><button class="opportunity-spot-control" type="button" onclick="ThinkingPool.review()">评分验证</button><span>关注仅保存本账号的策略与路径，不开启提醒</span></div>
       <details class="opportunity-method opportunity-spot-control"><summary>评分与测算设置 <span id="opportunitySettingsLabel"></span></summary>
         <form onsubmit="ThinkingPool.configure(event)"><label>现货参考金额（USDT）<input id="opportunityNotional" type="number" min="100" max="1000000" step="1" value="1000" required></label>
         <label>测算持有期<select id="opportunityHold"><option value="24">1天</option><option value="72" selected>3天</option><option value="168">7天</option></select></label><button type="submit">重新测算</button></form>
@@ -123,9 +167,9 @@
     const parts=item.score_parts||{};
     const scoreTitle=`复核优先级，不是胜率。价差 ${parts.spread??'—'}；资费 ${parts.funding??'—'}；当前净空间加分 ${parts.current??'—'}；风险扣分 ${parts.deductions??'—'}。${(item.risks||[]).join('；')}`;
     return `<article class="opportunity-row" data-render-key="${attr(item)}">
-      <div class="opportunity-main"><div class="opportunity-score" title="${esc(scoreTitle)}" tabindex="0" aria-label="${esc(displayScore(item))}分，${esc(scoreTitle)}"><b data-score-base="${Number.isFinite(item.score)?item.score:''}" data-score-current="${Number(parts.current)||0}" data-quoted-at="${Number.isFinite(item.quoted_at)?item.quoted_at:''}">${displayScore(item)??'—'}</b><span>评分</span></div>
-      <div class="opportunity-path"><button type="button" class="symbol-detail-trigger" data-market-symbol="${esc(item.symbol)}" data-delisting-announced="${item.delisting_announced?'1':'0'}" data-opportunity-key="${attr(item)}" onclick="ThinkingPool.symbol(this)">${esc(item.symbol)}</button>
-      <span>${exchangeName(item.long_exchange)}现货 → ${exchangeName('Binance')}合约 <b class="opportunity-interval" title="合约资金费结算周期">${Number.isFinite(item.short_interval)?`${esc(item.short_interval)}H`:'—'}</b></span>${transferStatusControl(item.transfer_status||{exchange:item.long_exchange},item.symbol)}</div>
+      <div class="opportunity-main"><button type="button" class="opportunity-score" title="${esc(scoreTitle)} 点击查看该路径评分后续验证" data-opportunity-key="${attr(item)}" onclick="ThinkingPool.review(this)" aria-label="${esc(displayScore(item))}分，查看评分验证"><b data-score-base="${Number.isFinite(item.score)?item.score:''}" data-score-current="${Number(parts.current)||0}" data-quoted-at="${Number.isFinite(item.quoted_at)?item.quoted_at:''}">${displayScore(item)??'—'}</b><span>评分</span></button>
+      <div class="opportunity-path"><div class="opportunity-symbol-line">${watchButton(item,'spot')}<button type="button" class="symbol-detail-trigger" data-market-symbol="${esc(item.symbol)}" data-delisting-announced="${item.delisting_announced?'1':'0'}" data-opportunity-key="${attr(item)}" onclick="ThinkingPool.symbol(this)">${esc(item.symbol)}</button></div>
+      <span>${exchangeName(item.long_exchange)}现货 → ${exchangeName('Binance')}合约 <b class="opportunity-interval" title="合约资金费结算周期">${Number.isFinite(item.short_interval)?`${esc(item.short_interval)}H`:'—'}</b></span>${transferStatusControl(item.transfer_status||{exchange:item.long_exchange},item.symbol)}${item.watch_state==='unavailable'?'<small>路径暂无有效行情或已隔离</small>':item.watch_state==='outside'?'<small>当前未入选，保留关注</small>':''}</div>
       <div class="opportunity-values"><span>开差 <b class="${color(item.open_spread)}">${pct(item.open_spread)}</b></span><span>平差 <b class="${color(item.close_spread)}">${pct(item.close_spread)}</b></span><button type="button" class="opportunity-net" data-opportunity-key="${attr(item)}" onclick="ThinkingPool.calculation(this)" title="扣除退出平差及成本预算的净价差情景，不计正资费；点击查看容量与明细">净价差 <b class="${scenarioReady(item)?color(item.scenario?.spread_net):'neutral'}" data-scenario-value="${scenarioReady(item)&&Number.isFinite(item.scenario?.spread_net)?item.scenario.spread_net:''}" data-scenario-at="${Number.isFinite(item.quoted_at)?item.quoted_at:''}">${scenarioReady(item)?pct(item.scenario?.spread_net):'—'}</b> ›</button></div>
       <div class="opportunity-funding" role="group" aria-label="币安资费详情">
         <span class="opportunity-funding-title">资费</span>
@@ -136,14 +180,14 @@
           ['3D','funding_3d','最近3天已结算滚动累计'],
           ['7D','funding_7d','最近7天已结算滚动累计'],
           ['30D','funding_30d','最近30天已结算滚动累计'],
-        ].map(([label,field,description])=>`<span class="opportunity-funding-item" title="${description}" data-funding-field="${field}"><span>${label}</span><b class="${color(item[field])}">${pct(item[field],4)}</b></span>`).join('')}</div>
+        ].map(([label,field,description])=>`<span class="opportunity-funding-item" title="${description}" data-funding-field="${field}"><span>${label}</span><b class="${color(item[field])}">${pct(item[field],4)}</b></span>`).join('')}</div>${qualitySummary(item)}
       </div>
       ${spreadEvidence(item)}
       <div class="opportunity-actions"><button type="button" class="opportunity-history" data-opportunity-key="${attr(item)}" onclick="ThinkingPool.history(this)">曲线</button><button type="button" class="opportunity-history" data-opportunity-key="${attr(item)}" onclick="ThinkingPool.books(this)">盘口</button></div></div></article>`;
   }
   function dualRow(item){
     // Keep the pre-existing dual criteria and measurements; no spot grading.
-    return `<article class="opportunity-row opportunity-dual" data-render-key="${attr(item)}"><div><b data-market-symbol="${esc(item.symbol)}">${esc(item.symbol)}</b><p>${exchangeName(item.long_exchange)} 合约多 → ${exchangeName(item.short_exchange)} 合约空</p></div>
+    return `<article class="opportunity-row opportunity-dual" data-render-key="${attr(item)}"><div><div class="opportunity-symbol-line">${watchButton(item,'dual')}<b data-market-symbol="${esc(item.symbol)}">${esc(item.symbol)}</b></div><p>${exchangeName(item.long_exchange)} 合约多 → ${exchangeName(item.short_exchange)} 合约空</p>${item.watch_state==='unavailable'?'<small>路径暂无有效行情或已隔离</small>':item.watch_state==='outside'?'<small>当前未入选，保留关注</small>':''}</div>
       <div class="opportunity-values"><span>开差 <b class="${color(item.open_spread)}">${pct(item.open_spread)}</b></span><span>平差 <b class="${color(item.close_spread)}">${pct(item.close_spread)}</b></span></div>
       <div class="opportunity-values">${[['当前资费差',item.funding_current],['上期',item.funding_previous],['24H',item.funding_24h],['3D',item.funding_3d]].map(([label,value])=>`<span>${label} <b class="${color(value)}">${pct(value,4)}</b></span>`).join('')}</div>
       <div class="opportunity-values"><span>多：${esc(item.long_interval||'—')}H · 量 ${liquidityAmount(item.long_volume)} · OI ${liquidityAmount(item.long_open_interest)}</span><span>空：${esc(item.short_interval||'—')}H · 量 ${liquidityAmount(item.short_volume)} · OI ${liquidityAmount(item.short_open_interest)}</span></div></article>`;
@@ -177,11 +221,11 @@
     const controller=new AbortController(),version=++state.version;state.controller=controller;
     const timeout=setTimeout(()=>controller.abort(),12000);
     try{
-      const response=await fetch(`/api/arbitrage-thinking/simple?${new URLSearchParams({strategy:state.strategy,notional:state.notional,hold_hours:state.hold_hours})}`,{signal:controller.signal,cache:'no-store'});
+      const response=await fetch(`/api/arbitrage-thinking/simple?${new URLSearchParams({strategy:state.strategy,scope:state.scope,notional:state.notional,hold_hours:state.hold_hours})}`,{signal:controller.signal,cache:'no-store'});
       if(!response.ok)throw new Error(response.status===401?'登录已失效，请重新登录':'候选读取失败');
       const data=await response.json();
       if(version!==state.version)return state.data;
-      state.data=data;state.error='';render();return data;
+      state.data=data;state.watchPaths=data.watch_paths||[];state.error='';render();return data;
     }catch(error){
       if(version!==state.version)return state.data;
       state.error=error.name==='AbortError'?'读取超时':error.message;render();return state.data;
@@ -192,10 +236,29 @@
   }
   function itemFrom(button){
     const k=decodeURIComponent(button.dataset.opportunityKey);
-    return (state.data?.spot_simple||[]).find(item=>key(item)===k);
+    return [...(state.data?.spot_simple||[]),...(state.data?.dual_simple||[])].find(item=>key(item)===k);
   }
   const api={
-    load,select,ordered,qualified,displayScore,scenarioReady,scenarioMarkup,spotRow,spreadEvidence,dualRow,dualSorted,pct,
+    load,select,ordered,qualified,displayScore,scenarioReady,scenarioMarkup,qualityReady,qualitySummary,qualityMarkup,reviewMarkup,watchKey,spotRow,spreadEvidence,dualRow,dualSorted,pct,
+    scope(checked){resetRequest();state.scope=checked?'watched':'all';state.min_score='all';$('opportunityScore').value='all';render();loadSimpleThinking()},
+    async watch(button){
+      const item=itemFrom(button),mode=button.dataset.watchStrategy;if(!item||!['spot','dual'].includes(mode))return;
+      const k=watchKey(item,mode);if(state.watchPending.has(k))return;
+      const watched=!state.watchPaths.some(path=>JSON.stringify(path)===k);
+      state.watchPending.add(k);button.disabled=true;
+      const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),10000);
+      try{
+        const token=typeof authState!=='undefined'?authState.csrf_token:'';
+        if(!token)throw new Error('登录校验尚未完成，请稍后重试');
+        const response=await fetch('/api/arbitrage-thinking/watchlist',{method:'PUT',signal:controller.signal,cache:'no-store',headers:{'Content-Type':'application/json','X-CSRF-Token':token},body:JSON.stringify({strategy:mode,symbol:item.symbol,long_exchange:item.long_exchange,short_exchange:item.short_exchange,watched})});
+        const data=await response.json();if(!response.ok)throw new Error(data.error||'关注保存失败');
+        ++state.version;state.controller?.abort();state.controller=null;
+        state.watchPaths=data.paths||[];
+        if(state.data&&state.scope==='watched'&&!watched){const field=mode==='spot'?'spot_simple':'dual_simple';state.data[field]=(state.data[field]||[]).filter(row=>watchKey(row,mode)!==k)}
+        render();loadSimpleThinking();
+      }catch(error){$('opportunityNotice').textContent=error.name==='AbortError'?'关注保存超时，请重试确认状态':error.message}
+      finally{clearTimeout(timeout);state.watchPending.delete(k);button.disabled=false;document.querySelectorAll('[data-watch-strategy]').forEach(node=>{if(node.dataset.opportunityKey===button.dataset.opportunityKey&&node.dataset.watchStrategy===mode)node.disabled=false})}
+    },
     strategy(value){if(!['spot','dual'].includes(value)||value===state.strategy)return;resetRequest();state.strategy=value;state.books.clear();$('opportunityRows').innerHTML='<p class="loading">正在读取候选…</p>';render();loadSimpleThinking()},
     filter(name,value){if(!['min_score','status','search','dual_sort'].includes(name))return;state[name]=value;state.page=1;render(true)},
     period(value){if(!Object.hasOwn(periodLabels,value))return;state.period=value;render()},
@@ -211,7 +274,29 @@
       $('opportunityAuxBody').innerHTML=`<div data-calculation-key="${attr(item)}">${scenarioMarkup(item)}</div>`;
       if(!$('opportunityAux').open)$('opportunityAux').showModal();
     },
-    closeAux(){$('opportunityAux')?.close()},
+    fundingQuality(button){const item=itemFrom(button);if(!item)return;$('opportunityAuxTitle').textContent=`${item.symbol} · Binance合约 · 资费质量`;$('opportunityAuxBody').innerHTML=qualityMarkup(item);if(!$('opportunityAux').open)$('opportunityAux').showModal()},
+    async review(button){
+      const item=button?itemFrom(button):null;if(button&&!item)return;
+      state.reviewQuery=item?{symbol:item.symbol,exchange:item.long_exchange,horizon:86400}:{horizon:86400};
+      return api.reviewPeriod();
+    },
+    async reviewPeriod(horizon){
+      if(horizon!==undefined){if(!Object.hasOwn(reviewLabels,horizon))return;state.reviewQuery.horizon=Number(horizon)}
+      const query={...state.reviewQuery},version=++state.auxVersion;
+      state.reviewController?.abort();const controller=new AbortController();state.reviewController=controller;
+      $('opportunityAuxTitle').textContent=query.symbol?`${query.symbol} · ${query.exchange} → Binance · 评分验证`:'评分后续验证 · 现多期空';
+      $('opportunityAuxBody').innerHTML=`<div data-review-token="${version}">正在读取冻结样本…</div>`;
+      if(!$('opportunityAux').open)$('opportunityAux').showModal();
+      const timeout=setTimeout(()=>controller.abort(),12000);
+      try{
+        const response=await fetch(`/api/arbitrage-thinking/validation?${new URLSearchParams(query)}`,{signal:controller.signal,cache:'no-store'});
+        const data=await response.json();if(!response.ok)throw new Error(data.error||'验证读取失败');
+        if(version!==state.auxVersion)return;
+        document.querySelectorAll('[data-review-token]').forEach(node=>{if(node.dataset.reviewToken===String(version))node.innerHTML=reviewMarkup(data)});
+      }catch(error){if(version===state.auxVersion)document.querySelectorAll('[data-review-token]').forEach(node=>{if(node.dataset.reviewToken===String(version))node.textContent=error.name==='AbortError'?'读取超时，可关闭后重试':error.message})}
+      finally{clearTimeout(timeout);if(version===state.auxVersion)state.reviewController=null}
+    },
+    closeAux(){++state.auxVersion;state.reviewController?.abort();$('opportunityAux')?.close()},
     events(button){
       const item=itemFrom(button);if(!item)return;
       $('opportunityAuxTitle').textContent=`${item.symbol} · ${item.long_exchange} → Binance · ${periodLabels[state.period]}打开记录`;

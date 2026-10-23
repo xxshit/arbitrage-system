@@ -24,6 +24,26 @@ def quote(at=NOW):
 
 
 class OpportunityHistoryTests(unittest.TestCase):
+    def test_summary_queries_stream_primary_key_without_sorting_payload_blobs(self):
+        self.fill()
+        queries = []
+        connect = self.store.connect
+        def traced(*args, **kwargs):
+            conn = connect(*args, **kwargs)
+            conn.set_trace_callback(queries.append)
+            return conn
+        with patch.object(self.store, "connect", side_effect=traced):
+            ProfileCache().refresh(self.store, NOW)
+        scans = [query for query in queries if "payload FROM history" in query]
+        self.assertGreaterEqual(len(scans), 2)
+        for query in scans:
+            conn = connect(self.store.day(NOW-3600))
+            try:
+                plan = conn.execute("EXPLAIN QUERY PLAN "+query).fetchall()
+                self.assertNotIn("TEMP B-TREE", str(plan))
+            finally:
+                conn.close()
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.store=HistoryStore(self.temp.name)

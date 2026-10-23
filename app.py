@@ -15923,6 +15923,10 @@ def background_dashboard_cache_refresh(refresh, seconds, rule_key=None, force=Fa
 def background_runtime_health():
     logger = logging.getLogger("arbitrage.runtime")
     logger.setLevel(logging.INFO)
+    # Gunicorn doesn't configure the root logger; explicitly reuse Flask's
+    # stderr handler, rather than silently dropping INFO health observations.
+    logger.handlers = list(app.logger.handlers) or [logging.StreamHandler()]
+    logger.propagate = False
     while True:
         state = {**BACKGROUND_RUNTIME.snapshot(), **memory_status()}
         workers = state.pop("workers")

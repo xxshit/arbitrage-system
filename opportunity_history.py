@@ -110,7 +110,10 @@ class ProfileCache:
             connection = store.connect(day)
             try:
                 for symbol, exchange, metric, payload in connection.execute(
-                    "SELECT symbol,exchange,metric,payload FROM history WHERE metric IN ('open','close') AND hour_at>=? AND hour_at<=? ORDER BY hour_at",
+                    # The WITHOUT ROWID primary key already orders hours WITHIN
+                    # each path/metric. Global hour ordering sorts every BLOB in
+                    # a temporary B-tree and is unnecessary for these accumulators.
+                    "SELECT symbol,exchange,metric,payload FROM history WHERE metric IN ('open','close') AND hour_at>=? AND hour_at<=? ORDER BY symbol,exchange,metric,hour_at",
                     (int(start)//3600*3600, int(now)//3600*3600),
                 ):
                     key = (symbol, exchange)
@@ -181,7 +184,9 @@ class ProfileCache:
                     connection = store.connect(day)
                     ranges = {}
                     for symbol, exchange, hour, payload in connection.execute(
-                            "SELECT symbol,exchange,hour_at,payload FROM history WHERE metric='open' ORDER BY hour_at"):
+                            # Each hour writes a distinct numeric-array slot;
+                            # no ordering (and no sorting of BLOBs) is needed.
+                            "SELECT symbol,exchange,hour_at,payload FROM history WHERE metric='open'"):
                         key = symbol, exchange
                         if key not in ranges and len(ranges) >= 4000:
                             continue

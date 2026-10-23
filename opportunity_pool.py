@@ -191,7 +191,7 @@ def classify(row, funding, history, live, now, notional=1000, hold_hours=72, act
     if not ready or not history.get("close_ready"):
         risks.append("平差历史积累中，不能确认当前净空间")
     exit_gap = max(0, history["exit_q75"]) if ready and history.get("close_ready") else None
-    spread_net = funding_net = funding_scenario = fee_budget = None
+    spread_net = funding_net = funding_scenario = fee_budget = adverse = None
     if quote and exit_gap is not None:
         # Equal base quantity. Scenario fixes spot exit price to today's ask,
         # futures exit to that price × historical q75 closing spread. No credit
@@ -232,6 +232,9 @@ def classify(row, funding, history, live, now, notional=1000, hold_hours=72, act
                 quoted_at=quote["at"] if quote else None,
                 scenario=dict(net=net, spread_net=spread_net, funding_net=funding_net,
                               funding_income=funding_scenario, exit_spread=exit_gap,
+                              adverse_funding=adverse,
+                              calculable=bool(quote and exit_gap is not None and rate_fresh and base is not None
+                                              and quote["capacity"] is not None and quote["capacity"] >= notional),
                               fee_budget=fee_budget, slippage=POLICY["slippage"],
                               notional=notional, hold_hours=hold_hours,
                               assumptions="现货退出价格不变，平差取近24H的75分位；资费按当前与已结算24H较低值折半。费用为预算，不是账户费率或收益承诺。"))

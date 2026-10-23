@@ -21,6 +21,27 @@
     const stale=Number.isFinite(item.quoted_at)&&(now-item.quoted_at>10||now<item.quoted_at-2);
     return Math.max(0,Math.round(item.score-(stale?(item.score_parts?.current||0)+15:0)));
   }
+  function scenarioReady(item,now=Date.now()/1000){
+    return item.scenario?.calculable===true&&Number.isFinite(item.quoted_at)&&
+      now-item.quoted_at<=10&&now>=item.quoted_at-2;
+  }
+  function scenarioMarkup(item,now=Date.now()/1000){
+    const s=item.scenario||{},ready=scenarioReady(item,now);
+    const value=v=>ready?pct(v):'—';
+    return `<p>${money(s.notional)} 现货参考金额 · 持有 ${Number.isFinite(s.hold_hours)?esc(s.hold_hours/24):'—'} 天 · 报价 ${time(item.quoted_at)} 北京时间</p>
+      <div class="opportunity-scenario-totals"><div>净价差情景<b class="${ready?color(s.spread_net):'neutral'}">${value(s.spread_net)}</b><small>不计正资费收入</small></div><div>含资费情景<b class="${ready?color(s.funding_net):'neutral'}">${value(s.funding_net)}</b><small>未来资费不保证延续</small></div></div>
+      <dl class="opportunity-calculation">${[
+        ['当前开差',pct(item.open_spread)],
+        ['退出平差预算',Number.isFinite(s.exit_spread)?pct(Math.max(0,s.exit_spread)*1.1):'—'],
+        ['四笔交易费用预算',pct(s.fee_budget)],['滑点预算',pct(s.slippage)],
+        ['不利资费预算',pct(s.adverse_funding)],['正资费收入情景',pct(s.funding_income)],
+        ['首档参考容量',money(item.capacity_usdt)],
+      ].map(([label,v])=>`<div><dt>${label}</dt><dd>${v}</dd></div>`).join('')}</dl>
+      ${!ready?'<p class="opportunity-calculation-warning">当前盘口、数量、参考金额或资费／平差数据未满足测算条件，不显示可用净空间。</p>':''}
+      ${(item.risks||[]).length?`<p class="opportunity-calculation-warning">${(item.risks||[]).map(esc).join('；')}</p>`:''}
+      <p>容量按双腿四个首档最小数量的50%折算，不是全盘口深度，不保证成交。超出此金额不外推首档价格。</p>
+      <p>${esc(s.assumptions||'费用为预算，并非账户费率；退出价格和资费为假设，不是收益保证。')}</p>`;
+  }
   function select(items,filters,now=Date.now()/1000){
     return (items||[]).filter(item=>
       (filters.min_score==='all'||!filters.min_score||displayScore(item,now)>=Number(filters.min_score))&&
@@ -105,7 +126,7 @@
       <div class="opportunity-main"><div class="opportunity-score" title="${esc(scoreTitle)}" tabindex="0" aria-label="${esc(displayScore(item))}分，${esc(scoreTitle)}"><b data-score-base="${Number.isFinite(item.score)?item.score:''}" data-score-current="${Number(parts.current)||0}" data-quoted-at="${Number.isFinite(item.quoted_at)?item.quoted_at:''}">${displayScore(item)??'—'}</b><span>评分</span></div>
       <div class="opportunity-path"><button type="button" class="symbol-detail-trigger" data-market-symbol="${esc(item.symbol)}" data-delisting-announced="${item.delisting_announced?'1':'0'}" data-opportunity-key="${attr(item)}" onclick="ThinkingPool.symbol(this)">${esc(item.symbol)}</button>
       <span>${exchangeName(item.long_exchange)}现货 → ${exchangeName('Binance')}合约 <b class="opportunity-interval" title="合约资金费结算周期">${Number.isFinite(item.short_interval)?`${esc(item.short_interval)}H`:'—'}</b></span>${transferStatusControl(item.transfer_status||{exchange:item.long_exchange},item.symbol)}</div>
-      <div class="opportunity-values"><span>开差 <b class="${color(item.open_spread)}">${pct(item.open_spread)}</b></span><span>平差 <b class="${color(item.close_spread)}">${pct(item.close_spread)}</b></span></div>
+      <div class="opportunity-values"><span>开差 <b class="${color(item.open_spread)}">${pct(item.open_spread)}</b></span><span>平差 <b class="${color(item.close_spread)}">${pct(item.close_spread)}</b></span><button type="button" class="opportunity-net" data-opportunity-key="${attr(item)}" onclick="ThinkingPool.calculation(this)" title="扣除退出平差及成本预算的净价差情景，不计正资费；点击查看容量与明细">净价差 <b class="${scenarioReady(item)?color(item.scenario?.spread_net):'neutral'}" data-scenario-value="${scenarioReady(item)&&Number.isFinite(item.scenario?.spread_net)?item.scenario.spread_net:''}" data-scenario-at="${Number.isFinite(item.quoted_at)?item.quoted_at:''}">${scenarioReady(item)?pct(item.scenario?.spread_net):'—'}</b> ›</button></div>
       <div class="opportunity-funding" role="group" aria-label="币安资费详情">
         <span class="opportunity-funding-title">资费</span>
         <div class="opportunity-funding-grid">${[
@@ -174,7 +195,7 @@
     return (state.data?.spot_simple||[]).find(item=>key(item)===k);
   }
   const api={
-    load,select,ordered,qualified,displayScore,spotRow,spreadEvidence,dualRow,dualSorted,pct,
+    load,select,ordered,qualified,displayScore,scenarioReady,scenarioMarkup,spotRow,spreadEvidence,dualRow,dualSorted,pct,
     strategy(value){if(!['spot','dual'].includes(value)||value===state.strategy)return;resetRequest();state.strategy=value;state.books.clear();$('opportunityRows').innerHTML='<p class="loading">正在读取候选…</p>';render();loadSimpleThinking()},
     filter(name,value){if(!['min_score','status','search','dual_sort'].includes(name))return;state[name]=value;state.page=1;render(true)},
     period(value){if(!Object.hasOwn(periodLabels,value))return;state.period=value;render()},
@@ -184,6 +205,12 @@
     configure(event){event.preventDefault();const amount=Number($('opportunityNotional').value),hold=Number($('opportunityHold').value);if(!Number.isFinite(amount)||amount<100||amount>1000000||![24,72,168].includes(hold))return;resetRequest();state.notional=amount;state.hold_hours=hold;$('opportunityRows').innerHTML='<p class="loading">正在按新金额与持有期测算…</p>';render();loadSimpleThinking()},
     symbol(button){const item=itemFrom(button);if(item)openSymbolDetail(item.symbol)},
     history(button){const item=itemFrom(button);if(item)openSpreadHistory(encodeURIComponent(JSON.stringify([item.symbol,item.long_exchange])),'open',button)},
+    calculation(button){
+      const item=itemFrom(button);if(!item)return;
+      $('opportunityAuxTitle').textContent=`${item.symbol} · ${item.long_exchange} → Binance · 净空间测算`;
+      $('opportunityAuxBody').innerHTML=`<div data-calculation-key="${attr(item)}">${scenarioMarkup(item)}</div>`;
+      if(!$('opportunityAux').open)$('opportunityAux').showModal();
+    },
     closeAux(){$('opportunityAux')?.close()},
     events(button){
       const item=itemFrom(button);if(!item)return;
@@ -215,6 +242,17 @@
         const item={score:Number(node.dataset.scoreBase),score_parts:{current:Number(node.dataset.scoreCurrent)},
           quoted_at:node.dataset.quotedAt===''?null:Number(node.dataset.quotedAt)};
         node.textContent=String(displayScore(item));
+      });
+      document.querySelectorAll('[data-scenario-value]').forEach(node=>{
+        if(node.dataset.scenarioValue===undefined)return;
+        const age=Date.now()/1000-Number(node.dataset.scenarioAt);
+        if(node.dataset.scenarioAt===''||age>10||age< -2){node.textContent='—';node.className='neutral'}
+      });
+      document.querySelectorAll('[data-calculation-key]').forEach(node=>{
+        if(!node.dataset.calculationKey)return;
+        const k=decodeURIComponent(node.dataset.calculationKey);
+        const item=(state.data?.spot_simple||[]).find(item=>key(item)===k);
+        node.innerHTML=item?scenarioMarkup(item):'<p>该路径已不在当前候选中，请重新选择。</p>';
       });
     },
   };

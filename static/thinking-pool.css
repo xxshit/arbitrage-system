@@ -35,7 +35,7 @@
 .opportunity-event-list p {color:#7c8c86;font-size:11px;line-height:1.6;margin-bottom:0}
 .opportunity-latest {display:flex;gap:5px;align-items:center;flex-wrap:wrap;color:#74837d;font-size:10px}
 .opportunity-latest time {color:#8b9690}
-.opportunity-aux {position:fixed;inset:0;width:min(950px,92vw);max-height:85dvh;margin:auto;padding:20px;border:1px solid #d4e0d7;border-radius:10px;background:#fffef9;color:#21404e}
+.opportunity-aux {box-sizing:border-box;position:fixed;inset:0;width:min(950px,92vw);max-height:85dvh;margin:auto;padding:20px;border:1px solid #d4e0d7;border-radius:10px;background:#fffef9;color:#21404e}
 .opportunity-aux::backdrop {background:#16354066}
 .opportunity-aux-close {float:right;border:0;background:transparent;font-size:22px}
 .opportunity-path,.opportunity-values {display:flex;flex-direction:column;gap:6px;min-width:0}
@@ -46,6 +46,17 @@
 .opportunity-values {font-size:11px;font-variant-numeric:tabular-nums}
 .opportunity-values span {white-space:nowrap}
 .opportunity-values b {font-size:12px}
+.opportunity-net {align-self:flex-start;border:0;padding:0;background:none;font-size:11px;color:#6b8295;white-space:nowrap}
+.opportunity-net:hover {background:none;text-decoration:underline}
+.opportunity-scenario-totals {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:16px 0}
+.opportunity-scenario-totals>div {display:flex;flex-direction:column;gap:7px;background:#f0f6f2;border:1px solid #d7e3d9;border-radius:8px;padding:14px;font-size:12px}
+.opportunity-scenario-totals b {font-size:25px;font-variant-numeric:tabular-nums}
+.opportunity-scenario-totals small {color:#76877d;font-size:11px}
+.opportunity-calculation {margin:0;max-width:540px}
+.opportunity-calculation>div {display:flex;justify-content:space-between;gap:14px;border-bottom:1px solid #e3eae3;padding:9px 0;font-size:12px}
+.opportunity-calculation dd {margin:0;font-variant-numeric:tabular-nums;font-weight:650}
+.opportunity-calculation-warning {color:#996021}
+.opportunity-aux p {font-size:12px;line-height:1.6}
 .opportunity-funding {min-width:0;font-size:11px;font-variant-numeric:tabular-nums}
 .opportunity-funding-title {display:flex;gap:8px;align-items:center;margin-bottom:5px;color:#6b8295;font-weight:650}
 .opportunity-funding-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:12px;row-gap:4px;max-width:300px}

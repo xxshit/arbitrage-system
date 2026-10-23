@@ -21,6 +21,18 @@ const item={symbol:'DEMO/USDT',long_exchange:'Gate',short_exchange:'Binance',sco
   funding:{total:.03,complete:true},reasons:['常态溢价，不假定归零'],
   risks:[],scenario:{spread_net:-.86},quoted_at:1000};
 
+test('net space shows scenario costs and known first-level capacity, never a fill promise',()=>{
+  const ui=harness().ThinkingPool;
+  const sample={...item,capacity_usdt:5000,scenario:{calculable:true,notional:1000,hold_hours:72,
+    spread_net:.25,funding_net:.30,exit_spread:.5,fee_budget:.66,slippage:.1,adverse_funding:0,funding_income:.05}};
+  assert.ok(ui.scenarioReady(sample,1005));assert.ok(!ui.scenarioReady(sample,1011));
+  const html=ui.scenarioMarkup(sample,1005);
+  for(const text of ['+0.25%','+0.30%','1,000 USDT','5,000 USDT','四笔交易费用','退出平差预算','不计正资费','不是全盘口深度'])assert.ok(html.includes(text),text);
+  assert.ok(!ui.scenarioMarkup(sample,1011).includes('>+0.25%</b>'));
+  assert.ok(!ui.scenarioReady({...sample,scenario:{...sample.scenario,calculable:false}},1005));
+  assert.ok(ui.scenarioMarkup({...sample,risks:['<script>unsafe</script>']},1005).includes('&lt;script&gt;'));
+});
+
 test('strategy tabs remain spot/dual; drivers never replace strategies',()=>{
   assert.ok(source.includes('data-thinking-strategy="spot"'));
   assert.ok(source.includes('data-thinking-strategy="dual"'));

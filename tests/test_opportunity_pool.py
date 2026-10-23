@@ -26,6 +26,20 @@ def funding(rate=.005, interval=4):
 
 
 class OpportunityTests(unittest.TestCase):
+    def test_scenario_is_not_available_above_known_first_level_capacity(self):
+        self.assertTrue(self.candidate()["scenario"]["calculable"])
+        self.assertFalse(self.candidate(notional=5001)["scenario"]["calculable"])
+        live = quotes(); live["long"]["bid_qty"] = None
+        self.assertFalse(self.candidate(live=live)["scenario"]["calculable"])
+        live = quotes(); live["short"]["funding_at"] = NOW-601
+        self.assertFalse(self.candidate(live=live)["scenario"]["calculable"])
+        self.assertFalse(self.candidate(hist=history(close_ready=False))["scenario"]["calculable"])
+
+    def test_adverse_funding_is_explicit_and_not_positive_income(self):
+        scenario=self.candidate(live=quotes(funding=-.02))["scenario"]
+        self.assertGreater(scenario["adverse_funding"],0)
+        self.assertEqual(self.candidate()["scenario"]["adverse_funding"],0)
+
     def candidate(self, live=None, profile=None, hist=None, row=None, **kwargs):
         return classify(row or dict(open_spread=.5, close_spread=.55, funding_rate=.005,
                                     funding_interval_hours=4, change_24h=-2),

@@ -5,6 +5,7 @@ duplicated, and shutdown signals (BaseException) are deliberately not swallowed.
 """
 from functools import wraps
 from pathlib import Path
+import ctypes
 import os
 import threading
 import time
@@ -97,6 +98,26 @@ def memory_status():
         result["cgroup_bytes"] = int((root / "memory.current").read_text())
         result["memory_events"] = {k: int(v) for k, v in
                                    (line.split() for line in (root / "memory.events").read_text().splitlines())}
-    except (OSError, ValueError, IndexError, StopIteration):
+        stats = dict(line.split() for line in (root / "memory.stat").read_text().splitlines())
+        result["anonymous_bytes"] = int(stats["anon"])
+        result["file_cache_bytes"] = int(stats["file"])
+        for line in (root / "memory.pressure").read_text().splitlines():
+            if line.startswith("some "):
+                result["memory_stall_microseconds"] = int(dict(p.split("=") for p in line.split()[1:])["total"])
+        # GNU's read-only aggregate allocator statistics. No heap contents,
+        # pointer addresses, process injection, trimming or tuning here.
+        class MallInfo(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_size_t) for name in (
+                "arena", "ordblks", "smblks", "hblks", "hblkhd", "usmblks", "fsmblks", "uordblks", "fordblks", "keepcost")]
+        try:
+            read_info = ctypes.CDLL(None).mallinfo2
+            read_info.argtypes = []
+            read_info.restype = MallInfo
+            info = read_info()
+            result["allocator_used_bytes"] = info.uordblks
+            result["allocator_free_bytes"] = info.fordblks
+        except (AttributeError, OSError):
+            pass
+    except (OSError, ValueError, IndexError, KeyError, StopIteration):
         pass  # macOS/tests/non-cgroup hosts still expose a PID.
     return result

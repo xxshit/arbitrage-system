@@ -6,6 +6,7 @@ The temp DB/cache is removed on normal exit; the JSONL report is stdout.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -19,6 +20,25 @@ import threading
 import time
 
 
+@contextmanager
+def background_task(target, stop, *, name, join_timeout=30):
+    """Stop the synthetic worker even when a request/assertion fails.
+
+    The daemon flag is only a last exit bound for this disposable test process;
+    normal/error teardown still requests a stop and joins before DB cleanup.
+    It does not change the application's worker lifecycle.
+    """
+    worker = threading.Thread(target=target, name=name, daemon=True)
+    worker.start()
+    try:
+        yield worker
+    finally:
+        stop.set()
+        worker.join(join_timeout)
+        if worker.is_alive():
+            raise RuntimeError("synthetic_history_worker_did_not_stop")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seconds", type=int, default=7200)
@@ -28,7 +48,7 @@ def main():
     sys.path.insert(0, str(repo))
     os.environ["TZ"] = "UTC"
     time.tzset()
-    with tempfile.TemporaryDirectory(prefix="arbiscope-public-soak-") as directory:
+    with tempfile.TemporaryDirectory(prefix="arbiscope-public-soak-") as directory, ExitStack() as cleanup:
         os.environ.update(DATABASE_URL="sqlite:///" + directory + "/synthetic.sqlite3", SECRET_KEY="synthetic-soak-only",
                           CHAT_ENCRYPTION_KEY="AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
         import app as module
@@ -52,6 +72,9 @@ def main():
             item["reminder"] = {"policy": 1, "notices": [{"key": f"soak:{identity}:{at}", "at": at, "value": 1.5, "kind": "breakout"}] if live else []}
             return json.dumps(item)
         with module.app.app_context():
+            # LIFO: the history task is joined before its engine and temp DB go
+            # away, including the request timeout / failed assertion paths.
+            cleanup.callback(module.db.engine.dispose)
             with module.db.engine.connect() as conn:
                 conn.execute(text("PRAGMA journal_mode=WAL"))
             module.db.session.add(module.UserAccount(username="synthetic-soak", password_hash="unused", role="admin", account_level="lv3", active_session_hash=module.session_digest("synthetic-token")))
@@ -90,8 +113,7 @@ def main():
                     stop.set()
                 stop.wait(max(.25, 5-(time.monotonic()-began)))
         module.BACKGROUND_WORKERS_STARTED = True
-        history_thread = threading.Thread(target=refresh_history, name="soak-history")
-        history_thread.start()
+        history_thread = cleanup.enter_context(background_task(refresh_history, stop, name="soak-history"))
         measurements = {key: [] for key in ("summary", "detail", "active", "spot", "dual")}
         paths = dict(summary="/api/alerts?view=summary", detail="/api/alerts?view=detail&symbol=SOAK1/USDT&page=2", active="/api/alerts?view=active", spot="/api/spot-futures", dual="/api/dual-futures")
         def request(key):
@@ -169,7 +191,6 @@ def main():
             assert module.AlertPulse.query.count() == args.rows
             assert module.db.session.execute(text("PRAGMA integrity_check")).scalar() == "ok"
             module.db.session.remove()
-            module.db.engine.dispose()
         print(json.dumps(dict(event="passed", seconds=round(time.monotonic()-started), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints)), flush=True)
 
 

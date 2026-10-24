@@ -67,7 +67,14 @@ def update_snapshots(session, table, updates):
                 values = [row[field] for row in batch]
                 columns[field] = (values[0] if all(value == values[0] for value in values)
                                   else case({row["id"]: row[field] for row in batch}, value=table.c.id))
-            session.execute(update(table).where(table.c.id.in_([row["id"] for row in batch])).values(**columns))
+            # CASE shapes vary with both changed fields and batch lengths. A
+            # count-bounded engine cache can retain hundreds of large expression
+            # trees and bind sets. These one-off writes must not enter it; keep
+            # normal SELECT/ORM caching and the caller's transaction unchanged.
+            session.execute(
+                update(table).where(table.c.id.in_([row["id"] for row in batch])).values(**columns),
+                execution_options={"compiled_cache": None},
+            )
 
 
 def json_delta(previous, current, limit=JSON_PATCH_LIMIT):
@@ -135,4 +142,8 @@ def equity_payload_update(session, table, previous, current, updated_at):
                     args.extend((path, cast(encoded, JSON)))
                 expression = func.json_set(expression, *args)
             values["payload"] = expression
-    session.execute(update(table).where(table.c.id == 1).values(**values))
+    # JSON patch path counts also produce many large, rarely reused SQL shapes.
+    session.execute(
+        update(table).where(table.c.id == 1).values(**values),
+        execution_options={"compiled_cache": None},
+    )

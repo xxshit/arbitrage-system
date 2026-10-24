@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from sqlalchemy import Column, DateTime, Float, Integer, JSON, MetaData, Table, create_engine, event
+from sqlalchemy import Column, DateTime, Float, Integer, JSON, MetaData, Table, create_engine, event, select
 from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Session
 
@@ -66,6 +66,46 @@ class SnapshotDeltaTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             update_snapshots(session, Table("user_account", MetaData()), [])
 
+    def test_variable_case_writes_do_not_accumulate_compilations_but_reads_still_cache(self):
+        engine = create_engine("sqlite://")
+        self.addCleanup(engine.dispose)
+        self.table.metadata.create_all(engine)
+        seen_options = []
+        event.listen(engine, "before_cursor_execute", lambda conn, cur, sql, params, ctx, many:
+                     seen_options.append(ctx.execution_options) if sql.startswith("UPDATE") else None)
+        with Session(engine) as session:
+            session.execute(self.table.insert(), [dict(id=i, price=i, rate=.005, captured_at=self.at) for i in range(40)])
+            session.commit()
+            cached_before = set(engine._compiled_cache)
+            for count in range(1, 40):
+                updates = [dict(id=i, price=i + count / 100,
+                                **({"rate": None if i % 2 else -.01} if count % 2 else {}))
+                           for i in range(count)]
+                update_snapshots(session, self.table, updates)
+                session.commit()
+            self.assertEqual(set(engine._compiled_cache), cached_before)
+            self.assertTrue(seen_options)
+            self.assertTrue(all("compiled_cache" in options and options["compiled_cache"] is None
+                                for options in seen_options))
+            rows = session.execute(select(self.table).order_by(self.table.c.id)).mappings().all()
+            self.assertEqual(len(engine._compiled_cache), len(cached_before) + 1)
+            self.assertEqual(rows[0]["price"], .39)
+            self.assertEqual(rows[1]["rate"], None)
+            self.assertEqual(rows[39]["price"], 39)
+            update_snapshots(session, self.table, [dict(id=0, price=999)])
+            session.rollback()
+            self.assertEqual(session.execute(select(self.table).order_by(self.table.c.id)).mappings().first()["price"], .39)
+            self.assertEqual(len(engine._compiled_cache), len(cached_before) + 1)
+
+    def test_mysql_case_statement_preserves_bound_values_without_cache(self):
+        session = Mock()
+        update_snapshots(session, self.table, [dict(id=1, price=1.125), dict(id=2, price=None)])
+        compiled = session.execute.call_args.args[0].compile(dialect=mysql.dialect())
+        self.assertIn("CASE", str(compiled))
+        self.assertIn(1.125, compiled.params.values())
+        self.assertNotIn("1.125", str(compiled))
+        self.assertEqual(session.execute.call_args.kwargs, {"execution_options": {"compiled_cache": None}})
+
 
 class EquityDeltaTests(unittest.TestCase):
     def test_unchanged_metadata_is_not_in_patch_and_json_null_is_explicit(self):
@@ -101,6 +141,7 @@ class EquityDeltaTests(unittest.TestCase):
         old = dict(metadata="x"*2000, rate=.01, gone=1)
         new = dict(metadata="x"*2000, rate=None)
         equity_payload_update(session, table, old, new, datetime(2026,10,21))
+        self.assertEqual(session.execute.call_args.kwargs, {"execution_options": {"compiled_cache": None}})
         compiled = session.execute.call_args.args[0].compile(dialect=mysql.dialect())
         self.assertIn("json_set(json_remove(", str(compiled))
         self.assertIn("CAST(", str(compiled))
@@ -112,6 +153,33 @@ class EquityDeltaTests(unittest.TestCase):
         session.reset_mock()
         equity_payload_update(session, table, old, old, datetime(2026,10,21))
         self.assertNotIn("payload=", str(session.execute.call_args.args[0]))
+        self.assertEqual(session.execute.call_args.kwargs, {"execution_options": {"compiled_cache": None}})
+
+    def test_equity_full_value_and_heartbeat_skip_cache_without_committing(self):
+        engine = create_engine("sqlite://")
+        self.addCleanup(engine.dispose)
+        table = Table("equity_spot_snapshot", MetaData(), Column("id", Integer, primary_key=True),
+                      Column("payload", JSON), Column("updated_at", DateTime))
+        table.metadata.create_all(engine)
+        stamp = datetime(2026, 10, 24)
+        original = {"price": 1, "missing": None, "flag": True}
+        changed = {"price": 2, "missing": None, "flag": False}
+        with Session(engine) as session:
+            session.execute(table.insert(), dict(id=1, payload=original, updated_at=stamp))
+            session.commit()
+            keys = set(engine._compiled_cache)
+            equity_payload_update(session, table, original, changed, stamp + timedelta(seconds=15))
+            self.assertEqual(set(engine._compiled_cache), keys)
+            session.rollback()
+            self.assertEqual(session.execute(select(table.c.payload)).scalar_one(), original)
+            keys = set(engine._compiled_cache)
+            equity_payload_update(session, table, original, changed, stamp + timedelta(seconds=15))
+            equity_payload_update(session, table, changed, changed, stamp + timedelta(seconds=30))
+            session.commit()
+            self.assertEqual(set(engine._compiled_cache), keys)
+            row = session.execute(select(table)).mappings().one()
+            self.assertEqual(row["payload"], changed)
+            self.assertEqual(row["updated_at"], stamp + timedelta(seconds=30))
 
 
 class CompressionPolicyTests(unittest.TestCase):

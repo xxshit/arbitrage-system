@@ -1593,7 +1593,10 @@ def get_json(url, timeout=4):
         "Accept": "application/json",
         "Accept-Encoding": "gzip",
     })
-    with urlopen(request, timeout=timeout) as response:
+    # PublicMarketHttp owns one verified, read-only-after-construction context.
+    # urllib otherwise reloads the system CA store for every background GET;
+    # share TLS configuration, never responses, cookies or account credentials.
+    with urlopen(request, timeout=timeout, context=MARKET_HTTP.context) as response:
         return decode_json(response.read(16 * 1024 * 1024 + 1), response.headers.get("Content-Encoding", ""))[0]
 
 

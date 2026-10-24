@@ -54,6 +54,7 @@ def main():
         import app as module
         from tests.test_alert_quality import historical_pulse
         from tests.test_alert_screening import quotes, reference
+        from scripts.snapshot_write_workload import SnapshotWriteWorkload
         from sqlalchemy import text
         def no_network(*args, **kwargs):
             raise AssertionError("offline soak cannot call upstream")
@@ -98,7 +99,13 @@ def main():
                 if index%50 == 0:
                     module.db.session.commit()
             module.db.session.commit()
-        fingerprints = {name: hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in ("app.py", "alert_history_index.py", "alert_read_payload.py", "read_performance.py", "static/app.js")}
+            snapshot_load = SnapshotWriteWorkload(module.db.session,
+                (module.LatestMarketSnapshot.__table__, module.LatestDualFuturesSnapshot.__table__),
+                module.EquitySpotSnapshot.__table__)
+            module.db.session.commit()
+        fingerprints = {name: hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in (
+            "app.py", "alert_history_index.py", "alert_read_payload.py", "read_performance.py", "static/app.js",
+            "snapshot_persistence.py", "market_transport.py", "scripts/snapshot_write_workload.py", "scripts/soak_public_reads.py")}
         print(json.dumps(dict(event="ready", rows=args.rows, pid=os.getpid(), files=fingerprints)), flush=True)
         stop, background_errors = threading.Event(), []
         def refresh_history():
@@ -159,6 +166,7 @@ def main():
                 cycle = time.monotonic()
                 update_quotes(tick)
                 with module.app.app_context():
+                    snapshot_load.step(module.db.session)
                     for identity in range(1, 21):
                         row = module.db.session.get(module.AlertPulse, f"soak{identity}")
                         row.evidence_json = evidence(identity, time.time(), True)
@@ -177,7 +185,7 @@ def main():
                 if elapsed-last_report >= 60 or tick == 0:
                     rss = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(os.getpid())], text=True).strip())*1024
                     rss_samples.append(rss)
-                    print(json.dumps(dict(event="progress", seconds=round(elapsed), cycles=tick+1, requests=sum(map(len, measurements.values())), rss_bytes=rss, index=module.ALERT_HISTORY_INDEX.status(), db=state, latency={key: dict(last=round(values[-1],3), p95=round(sorted(values)[int(.95*(len(values)-1))],3), max=round(max(values),3)) for key, values in measurements.items()})), flush=True)
+                    print(json.dumps(dict(event="progress", seconds=round(elapsed), cycles=tick+1, requests=sum(map(len, measurements.values())), rss_bytes=rss, snapshot_rows_updated=snapshot_load.row_updates, index=module.ALERT_HISTORY_INDEX.status(), db=state, latency={key: dict(last=round(values[-1],3), p95=round(sorted(values)[int(.95*(len(values)-1))],3), max=round(max(values),3)) for key, values in measurements.items()})), flush=True)
                     last_report = elapsed
                 tick += 1
                 time.sleep(max(0, 5-(time.monotonic()-cycle)))
@@ -189,9 +197,10 @@ def main():
         with module.app.app_context():
             assert module.AlertEvent.query.count() == args.rows
             assert module.AlertPulse.query.count() == args.rows
+            snapshot_check = snapshot_load.verify(module.db.session)
             assert module.db.session.execute(text("PRAGMA integrity_check")).scalar() == "ok"
             module.db.session.remove()
-        print(json.dumps(dict(event="passed", seconds=round(time.monotonic()-started), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints)), flush=True)
+        print(json.dumps(dict(event="passed", seconds=round(time.monotonic()-started), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints, snapshot_check=snapshot_check, source_counts_unchanged=True, integrity="ok")), flush=True)
 
 
 if __name__ == "__main__":

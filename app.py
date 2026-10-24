@@ -1731,24 +1731,33 @@ def sync_binance_listing_events(instruments):
     if not current:
         return
     now = datetime.now()
-    existing = {item.symbol: item for item in ListingState.query.filter_by(exchange="Binance").all()}
-    if not existing:
+    with short_public_session() as writer:
+        existing = {item.symbol: item for item in writer.query(ListingState).filter_by(exchange="Binance").all()}
+        heartbeats, changed, added = [], [], []
         for symbol, status in current.items():
-            db.session.add(ListingState(exchange="Binance", symbol=symbol, status=status, first_seen_at=now, last_seen_at=now, active=True))
-        db.session.commit()
-        return
-    for symbol, status in current.items():
-        item = existing.get(symbol)
-        if not item:
-            db.session.add(ListingState(exchange="Binance", symbol=symbol, status=status, first_seen_at=now, last_seen_at=now, active=True))
-            db.session.add(ListingEvent(exchange="Binance", symbol=symbol, event_type="上架", occurred_at=now))
-        else:
-            item.status, item.last_seen_at, item.active = status, now, True
-    for symbol, item in existing.items():
-        if symbol not in current and item.active:
-            item.active = False
-            db.session.add(ListingEvent(exchange="Binance", symbol=symbol, event_type="下架", occurred_at=now))
-    db.session.commit()
+            item = existing.get(symbol)
+            if item is None:
+                added.append(dict(exchange="Binance", symbol=symbol, status=status, first_seen_at=now, last_seen_at=now, active=True))
+                # First catalog seeds state, not a fabricated listing event.
+                if existing:
+                    writer.add(ListingEvent(exchange="Binance", symbol=symbol, event_type="上架", occurred_at=now))
+            elif item.status == status and item.active:
+                heartbeats.append(item.id)
+            else:
+                changed.append(dict(id=item.id, status=status, last_seen_at=now, active=True))
+        for symbol, item in existing.items():
+            if symbol not in current and item.active:
+                changed.append(dict(id=item.id, active=False))
+                writer.add(ListingEvent(exchange="Binance", symbol=symbol, event_type="下架", occurred_at=now))
+        # Unchanged listings need the same heartbeat, not hundreds of separate
+        # ORM UPDATEs in the five-second quote worker's maintenance cycle.
+        for offset in range(0, len(heartbeats), 250):
+            writer.execute(ListingState.__table__.update().where(ListingState.id.in_(heartbeats[offset:offset+250])).values(last_seen_at=now))
+        if changed:
+            writer.bulk_update_mappings(ListingState, changed)
+        if added:
+            writer.bulk_insert_mappings(ListingState, added)
+        writer.commit()
 
 
 def sync_binance_listing_events_if_due(instruments):
@@ -7399,7 +7408,7 @@ def get_onchain_json(url, timeout=10):
         "User-Agent": "ArbiScope/1.0",
         "Accept": "application/json;version=20230302",
     })
-    with urlopen(request, timeout=timeout) as response:
+    with urlopen(request, timeout=timeout, context=MARKET_HTTP.context) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -7407,8 +7416,20 @@ def acquire_onchain_refresh_lock():
     if db.engine.dialect.name not in {"mysql", "mariadb"}:
         return None, True
     connection = db.engine.connect()
-    acquired = connection.execute(text("SELECT GET_LOCK('arbitrage_onchain_opportunity_refresh', 0)")).scalar()
-    return connection, acquired == 1
+    try:
+        acquired = connection.execute(text("SELECT GET_LOCK('arbitrage_onchain_opportunity_refresh', 0)")).scalar()
+        # Named locks survive COMMIT. End this read transaction so the short
+        # publication session can own and commit its transaction on this slot.
+        connection.commit()
+        return connection, acquired == 1
+    except BaseException:
+        # A failed round trip may still have acquired the server-side lock.
+        # Do not return a possibly locked physical connection to the pool.
+        try:
+            connection.invalidate()
+        finally:
+            connection.close()
+        raise
 
 
 def release_onchain_refresh_lock(connection):
@@ -7416,6 +7437,9 @@ def release_onchain_refresh_lock(connection):
         return
     try:
         connection.execute(text("SELECT RELEASE_LOCK('arbitrage_onchain_opportunity_refresh')"))
+    except BaseException:
+        connection.invalidate()
+        raise
     finally:
         connection.close()
 
@@ -7425,9 +7449,6 @@ def refresh_onchain_opportunities():
         return {"skipped": True, "updated_networks": [], "errors": {}}
     lock_connection = None
     try:
-        lock_connection, acquired = acquire_onchain_refresh_lock()
-        if not acquired:
-            return {"skipped": True, "updated_networks": [], "errors": {}}
         captured_at = utc_now_naive()
         parsed_by_network = {}
         errors = {}
@@ -7445,15 +7466,32 @@ def refresh_onchain_opportunities():
                 errors[network] = f"{type(exc).__name__}: {exc}"
         if not parsed_by_network:
             raise RuntimeError("；".join(f"{network} {message}" for network, message in errors.items()))
-        for network, rows in parsed_by_network.items():
-            OnchainOpportunitySnapshot.query.filter_by(network=network).delete(synchronize_session=False)
-            for row in rows:
-                db.session.add(OnchainOpportunitySnapshot(**row))
-        db.session.commit()
-        return {"skipped": False, "updated_networks": sorted(parsed_by_network), "errors": errors}
+        # Network waits hold only the process-local mutex, never a SQL slot.
+        # Serialize publication across processes on ONE physical connection.
+        lock_connection, acquired = acquire_onchain_refresh_lock()
+        if not acquired:
+            return {"skipped": True, "updated_networks": [], "errors": errors}
+        publication = ORMSession(bind=lock_connection) if lock_connection is not None else short_public_session()
+        updated = []
+        with publication as writer:
+            latest = dict(writer.query(OnchainOpportunitySnapshot.network, func.max(OnchainOpportunitySnapshot.captured_at))
+                          .filter(OnchainOpportunitySnapshot.network.in_(parsed_by_network))
+                          .group_by(OnchainOpportunitySnapshot.network).all())
+            for network, rows in parsed_by_network.items():
+                # A slower fetch from another process must not overwrite a
+                # newer publication; compare per network, not globally.
+                if latest.get(network) is not None and latest[network] >= captured_at:
+                    continue
+                writer.query(OnchainOpportunitySnapshot).filter_by(network=network).delete(synchronize_session=False)
+                writer.add_all(OnchainOpportunitySnapshot(**row) for row in rows)
+                updated.append(network)
+            writer.commit()
+        return {"skipped": not updated, "updated_networks": sorted(updated), "errors": errors}
     finally:
-        release_onchain_refresh_lock(lock_connection)
-        ONCHAIN_OPPORTUNITY_SCAN_LOCK.release()
+        try:
+            release_onchain_refresh_lock(lock_connection)
+        finally:
+            ONCHAIN_OPPORTUNITY_SCAN_LOCK.release()
 
 
 def onchain_snapshot_payload(row):

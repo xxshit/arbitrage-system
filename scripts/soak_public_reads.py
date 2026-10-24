@@ -77,6 +77,7 @@ def main():
         from tests.test_alert_quality import historical_pulse
         from tests.test_alert_screening import quotes, reference
         from scripts.snapshot_write_workload import SnapshotWriteWorkload
+        from scripts.maintenance_workload import MaintenanceWorkload
         from sqlalchemy import text
         def no_network(*args, **kwargs):
             raise AssertionError("offline soak cannot call upstream")
@@ -129,10 +130,11 @@ def main():
                 (module.LatestMarketSnapshot.__table__, module.LatestDualFuturesSnapshot.__table__),
                 module.EquitySpotSnapshot.__table__)
             module.db.session.commit()
+            maintenance_load = MaintenanceWorkload(module)
         fingerprints = {name: hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in (
             "app.py", "alert_history_index.py", "alert_read_payload.py", "read_performance.py", "static/app.js",
             "snapshot_persistence.py", "market_transport.py", "scripts/snapshot_write_workload.py", "scripts/soak_public_reads.py",
-            "scripts/soak_snapshot_writes.py", "background_runtime.py")}
+            "scripts/soak_snapshot_writes.py", "background_runtime.py", "scripts/maintenance_workload.py")}
         print(json.dumps(dict(event="ready", at_utc=datetime.now(timezone.utc).isoformat(), rows=args.rows, pid=os.getpid(), files=fingerprints)), flush=True)
         stop, background_errors = threading.Event(), []
         def refresh_history():
@@ -201,6 +203,7 @@ def main():
                     module.db.session.commit()
                     if tick%12 == 0:
                         module.store_transfer_networks("Gate", wallets)
+                        maintenance_load.step()
                 futures = [executor.submit(request, key) for key in paths]
                 for future in futures:
                     key, elapsed = future.result(timeout=45)
@@ -226,9 +229,10 @@ def main():
             assert module.AlertPulse.query.count() == args.rows
             assert module.BasisTracking.query.count() == 50000
             snapshot_check = snapshot_load.verify(module.db.session)
+            maintenance_check = maintenance_load.verify()
             check_integrity(module.db.session, module.db.metadata, module.db.engine.dialect.name)
             module.db.session.remove()
-        print(json.dumps(dict(event="passed", seconds=round(time.monotonic()-started), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints, snapshot_check=snapshot_check, source_counts_unchanged=True, integrity="ok")), flush=True)
+        print(json.dumps(dict(event="passed", seconds=round(time.monotonic()-started), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints, snapshot_check=snapshot_check, maintenance_check=maintenance_check, source_counts_unchanged=True, integrity="ok")), flush=True)
 
 
 if __name__ == "__main__":

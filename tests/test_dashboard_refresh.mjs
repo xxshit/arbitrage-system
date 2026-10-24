@@ -15,7 +15,7 @@ function harness(){
     setTimeout(fn,delay){const id=++nextId;timers.set(id,{fn,at:now+delay});return id},
     clearTimeout(id){timers.delete(id)},setInterval(){return 0},clearInterval(){},
     activeViewId:()=>context.active,active:'dashboard',authState:{is_admin:false},
-    renderAlertStreamStatus(){},alertNoticeMemory:new Map(),alertNotional:1000,alertSummaryVersion:0,latestAlertGroups:[],clearAlertCurrent(){},
+    renderAlertStreamStatus(){},loadSelectedAlertHistory(){},alertNoticeMemory:new Map(),alertNotional:1000,alertSummaryVersion:0,latestAlertGroups:[],clearAlertCurrent(){},
     document:{querySelectorAll:()=>[]},applyGroupFrameClasses(){},
     byId(id){if(!elements.has(id))elements.set(id,{textContent:''});return elements.get(id)},
     fetch:async()=>({ok:true,json:async()=>({items:[]})}),
@@ -504,6 +504,17 @@ test('qualified candidates notify once while low-level retracement observations 
   active=[{...event,id:11,open_spread:1.4,pulse:{notice_version:1,current:1.4}}];await h.context.loadAlerts();assert.equal(sounds,2);
 });
 
+test('background alerts use the light endpoint and preserve the existing history panel',async()=>{
+  const h=harness();let renders=0;const urls=[];
+  Object.assign(h.context,{pruneAlertMutes(){},isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){renders++},replaceHtmlKeepingExchangeLogos(){},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){}});
+  h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
+  h.context.fetch=async url=>{urls.push(url);return {ok:true,json:async()=>({active_events:[],events:[],basis_tracking:[],checked_at_epoch:100})}};
+  await h.context.loadAlerts();assert.ok(urls[0].includes('view=active'));assert.equal(renders,0);
+  h.context.active='alerts';await h.context.loadAlerts(true);assert.ok(urls[1].includes('view=summary'));assert.equal(renders,1);
+  h.context.fetch=async()=>({ok:true,json:async()=>({view:'active',history_loading:true,active_events:[],checked_at_epoch:100})});
+  await h.context.loadAlerts(true);assert.equal(renders,1);assert.ok(h.context.byId('alertSymbolList').innerHTML.includes('实时提醒正常更新'));
+});
+
 test('early watch and a fully retraced spike never ring but a later candidate promotion can',async()=>{
   const h=harness();let sounds=0;
   Object.assign(h.context,{pruneAlertMutes(){},isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){},replaceHtmlKeepingExchangeLogos(){},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});
@@ -516,6 +527,7 @@ test('early watch and a fully retraced spike never ring but a later candidate pr
 
 test('late summary for old amount or an older same-amount request cannot overwrite fresh results',async()=>{
   const h=harness(),pending=[];let rendered='',clears=0;
+  h.context.active='alerts';
   Object.assign(h.context,{pruneAlertMutes(){},isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(groups){rendered=groups[0]?.symbol},replaceHtmlKeepingExchangeLogos(){},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){},clearAlertCurrent(){clears++}});
   h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
   h.context.fetch=()=>new Promise(resolve=>pending.push(resolve));
@@ -526,6 +538,7 @@ test('late summary for old amount or an older same-amount request cannot overwri
 
 test('tracking-only alert changes render without causing repeat sound',async()=>{
   const h=harness();let renders=0,sounds=0,requests=0;
+  h.context.active='alerts';
   Object.assign(h.context,{pruneAlertMutes(){},latestActiveAlertEvents:[],isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){renders++},percent:v=>v.toFixed(1)+'%',strategyLabel:()=>'',replaceHtmlKeepingExchangeLogos:(element,html)=>{element.innerHTML=html},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});
   h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
   let tracking={symbol:'AUDIT/USDT',strategy:'spot_futures',max_basis:1,last_level:1,max_at:'00:00:00'};
@@ -579,6 +592,7 @@ test('data gap, isolated and settled pulses cannot ring while a genuine new roun
 
 test('wallet metadata changes refresh the panel without replaying unchanged active alert sounds',async()=>{
   const h=harness();let renders=0,sounds=0,state='unknown';
+  h.context.active='alerts';
   Object.assign(h.context,{pruneAlertMutes(){},latestActiveAlertEvents:[],isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',renderAlertMasterDetail(){renders++},percent:v=>v.toFixed(1)+'%',strategyLabel:()=>'',replaceHtmlKeepingExchangeLogos:(element,html)=>{element.innerHTML=html},renderAlertMuteList(){},renderTipsItems(){},startAlertCountdown(){},playAlarmSound(){sounds++}});
   h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
   const active={symbol:'AUDIT/USDT',type:'rapid_basis',open_spread:1,basis:1,created_at:'10-18 10:00:00'};

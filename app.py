@@ -22,6 +22,7 @@ from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import SimpleNamespace
+from contextlib import contextmanager
 from urllib.parse import quote, urlencode, urljoin, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -37,11 +38,13 @@ from flask import Flask, g, has_app_context, jsonify, redirect, render_template,
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import and_, case, event as sa_event, func, inspect, or_, text, tuple_
 from sqlalchemy.orm import Session as ORMSession, deferred
+from sqlalchemy.pool import StaticPool
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from anomaly_streams import AlertStreamHub, Route
 from anomaly_engine import alert_round_ids, pulse_is_actionable
-from alert_history_index import AlertHistoryIndex
+from alert_history_index import AlertHistoryIndex, HistoryEvent
+from alert_read_payload import Screenings, PackedPulse, PulseSpool
 from trend_reference import TrendReferenceCache, fetch_reference, reference_failure_reason
 from alert_reminders import admit_pulse, current_notice, reminder_count, reminder_state_id
 from alert_screening import DEFAULT_NOTIONAL, okx_contract_unit, pulse_has_watch_peak, screen_pulse
@@ -64,6 +67,7 @@ from opportunity_pool import POLICY as OPPORTUNITY_POLICY, classify as classify_
 from persistence_policy import funding_write_due
 from snapshot_persistence import changed_values, equity_payload_update, update_snapshots
 from background_runtime import WorkerRuntime, memory_status, mysql_engine_options
+from read_performance import read_indexes, wallet_symbol_predicate
 
 load_dotenv()
 
@@ -79,6 +83,19 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
 app.config["SESSION_COOKIE_SECURE"] = os.getenv("SESSION_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes", "on"}
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=24)
 db = SQLAlchemy(app)
+
+
+@contextmanager
+def short_public_session():
+    # sqlite:// unit tests share ONE physical connection. A second session's
+    # rollback there would roll back the caller's unrelated pending work.
+    if isinstance(db.engine.pool, StaticPool):
+        yield db.session
+    else:
+        with ORMSession(db.engine) as reader:
+            yield reader
+
+
 BACKGROUND_RUNTIME = WorkerRuntime()
 with app.app_context():
     sa_event.listen(db.engine, "checkout", BACKGROUND_RUNTIME.checkout)
@@ -1502,7 +1519,9 @@ def symbol_alias_rows():
         return SYMBOL_ALIAS_CACHE["rows"]
     rows = []
     try:
-        rows = [SimpleNamespace(
+        with short_public_session() as reader:
+            records = reader.query(SymbolAlias).filter_by(verified=True).all()
+            rows = [SimpleNamespace(
             canonical_symbol=row.canonical_symbol,
             alias_symbol=row.alias_symbol,
             canonical_base=row.canonical_base,
@@ -1512,7 +1531,7 @@ def symbol_alias_rows():
             multiplier=row.multiplier,
             verified=True,
             note=row.note,
-        ) for row in SymbolAlias.query.filter_by(verified=True).all()]
+            ) for row in records]
     except Exception:
         rows = []
     if not rows:
@@ -2228,17 +2247,29 @@ def parse_transfer_networks(exchange, payload):
 def store_transfer_networks(exchange, networks):
     if not networks:
         return
-    symbols = list(networks)
-    existing = {(item.exchange, item.symbol.upper()): item for item in TransferNetworkSnapshot.query.filter(TransferNetworkSnapshot.exchange == exchange, func.upper(TransferNetworkSnapshot.symbol).in_(symbols)).all()}
+    networks = {symbol.upper(): chains for symbol, chains in networks.items()}
     now = datetime.now(timezone.utc).replace(tzinfo=None)
-    for symbol, chains in networks.items():
-        payload = json.dumps(chains, ensure_ascii=False)
-        item = existing.get((exchange, symbol))
-        if item:
-            item.chains_json, item.captured_at = payload, now
-        else:
-            db.session.add(TransferNetworkSnapshot(exchange=exchange, symbol=symbol, chains_json=payload, captured_at=now))
-    db.session.commit()
+    # One atomic publication per venue, with batched heartbeats instead of
+    # thousands of ORM UPDATEs. The session cannot leak into the next HTTP call.
+    with short_public_session() as writer:
+        existing = {item.symbol.upper(): item for item in writer.query(TransferNetworkSnapshot).filter(TransferNetworkSnapshot.exchange == exchange).all()}
+        heartbeats, changed, added = [], [], []
+        for symbol, chains in networks.items():
+            payload = json.dumps(chains, ensure_ascii=False)
+            item = existing.get(symbol)
+            if item is None:
+                added.append(dict(exchange=exchange, symbol=symbol, chains_json=payload, captured_at=now))
+            else:
+                heartbeats.append(item.id)
+                if item.chains_json != payload:
+                    changed.append(dict(id=item.id, chains_json=payload))
+        for offset in range(0, len(heartbeats), 250):
+            writer.execute(TransferNetworkSnapshot.__table__.update().where(TransferNetworkSnapshot.id.in_(heartbeats[offset:offset+250])).values(captured_at=now))
+        if changed:
+            writer.bulk_update_mappings(TransferNetworkSnapshot, changed)
+        if added:
+            writer.bulk_insert_mappings(TransferNetworkSnapshot, added)
+        writer.commit()
 
 
 def refresh_public_transfer_networks():
@@ -2271,7 +2302,7 @@ def load_transfer_statuses(pairs, now=None, exact_assets=False):
     candidates = {pair: [pair_slash(compact_pair(pair[0]))] if exact_assets else transfer_symbol_candidates(pair[0], pair[1], aliases) for pair in pairs}
     symbols = {symbol for values in candidates.values() for symbol in values}
     exchanges = {exchange for _, exchange in pairs}
-    records = TransferNetworkSnapshot.query.filter(func.upper(TransferNetworkSnapshot.symbol).in_(symbols), TransferNetworkSnapshot.exchange.in_(exchanges)).all()
+    records = TransferNetworkSnapshot.query.filter(wallet_symbol_predicate(db.engine, TransferNetworkSnapshot.symbol, symbols), TransferNetworkSnapshot.exchange.in_(exchanges)).all()
     indexed = {(record.exchange, record.symbol.upper()): record for record in records}
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     max_age = max(300, 2 * runtime_interval("transfer_network_sync", TRANSFER_NETWORK_SYNC_SECONDS))
@@ -3001,7 +3032,8 @@ def refresh_index_components():
     if not contracts:
         return
     now = datetime.now()
-    existing = {(item.exchange, item.symbol): item for item in IndexComponentSnapshot.query.all()}
+    existing = set(db.session.query(IndexComponentSnapshot.exchange, IndexComponentSnapshot.symbol).all())
+    db.session.remove()
     # 指数成分是低频基础资料：首次拉取后永久保存，后续页面只读数据库。
     # 新出现的合约才会进入待拉取队列；如需人工重建，由后续维护操作显式触发。
     pending = [key for key in contracts if key not in existing]
@@ -3011,6 +3043,7 @@ def refresh_index_components():
     start = INDEX_COMPONENT_CURSOR % len(pending)
     batch = (pending + pending)[start:start + batch_size]
     INDEX_COMPONENT_CURSOR = (start + len(batch)) % len(pending)
+    collected = []
     with ThreadPoolExecutor(max_workers=15) as executor:
         futures = {executor.submit(fetch_index_components, exchange, symbol): (exchange, symbol) for exchange, symbol in batch}
         for future in as_completed(futures):
@@ -3019,12 +3052,11 @@ def refresh_index_components():
                 components = future.result()
             except Exception:
                 continue
-            item = existing.get((exchange, symbol))
-            if item:
-                item.components_json = json.dumps(components, ensure_ascii=False)
-                item.captured_at = now
-            else:
-                db.session.add(IndexComponentSnapshot(exchange=exchange, symbol=symbol, components_json=json.dumps(components, ensure_ascii=False), captured_at=now))
+            collected.append(dict(exchange=exchange, symbol=symbol, components_json=json.dumps(components, ensure_ascii=False), captured_at=now))
+    for values in collected:
+        # A second collector may have published while network I/O was pending.
+        if not IndexComponentSnapshot.query.filter_by(exchange=values["exchange"], symbol=values["symbol"]).first():
+            db.session.add(IndexComponentSnapshot(**values))
     db.session.commit()
 
 
@@ -3719,28 +3751,33 @@ def enrich_basis_openings(groups, strategy):
     symbols = [group["symbol"] for group in groups]
     if not symbols:
         return
-    trackings = BasisTracking.query.filter(BasisTracking.strategy == strategy, BasisTracking.symbol.in_(symbols)).order_by(BasisTracking.started_at.desc()).all()
-    latest = {}
-    for item in trackings:
-        latest.setdefault(item.symbol, item)
+    # One indexed top-1 lookup per symbol on the server, not all past episodes
+    # materialized in Python. ID makes tied timestamps deterministic.
+    requested = db.session.query(BasisTracking.symbol).filter(BasisTracking.strategy == strategy, BasisTracking.symbol.in_(symbols)).distinct().subquery()
+    latest_id = db.session.query(BasisTracking.id).filter(BasisTracking.strategy == strategy, BasisTracking.symbol == requested.c.symbol).order_by(BasisTracking.started_at.desc(), BasisTracking.id.desc()).limit(1).correlate(requested).scalar_subquery()
+    ids = db.session.query(latest_id).select_from(requested).subquery()
+    latest = {item.symbol: item for item in BasisTracking.query.filter(BasisTracking.id.in_(db.select(ids))).all()}
     tracking_ids = [item.id for item in latest.values()]
-    logs_by_tracking = {}
+    counts, first_logs = {}, {}
     if tracking_ids:
-        for log in BasisExpansionLog.query.filter(BasisExpansionLog.tracking_id.in_(tracking_ids)).order_by(BasisExpansionLog.created_at).all():
-            logs_by_tracking.setdefault(log.tracking_id, []).append(log)
+        counts = dict(db.session.query(BasisExpansionLog.tracking_id, func.count()).filter(BasisExpansionLog.tracking_id.in_(tracking_ids)).group_by(BasisExpansionLog.tracking_id).all())
+        # Only legacy episodes with a missing opening sample need a first log.
+        for item in latest.values():
+            if item.opening_basis is None:
+                first_logs[item.id] = BasisExpansionLog.query.filter_by(tracking_id=item.id).order_by(BasisExpansionLog.created_at, BasisExpansionLog.id).first()
     for group in groups:
         tracking = latest.get(group["symbol"])
         if not tracking:
             group["basis_opening"] = None
             continue
-        logs = logs_by_tracking.get(tracking.id, [])
-        opening_basis = tracking.opening_basis if tracking.opening_basis is not None else (logs[0].observed_basis if logs else tracking.max_basis)
+        first_log = first_logs.get(tracking.id)
+        opening_basis = tracking.opening_basis if tracking.opening_basis is not None else (first_log.observed_basis if first_log else tracking.max_basis)
         group["basis_opening"] = {
             "opened_at": format_shanghai_time(tracking.started_at, "%m-%d %H:%M:%S"),
             "opened_basis": opening_basis,
             "max_basis": tracking.max_basis,
             "max_at": format_shanghai_time(tracking.max_at, "%m-%d %H:%M:%S"),
-            "open_count": len(logs),
+            "open_count": counts.get(tracking.id, 0),
         }
 
 
@@ -4210,10 +4247,16 @@ def runtime_rule(rule_key):
     return RuntimeRule.query.filter_by(rule_key=rule_key).first()
 
 
+def read_runtime_setting(rule_key):
+    """Return values, not a request/worker session held across the next network wait."""
+    with short_public_session() as reader:
+        row = reader.query(RuntimeRule.enabled, RuntimeRule.value).filter_by(rule_key=rule_key).first()
+        return tuple(row) if row else (False, None)
+
+
 def runtime_interval(rule_key, fallback):
     def read_value():
-        row = runtime_rule(rule_key)
-        return (row.enabled, row.value) if row else (False, None)
+        return read_runtime_setting(rule_key)
     if not has_app_context():
         with app.app_context():
             enabled, value = read_value()
@@ -4230,8 +4273,7 @@ def runtime_interval(rule_key, fallback):
 def runtime_number(rule_key, fallback):
     """Read an enabled numeric runtime rule without treating it as a duration."""
     def read_value():
-        row = runtime_rule(rule_key)
-        return (row.enabled, row.value) if row else (False, None)
+        return read_runtime_setting(rule_key)
     if not has_app_context():
         with app.app_context():
             enabled, value = read_value()
@@ -4247,8 +4289,7 @@ def runtime_number(rule_key, fallback):
 
 def runtime_daily_time(rule_key, fallback="08:00"):
     def read_value():
-        row = runtime_rule(rule_key)
-        return (row.enabled, row.value) if row else (False, None)
+        return read_runtime_setting(rule_key)
     if has_app_context():
         enabled, value = read_value()
     else:
@@ -9480,7 +9521,8 @@ def seed_thought_watches():
 
 
 def active_thought_symbols():
-    return {row.symbol for row in ThoughtWatch.query.filter_by(active=True).all()}
+    with short_public_session() as reader:
+        return {row.symbol for row in reader.query(ThoughtWatch.symbol).filter_by(active=True).all()}
 
 
 def thought_watch_config(symbol):
@@ -9488,13 +9530,14 @@ def thought_watch_config(symbol):
     config = THOUGHT_WATCHLIST.get(symbol)
     if config is not None:
         return config
-    row = ThoughtWatch.query.filter_by(symbol=symbol).first()
-    return {
-        "entry": None,
-        "entry_time": format_shanghai_time(thought_watch_datetime(row, "started_at"), "%Y-%m-%d %H:%M") if row else "网页新增盯盘",
-        "side": "watch",
-        "fallback": {},
-    }
+    with short_public_session() as reader:
+        row = reader.query(ThoughtWatch).filter_by(symbol=symbol).first()
+        return {
+            "entry": None,
+            "entry_time": format_shanghai_time(thought_watch_datetime(row, "started_at"), "%Y-%m-%d %H:%M") if row else "网页新增盯盘",
+            "side": "watch",
+            "fallback": {},
+        }
 
 
 def coti_range_snapshot(closed30):
@@ -13597,7 +13640,7 @@ def alert_pulse_read_payload(evidence, *, qualified_only=False):
     return compact
 
 
-def read_alert_history(window_start, now):
+def read_alert_history(window_start, now, *, live_only=False, symbol=None, refresh_only=False):
     """Reuse committed history projections, never live candidate assessments."""
     columns = (AlertEvent.id, AlertEvent.symbol, AlertEvent.strategy, AlertEvent.alert_type,
                AlertEvent.message, AlertEvent.open_spread, AlertEvent.close_spread, AlertEvent.basis,
@@ -13611,14 +13654,24 @@ def read_alert_history(window_start, now):
         # The request's auth SELECT may already hold an older repeatable-read
         # snapshot. Read committed history on a separate short-lived connection
         # so a consumed after_commit invalidation cannot fetch the old version.
-        with db.engine.connect() as connection:
-            if connection.dialect.name in {"mysql", "mariadb"}:
-                connection = connection.execution_options(isolation_level="READ COMMITTED")
-            result = connection.execution_options(stream_results=True).execute(query.statement)
-            try:
-                yield from result.yield_per(500)
-            finally:
-                result.close()
+        # Fetch bounded batches, RETURN the connection, then decode/compress.
+        # Never pin a transaction for a 100k-row history rebuild.
+        cursor = None
+        while True:
+            batch_query = query
+            if cursor is not None:
+                batch_query = batch_query.filter(or_(AlertEvent.created_at > cursor[0], and_(AlertEvent.created_at == cursor[0], AlertEvent.id > cursor[1])))
+            with db.engine.connect() as connection:
+                if connection.dialect.name in {"mysql", "mariadb"}:
+                    connection = connection.execution_options(isolation_level="READ COMMITTED")
+                rows = connection.execute(batch_query.order_by(AlertEvent.created_at, AlertEvent.id).limit(250).statement).all()
+            if not rows:
+                break
+            yield from rows
+            # Audit includes created_at explicitly; normal rows already have it.
+            cursor = (rows[-1][9] if len(rows[-1]) > 3 else rows[-1][2], rows[-1][0])
+            if len(rows) < 250:
+                break
 
     def load(identities, since):
         if identities is None:
@@ -13631,12 +13684,33 @@ def read_alert_history(window_start, now):
         # even without a new commit. Normal inserts are also covered by IDs.
         if since is not None and now > since:
             yield from read_rows(base.filter(AlertEvent.created_at > since))
+            # Indexed external-writer recovery; overlap covers second-resolution
+            # MySQL timestamps. In-process commits still invalidate exact IDs.
+            changed = db.session.query(AlertPulse.alert_event_id).filter(AlertPulse.updated_at >= since - timedelta(seconds=2))
+            with db.engine.connect() as connection:
+                changed_ids = [row[0] for row in connection.execute(changed.statement)]
+            for offset in range(0, len(changed_ids), 250):
+                yield from read_rows(base.filter(AlertEvent.id.in_(changed_ids[offset:offset+250])))
 
     def audit():
-        return read_rows(base.with_entities(AlertEvent.id, AlertPulse.updated_at))
+        return ((row[0], row[1]) for row in read_rows(base.with_entities(AlertEvent.id, AlertPulse.updated_at, AlertEvent.created_at)))
+
+    if live_only:
+        # TIPS/sound do not depend on a 24H cold rebuild. Every real ticket is
+        # committed together with updated_at; keep a 5s boundary overlap.
+        spool, events, pulses = PulseSpool(), [], {}
+        live = base.filter(AlertPulse.updated_at >= now - timedelta(seconds=125))
+        epoch = now.replace(tzinfo=timezone.utc).timestamp()
+        for row in read_rows(live):
+            pulse = alert_pulse_read_payload(row[12], qualified_only=True)
+            if pulse is not None and current_notice(pulse, epoch):
+                event = HistoryEvent(*row[:12])
+                events.append(event)
+                pulses[event.id] = PackedPulse(pulse, spool)
+        return sorted(events, key=lambda item: (item.created_at, item.id), reverse=True), pulses
 
     return ALERT_HISTORY_INDEX.snapshot(window_start, now, load, audit,
-                                        lambda evidence: alert_pulse_read_payload(evidence, qualified_only=True))
+                                        lambda evidence: alert_pulse_read_payload(evidence, qualified_only=True), symbol=symbol, materialize=not refresh_only)
 
 
 @app.get("/api/alerts")
@@ -13646,8 +13720,13 @@ def alerts():
     view = request.args.get("view", "legacy")
     if view == "health":
         return jsonify({**ALERT_STREAM_HUB.status(), "history_index": ALERT_HISTORY_INDEX.status()})
-    if view not in {"legacy", "summary", "detail"}:
+    if view not in {"legacy", "summary", "detail", "active"}:
         return jsonify({"error": "无效的报警查询类型"}), 400
+    history_loading = False
+    if view in {"legacy", "summary"} and BACKGROUND_WORKERS_STARTED and not ALERT_HISTORY_INDEX.ready():
+        history_loading, view = True, "active"
+    if view == "detail" and BACKGROUND_WORKERS_STARTED and not ALERT_HISTORY_INDEX.ready():
+        return jsonify({"error": "报警历史首次整理中，请稍后重试"}), 503
     try:
         notional = float(request.args.get("notional", DEFAULT_NOTIONAL))
         if not math.isfinite(notional) or not 100 <= notional <= 1_000_000:
@@ -13683,7 +13762,11 @@ def alerts():
     for episode in episodes:
         by_path.setdefault(spot_divergence_key(episode.symbol, episode.long_exchange, episode.short_exchange), []).append(episode)
     isolated = [item for item in episodes if item.resolved_at is None and not is_rwa_stock_pair(item.symbol)]
-    indexed_events, indexed_pulses = read_alert_history(window_start, now)
+    db.session.remove()  # All quarantine/auth fields used below are already loaded.
+    if BACKGROUND_WORKERS_STARTED and view != "active":
+        indexed_events, indexed_pulses = ALERT_HISTORY_INDEX.cached_snapshot(window_start, now, symbol if view == "detail" else None)
+    else:
+        indexed_events, indexed_pulses = read_alert_history(window_start, now, live_only=view == "active", symbol=symbol if view == "detail" else None)
     asset_types = {symbol: is_rwa_stock_pair(symbol) for symbol in {item.symbol for item in indexed_events}}
     all_events = [item for item in indexed_events if (view != "detail" or item.symbol == symbol)
                   and not asset_types[item.symbol] and not alert_is_divergent(item, by_path)]
@@ -13694,31 +13777,32 @@ def alerts():
         grouped_events.setdefault(item.symbol, []).append(item)
     def notice_epoch(item):
         pulse = pulses.get(item.id) or {}
-        tickets = pulse.get("reminder", {}).get("notices", [])
-        return tickets[-1]["at"] if tickets else pulse.get("noticed_at", item.created_at.replace(tzinfo=timezone.utc).timestamp())
+        return pulse.notice_at if pulse and pulse.notice_at is not None else item.created_at.replace(tzinfo=timezone.utc).timestamp()
     screening_now = time.time()
     notice_epochs = {item.id: notice_epoch(item) for item in all_events}
-    reminder_counts = {item.id: reminder_count(pulses[item.id], screening_now)
-                       for item in all_events if pulses.get(item.id) and "reminder" in pulses[item.id]}
+    reminder_counts = {item.id: pulses[item.id].count(screening_now)
+                       for item in all_events if pulses.get(item.id) and pulses[item.id].has_reminder}
     def count_reminders(items):
         # Legacy non-pulse history keeps its old count; migrated and new pulses
         # count only first/breakthrough admissions, never repeat observations.
         return sum(reminder_counts.get(item.id, 0) for item in items) + len({round_ids[item.id] for item in items if item.id not in reminder_counts})
-    paths = {tuple(pulse["path"]) for pulse in pulses.values() if pulse and pulse.get("path")}
+    paths = {pulse.path for pulse in pulses.values() if pulse.path}
     live_quotes = ALERT_STREAM_HUB.screening_quotes(paths, screening_now)
-    attention = {item.id: screen_pulse(pulses[item.id], live_quotes.get(tuple(pulses[item.id].get("path", []))), screening_now, notional)
-                 if pulses.get(item.id) else {"tier": "record", "reason": "历史记录，未核验当前盘口", "live": False}
-                 for item in all_events}
+    attention = Screenings(pulses, live_quotes, screening_now, notional, screen_pulse)
     def priority(item):
+        pulse = pulses.get(item.id)
+        if pulse is None or not pulse.can_screen_live(screening_now):
+            return (0, 0, notice_epochs[item.id])
         assessment = attention[item.id]
         return ({"candidate": 2, "watch": 1}.get(assessment["tier"], 0), assessment.get("net_edge") or 0, notice_epochs[item.id])
     active_events = []
     for items in grouped_events.values():
         active = []
         for item in items:
-            assessment, pulse = attention[item.id], pulses.get(item.id)
-            if not current_notice(pulse, screening_now):
+            packed = pulses.get(item.id)
+            if packed is None or not packed.ticket(screening_now):
                 continue
+            assessment, pulse = attention[item.id], packed.unpack()
             age = screening_now-notice_epochs[item.id]
             if assessment["live"] and 0 <= age <= 120:
                 active.append(item)
@@ -13729,7 +13813,7 @@ def alerts():
                 active.append(item)
         if active:
             active_events.append(max(active, key=priority))
-    tracking = [item for item in BasisTracking.query.filter_by(resolved_at=None).order_by(BasisTracking.max_abs_basis.desc()).limit(50).all() if not is_rwa_stock_pair(item.symbol)] if view != "detail" else []
+    tracking = [item for item in BasisTracking.query.filter_by(resolved_at=None).order_by(BasisTracking.max_abs_basis.desc()).limit(50).all() if not is_rwa_stock_pair(item.symbol)] if view not in {"detail", "active"} else []
     if isolated and tracking:
         isolated_keys = {spot_divergence_key(item.symbol, item.long_exchange, item.short_exchange) for item in isolated}
         isolated_symbols = {item.symbol for item in isolated}
@@ -13794,14 +13878,16 @@ def alerts():
             for item in items:
                 if field == "basis" and not alert_has_binance_basis_source(item):
                     continue
-                bounds = pulses.get(item.id, {}).get("ranges", {}).get(field, {})
-                values.extend(value for value in (bounds.get("min"), bounds.get("max")) if isinstance(value, (int, float)) and math.isfinite(value))
+                pulse = pulses.get(item.id)
+                bounds = pulse.bounds[:2] if field == "open_spread" and pulse else pulse.bounds[2:] if pulse else ()
+                values.extend(value for value in bounds if isinstance(value, (int, float)) and math.isfinite(value))
             ranges[field] = {"max": max(values, default=None), "min": min(values, default=None)}
         return ranges
 
     def event_payload(item):
         basis = alert_binance_basis(item)
-        pulse = pulses.get(item.id)
+        packed = pulses.get(item.id)
+        pulse = packed.unpack() if packed is not None else None
         ticket = current_notice(pulse, screening_now)
         reminder = (pulse or {}).get("reminder")
         if pulse and not pulse.get("ended_at") and time.time() - pulse["current_at"] > 10:
@@ -13811,6 +13897,11 @@ def alerts():
         notice_key = ticket["key"] if ticket else None
         assessment = attention[item.id]
         return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "pulse": pulse, "round_id": round_ids[item.id], "notice_key": notice_key, "reminder": {"eligible": bool(ticket), "count": reminder_count({"reminder": reminder}, screening_now), "record_only": not bool(reminder["notices"])} if reminder is not None else None, "attention": assessment, "audible": bool(ticket) and assessment["tier"] == "candidate" and assessment["live"], "funding_rate": item.funding_rate, "created_at": format_shanghai_time(item.created_at, "%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int((30 if assessment.get("transient") else 120) - (screening_now - notice_epoch(item)))), **alert_context(item)}
+
+    if view == "active":
+        db.session.remove()
+        return jsonify({"view": "active", "history_loading": history_loading, "checked_at_epoch": time.time(), "realtime": ALERT_STREAM_HUB.status(),
+                        "funding": funding_alert_payload(screening_now), "active_events": [event_payload(item) for item in active_events]})
 
     if view == "detail":
         filtered = [item for item in all_events if (not selected_strategy or alert_context(item)["strategy"] == selected_strategy) and (selected_path is None or path_key(item) == selected_path)]
@@ -13827,6 +13918,7 @@ def alerts():
             exchanges.update(exchange for exchange in (context["long_exchange"], context["short_exchange"]) if exchange)
         transfer_exchanges[symbol] = sorted(exchanges)
     transfer_statuses = load_transfer_statuses((symbol, exchange) for symbol, exchanges in transfer_exchanges.items() for exchange in exchanges)
+    db.session.remove()
 
     def alert_group_payload(symbol, items):
         timeline = [event_payload(item) for item in items[:20]] if view == "legacy" else []
@@ -15107,6 +15199,9 @@ def trade_validation_detail(plan_id):
     })
 
 
+READ_PERFORMANCE_INDEXES = read_indexes(db.metadata)
+
+
 def create_database_schema():
     """Serialize MySQL schema initialization across concurrent WSGI workers."""
     if db.engine.dialect.name != "mysql":
@@ -15803,6 +15898,7 @@ def background_price_history_backfill():
                             groups.append(group)
                             seen.add(group["symbol"])
                 if groups:
+                    db.session.remove()
                     backfill_price_history(groups)
                 BACKGROUND_RUNTIME.progress("success")
         except Exception as exc:
@@ -16130,7 +16226,7 @@ def background_runtime_health():
     logger.handlers = list(app.logger.handlers) or [logging.StreamHandler()]
     logger.propagate = False
     while True:
-        state = {**BACKGROUND_RUNTIME.snapshot(), **memory_status()}
+        state = {**BACKGROUND_RUNTIME.snapshot(), **memory_status(), "alert_history": ALERT_HISTORY_INDEX.status()}
         workers = state.pop("workers")
         state.update(workers=len(workers), dead=[name for name, row in workers.items() if not row["alive"]],
                      restarts=sum(row["restarts"] for row in workers.values()))
@@ -16143,6 +16239,17 @@ def background_thread(target, args=(), daemon=True, name=None):
                             daemon=daemon, name=name)
 
 
+def background_alert_history_refresh():
+    """Single bounded reader; HTTP never waits behind a cold full-history read."""
+    while True:
+        started = time.monotonic()
+        with app.app_context():
+            now = datetime.now()
+            read_alert_history(now-timedelta(hours=24), now, refresh_only=True)
+            BACKGROUND_RUNTIME.progress("success")
+        time.sleep(max(.25, 5-(time.monotonic()-started)))
+
+
 def start_background_workers():
     global BACKGROUND_WORKERS_STARTED
     if BACKGROUND_WORKERS_STARTED:
@@ -16150,6 +16257,7 @@ def start_background_workers():
     BACKGROUND_WORKERS_STARTED = True
     background_thread(target=background_runtime_health, daemon=True, name="runtime-health").start()
     background_thread(target=background_alert_pulses, daemon=True, name="alert-pulse-writer").start()
+    background_thread(target=background_alert_history_refresh, daemon=True, name="alert-history-reader").start()
     for name, refresh, seconds, rule_key, requires_metadata in (
         ("quotes", refresh_dashboard_opportunities, MARKET_REFRESH_SECONDS, "spot_market_refresh", False),
         ("major-analysis", fetch_major_market_overview, MAJOR_MARKET_CACHE_SECONDS, None, False),

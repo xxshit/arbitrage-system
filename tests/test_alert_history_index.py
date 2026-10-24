@@ -112,3 +112,30 @@ class HistoryIndexTests(unittest.TestCase):
             worker.start()
             self.assertTrue(completed.wait(1))
             worker.join(1)
+
+    def test_cached_read_does_not_wait_for_database_refresh(self):
+        self.rows = {1: self.row(1, evidence='{"peak":1}')}
+        self.snapshot()
+        with self.index.read_lock:
+            events, pulses = self.index.cached_snapshot(self.now-timedelta(hours=24), self.now)
+            self.assertEqual(events[0].id, 1)
+            self.assertEqual(pulses[1]["peak"], 1)
+        self.assertTrue(self.index.ready())
+        self.index.reset()
+        self.assertFalse(self.index.ready())
+        def loading(identities, since):
+            self.assertFalse(self.index.ready())
+            return self.load(identities, since)
+        self.snapshot(loading)
+        self.assertTrue(self.index.ready())
+
+    def test_spool_compaction_preserves_inflight_snapshots_and_all_values(self):
+        self.rows = {1: self.row(1, evidence='{"peak":1}')}
+        before = self.snapshot()
+        old_spool = self.index.spool
+        old_spool.append(b"discarded cache versions" * 800000)
+        after = self.snapshot()
+        self.assertIsNot(self.index.spool, old_spool)
+        self.assertLess(self.index.spool.size, 1000)
+        self.assertEqual(before[1][1]["peak"], 1)
+        self.assertEqual(after[1][1]["peak"], 1)

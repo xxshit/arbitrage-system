@@ -1007,16 +1007,17 @@ async function loadSelectedAlertHistory(page=alertDetailState.data?.page||1,rese
 }
 function renderTipsItems(activeEvents){const target=byId('tipsItems');if(!target)return;const pulseView=alertPulseViewState(target);target.innerHTML=activeEvents.length?activeEvents.map(item=>item.type==='funding_change'?fundingTip(item):`<article class="tips-item ${alertClass(item.type)} ${isAlertMuted(item.symbol)?'muted-alert':''}"><div class="tips-item-head"><b class="${delistingSymbolClass(item.symbol)}" data-market-symbol="${item.symbol}">${item.symbol} · ${strategyLabel(item.strategy)} · ${alertPulseLabel(item)}${isAlertMuted(item.symbol)?' · 已静音':''}</b>${alertSpeakerButton(item.symbol)}</div>${alertExchangePair(item)}${alertAttentionMarkup(item.attention)}<span>触发开差 ${alertMetric(item.open_spread)} · 基差 ${alertMetric(item.basis)}</span>${alertPulseTrace(item,pulseView.expanded.has(alertPulseKey(item)))}${item.attention?.tier==='candidate'?'':alertDeathMarkup(item)}</article>`).join(''):'<p class="empty-alert">当前没有通过筛选的提醒，已发生的异动保留在24H历史。</p>';restoreAlertPulseFocus(target,pulseView.focused)}
 async function loadAlerts(force=false){
-  const version=++alertSummaryVersion,requestedNotional=alertNotional;
+  const version=++alertSummaryVersion,requestedNotional=alertNotional;let fullHistory=activeViewId()==='alerts';
   try{
-    const data=await fetchRefreshJson(`/api/alerts?view=summary&notional=${requestedNotional}`),activeEvents=(data.active_events||[]).filter(item=>!item.reminder||item.reminder.eligible===true),groups=data.events||[],tracking=data.basis_tracking||[];
+    const data=await fetchRefreshJson(`/api/alerts?view=${fullHistory?'summary':'active'}&notional=${requestedNotional}`),activeEvents=(data.active_events||[]).filter(item=>!item.reminder||item.reminder.eligible===true),groups=data.events||[],tracking=data.basis_tracking||[];
     if(version!==alertSummaryVersion||requestedNotional!==alertNotional)return false;
+    if(data.history_loading){fullHistory=false;if(!latestAlertGroups.length)byId('alertSymbolList').innerHTML='<p class="empty-alert">首次整理报警历史中，实时提醒正常更新…</p>'}
     latestFundingAlerts=data.funding||{groups:[],active_events:[]};
     activeEvents.push(...(latestFundingAlerts.active_events||[]));
     renderAlertStreamStatus(data.realtime);
     pruneAlertMutes(groups,activeEvents);latestActiveAlertEvents=activeEvents;
-    renderDivergenceRegister(data.isolated_paths);
-    const signature=JSON.stringify({groups,tracking,activeEvents,funding:latestFundingAlerts},(key,value)=>key==='remaining_seconds'?undefined:value);
+    if(fullHistory)renderDivergenceRegister(data.isolated_paths);
+    const signature=JSON.stringify({fullHistory,groups,tracking,activeEvents,funding:latestFundingAlerts},(key,value)=>key==='remaining_seconds'?undefined:value);
     const audibleKeys=activeEvents.filter(item=>item.audible===true&&!isAlertMuted(item.symbol)&&!['data_gap','isolated','settled'].includes(item.pulse?.state)).map(item=>item.notice_key||(item.pulse?`${item.id}-${item.pulse.notice_version}`:`${item.symbol}-${item.type}-${item.open_spread}-${item.basis}-${item.created_at}`)),audibleSignature=audibleKeys.join('|');
     const noticeNow=Date.now();
     for(const [key,seenAt] of alertNoticeMemory)if(noticeNow-seenAt>86400000)alertNoticeMemory.delete(key);
@@ -1024,9 +1025,9 @@ async function loadAlerts(force=false){
     audibleKeys.forEach(key=>alertNoticeMemory.set(key,noticeNow));
     setPageRefreshSource('alerts',data.checked_at_epoch,'检查');
     if(!force&&signature===alertSignature){if(activeViewId()==='alerts')loadSelectedAlertHistory();return true}
-    renderAlertMasterDetail(groups);
+    if(fullHistory)renderAlertMasterDetail(groups);
     if(activeViewId()==='alerts')loadSelectedAlertHistory();
-    replaceHtmlKeepingExchangeLogos(byId('basisTracking'),tracking.length?tracking.map(item=>`<article class="alert-item basis"><div class="alert-card-title"><h4>${item.symbol}</h4><span class="strategy-badge">${strategyLabel(item.strategy)} · 基差追踪</span></div><p class="tracking-max">最大 ${percent(item.max_basis)}</p><div class="meta"><span>已记录至 ${item.last_level.toFixed(1)}%</span><span>最大时间 ${item.max_at}</span></div></article>`).join(''):'<p class="empty-alert">暂无正在追踪的基差扩展。</p>');
+    if(fullHistory)replaceHtmlKeepingExchangeLogos(byId('basisTracking'),tracking.length?tracking.map(item=>`<article class="alert-item basis"><div class="alert-card-title"><h4>${item.symbol}</h4><span class="strategy-badge">${strategyLabel(item.strategy)} · 基差追踪</span></div><p class="tracking-max">最大 ${percent(item.max_basis)}</p><div class="meta"><span>已记录至 ${item.last_level.toFixed(1)}%</span><span>最大时间 ${item.max_at}</span></div></article>`).join(''):'<p class="empty-alert">暂无正在追踪的基差扩展。</p>');
     renderAlertMuteList();byId('tipsCount').textContent=activeEvents.length;renderTipsItems(activeEvents);startAlertCountdown();
     alertSignature=signature;alertAudibleSignature=audibleSignature;alertsInitialized=true;
     if(hasNewAlert)playAlarmSound();return true;

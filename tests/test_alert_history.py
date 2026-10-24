@@ -260,6 +260,46 @@ class AlertHistoryTests(unittest.TestCase):
             self.assertEqual(self.get(view='summary')['events'][0]['value_ranges']['open_spread']['max'], 2.5)
             self.assertEqual(decode.call_count, 2)
 
+    def test_active_poll_never_rebuilds_history_and_retains_real_tickets(self):
+        epoch = self.screening_pulses()
+        from tests.test_alert_screening import quotes, PATH
+        self.insert([self.event(f"OLD{i}/USDT", created_at=self.now-timedelta(hours=12)) for i in range(1000)])
+        with patch.object(module.ALERT_HISTORY_INDEX, "snapshot", side_effect=AssertionError("no full-history rebuild for TIPS")), patch.object(module.ALERT_STREAM_HUB, "screening_quotes", return_value={PATH: quotes(long_at=epoch, short_at=epoch, metadata_at=epoch)}):
+            data = self.get(view="active")
+        self.assertEqual(len(data["active_events"]), 1)
+        self.assertTrue(data["active_events"][0]["audible"])
+        self.assertEqual(data["view"], "active")
+        self.assertNotIn("events", data)
+        self.assertNotIn("basis_tracking", data)
+        self.assertIn("funding", data)
+
+    def test_cold_background_index_serves_live_reminders_without_emptying_history(self):
+        self.screening_pulses(retraced=True)
+        with patch.object(module, "BACKGROUND_WORKERS_STARTED", True), patch.object(module.ALERT_HISTORY_INDEX, "ready", return_value=False):
+            data = self.get(view="summary")
+        self.assertTrue(data["history_loading"])
+        self.assertNotIn("events", data)
+        self.assertEqual(len(data["active_events"]), 1)
+        self.assertTrue(data["active_events"][0]["attention"]["transient"])
+        self.assertFalse(data["active_events"][0]["audible"])
+
+    def test_history_connections_return_before_projection_decoding(self):
+        self.screening_pulses()
+        original = module.alert_pulse_read_payload
+        def decode(*args, **kwargs):
+            self.assertEqual(module.BACKGROUND_RUNTIME.snapshot()["db_checked_out"], 0)
+            return original(*args, **kwargs)
+        with patch.object(module, "alert_pulse_read_payload", side_effect=decode):
+            self.get(view="summary")
+
+    def test_only_visible_pulses_are_unpacked_for_summary_and_detail(self):
+        from alert_read_payload import PackedPulse
+        self.screening_pulses()
+        self.get(view="summary")
+        with patch.object(PackedPulse, "unpack", autospec=True, side_effect=PackedPulse.unpack) as unpack:
+            self.get(view="detail", symbol="MISSING/USDT")
+            self.assertEqual(unpack.call_count, 0)
+
     def test_projection_respects_rollback_bulk_change_and_schema_reset(self):
         self.insert([self.event(open_spread=1)])
         self.assertEqual(self.get(view='summary')['events'][0]['move_peaks']['open_spread'], 1)

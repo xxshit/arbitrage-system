@@ -7,9 +7,20 @@ import copy
 from datetime import datetime, timedelta
 import random
 
-from sqlalchemy import DateTime, Float, Integer, JSON, String, select
+from sqlalchemy import DateTime, Double, Float, Integer, JSON, String, cast, select
 
 from snapshot_persistence import equity_payload_update, update_snapshots
+
+
+def exact_snapshot_select(table, dialect):
+    # MySQL's text protocol formats a bare FLOAT with fewer significant digits
+    # than its stored binary32 value (e.g. 359753.5 arrives as 359754). Widen only
+    # the verification SELECT, never storage or the expected values/tolerance.
+    # A binary32 value is exactly representable as binary64, including NULL.
+    if dialect == "mysql":
+        return select(*(cast(column, Double).label(column.name)
+                        if isinstance(column.type, Float) else column for column in table.c))
+    return select(table)
 
 
 class SnapshotWriteWorkload:
@@ -84,7 +95,8 @@ class SnapshotWriteWorkload:
 
     def verify(self, session):
         for table in self.tables:
-            rows = {row["id"]: dict(row) for row in session.execute(select(table)).mappings()}
+            query = exact_snapshot_select(table, session.get_bind().dialect.name)
+            rows = {row["id"]: dict(row) for row in session.execute(query).mappings()}
             assert rows == self.expected[table.name], "synthetic quote values/counts differ"
         row = session.execute(select(self.equity)).mappings().one()
         assert row["id"] == 1 and row["payload"] == self.payload

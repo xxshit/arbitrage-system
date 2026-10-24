@@ -52,6 +52,52 @@ class PublicReadTests(unittest.TestCase):
         self.assertTrue(all("chains_json" not in s for s in updates))
         self.assertEqual(module.TransferNetworkSnapshot.query.count(), 1001)
 
+    def test_latest_episodes_use_bounded_ids_before_primary_key_read(self):
+        now = datetime.now()
+        expected = {}
+        for i in range(20):
+            symbol = f"COIN{i}/USDT"
+            for age in range(10):
+                module.db.session.add(module.BasisTracking(symbol=symbol, strategy="spot_futures", direction="positive", started_at=now-timedelta(hours=age), opening_basis=1, max_basis=2, max_abs_basis=2, max_at=now))
+            # Tied timestamps choose the higher ID; other strategy is excluded.
+            module.db.session.add(module.BasisTracking(symbol=symbol, strategy="spot_futures", direction="positive", started_at=now, opening_basis=i+10, max_basis=2, max_abs_basis=2, max_at=now))
+            module.db.session.add(module.BasisTracking(symbol=symbol, strategy="futures_futures", direction="positive", started_at=now+timedelta(hours=1), opening_basis=999, max_basis=2, max_abs_basis=2, max_at=now))
+            expected[symbol] = i+10
+        module.db.session.commit()
+        statements = []
+        def record(conn, cursor, statement, parameters, context, many):
+            if statement.startswith("SELECT"):
+                statements.append(statement)
+        module.sa_event.listen(module.db.engine, "before_cursor_execute", record)
+        try:
+            groups = [dict(symbol=symbol) for symbol in expected] + [dict(symbol="MISSING/USDT")]
+            module.enrich_basis_openings(groups, "spot_futures")
+        finally:
+            module.sa_event.remove(module.db.engine, "before_cursor_execute", record)
+        self.assertEqual({group["symbol"]:group["basis_opening"]["opened_basis"] for group in groups[:-1]}, expected)
+        self.assertIsNone(groups[-1]["basis_opening"])
+        self.assertEqual(len(statements), 3)  # scalar IDs, bounded rows, log counts
+        self.assertIn("max(basis_tracking.started_at)", statements[0])
+        self.assertIn("max(basis_tracking.id)", statements[0])
+        self.assertNotIn("SELECT (SELECT", statements[0])
+        self.assertIn("basis_tracking.id IN (", statements[1])
+        self.assertNotIn("IN (SELECT", statements[1])
+        self.assertEqual(module.BasisTracking.query.count(), 240)
+
+    def test_missing_latest_episode_skips_detail_and_log_queries(self):
+        statements = []
+        def record(conn, cursor, statement, parameters, context, many):
+            if statement.startswith("SELECT"):
+                statements.append(statement)
+        module.sa_event.listen(module.db.engine, "before_cursor_execute", record)
+        try:
+            groups = [dict(symbol="MISSING/USDT")]
+            module.enrich_basis_openings(groups, "spot_futures")
+        finally:
+            module.sa_event.remove(module.db.engine, "before_cursor_execute", record)
+        self.assertEqual(groups[0]["basis_opening"], None)
+        self.assertEqual(len(statements), 1)
+
     def test_indexes_are_additive_idempotent_and_public_only(self):
         before = {table.name for table in module.db.metadata.tables.values()}
         with module.db.engine.begin() as conn:

@@ -1,8 +1,10 @@
-"""Offline sustained read/write test. ONLY creates its own synthetic SQLite DB.
+"""Offline sustained read/write test in its own synthetic database.
 
 No credentials, production database, upstream requests, push or trading workers.
 Run from repo: .venv/bin/python scripts/soak_public_reads.py --seconds 7200
-The temp DB/cache is removed on normal exit; the JSONL report is stdout.
+Default SQLite is temporary. --mysql-socket requires the guarded socket-only
+disposable MySQL instance and creates a fresh schema; never a production URL.
+The JSONL report is stdout; the runner is responsible for durable report storage.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +20,24 @@ import sys
 import tempfile
 import threading
 import time
+
+
+def synthetic_database_url(directory, mysql_socket=None):
+    if mysql_socket is not None:
+        from scripts.soak_snapshot_writes import isolated_mysql_url
+        return isolated_mysql_url(mysql_socket)
+    return "sqlite:///" + str(directory) + "/synthetic.sqlite3"
+
+
+def check_integrity(session, metadata, dialect):
+    from sqlalchemy import text
+    if dialect == "sqlite":
+        assert session.execute(text("PRAGMA integrity_check")).scalar() == "ok"
+    else:
+        assert dialect == "mysql"
+        for table in metadata.sorted_tables:
+            rows = session.execute(text("CHECK TABLE `" + table.name + "`")).all()
+            assert rows and rows[-1][-2:] == ("status", "OK"), table.name
 
 
 @contextmanager
@@ -43,13 +63,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seconds", type=int, default=7200)
     parser.add_argument("--rows", type=int, default=100000)
+    parser.add_argument("--mysql-socket")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo))
     os.environ["TZ"] = "UTC"
     time.tzset()
     with tempfile.TemporaryDirectory(prefix="arbiscope-public-soak-") as directory, ExitStack() as cleanup:
-        os.environ.update(DATABASE_URL="sqlite:///" + directory + "/synthetic.sqlite3", SECRET_KEY="synthetic-soak-only",
+        database_url = synthetic_database_url(directory, args.mysql_socket)
+        os.environ.update(DATABASE_URL=database_url, SECRET_KEY="synthetic-soak-only",
                           CHAT_ENCRYPTION_KEY="AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
         import app as module
         from tests.test_alert_quality import historical_pulse
@@ -76,8 +98,12 @@ def main():
             # LIFO: the history task is joined before its engine and temp DB go
             # away, including the request timeout / failed assertion paths.
             cleanup.callback(module.db.engine.dispose)
-            with module.db.engine.connect() as conn:
-                conn.execute(text("PRAGMA journal_mode=WAL"))
+            if module.db.engine.dialect.name == "sqlite":
+                with module.db.engine.connect() as conn:
+                    conn.execute(text("PRAGMA journal_mode=WAL"))
+            else:
+                assert module.db.engine.url.database.startswith("snapshot_soak_")
+                assert module.db.engine.url.query.get("unix_socket") == args.mysql_socket
             module.db.session.add(module.UserAccount(username="synthetic-soak", password_hash="unused", role="admin", account_level="lv3", active_session_hash=module.session_digest("synthetic-token")))
             module.db.session.commit()
             user_id = module.UserAccount.query.filter_by(username="synthetic-soak").one().id
@@ -105,8 +131,9 @@ def main():
             module.db.session.commit()
         fingerprints = {name: hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in (
             "app.py", "alert_history_index.py", "alert_read_payload.py", "read_performance.py", "static/app.js",
-            "snapshot_persistence.py", "market_transport.py", "scripts/snapshot_write_workload.py", "scripts/soak_public_reads.py")}
-        print(json.dumps(dict(event="ready", rows=args.rows, pid=os.getpid(), files=fingerprints)), flush=True)
+            "snapshot_persistence.py", "market_transport.py", "scripts/snapshot_write_workload.py", "scripts/soak_public_reads.py",
+            "scripts/soak_snapshot_writes.py", "background_runtime.py")}
+        print(json.dumps(dict(event="ready", at_utc=datetime.now(timezone.utc).isoformat(), rows=args.rows, pid=os.getpid(), files=fingerprints)), flush=True)
         stop, background_errors = threading.Event(), []
         def refresh_history():
             while not stop.is_set():
@@ -159,7 +186,7 @@ def main():
             assert not background_errors, background_errors
             assert time.monotonic()-warm_started < 60
             time.sleep(.1)
-        print(json.dumps(dict(event="warm", seconds=round(time.monotonic()-warm_started,3))), flush=True)
+        print(json.dumps(dict(event="warm", at_utc=datetime.now(timezone.utc).isoformat(), seconds=round(time.monotonic()-warm_started,3))), flush=True)
         started, last_report, tick, rss_samples = time.monotonic(), 0, 0, []
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="soak-http") as executor:
             while time.monotonic()-started < args.seconds:
@@ -197,8 +224,9 @@ def main():
         with module.app.app_context():
             assert module.AlertEvent.query.count() == args.rows
             assert module.AlertPulse.query.count() == args.rows
+            assert module.BasisTracking.query.count() == 50000
             snapshot_check = snapshot_load.verify(module.db.session)
-            assert module.db.session.execute(text("PRAGMA integrity_check")).scalar() == "ok"
+            check_integrity(module.db.session, module.db.metadata, module.db.engine.dialect.name)
             module.db.session.remove()
         print(json.dumps(dict(event="passed", seconds=round(time.monotonic()-started), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints, snapshot_check=snapshot_check, source_counts_unchanged=True, integrity="ok")), flush=True)
 

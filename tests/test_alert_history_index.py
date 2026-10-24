@@ -2,7 +2,7 @@ import json
 import threading
 import unittest
 from datetime import datetime, timedelta
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from alert_history_index import AlertHistoryIndex
 
@@ -88,14 +88,19 @@ class HistoryIndexTests(unittest.TestCase):
         self.assertIsNone(self.loads[-1][0])
 
     def test_revision_audit_recovers_other_writer_update_and_delete(self):
-        self.rows = {1:self.row(1, evidence='{"peak":1}'), 2:self.row(2)}
-        self.snapshot()
-        self.rows[1] = self.row(1, evidence='{"peak":2}', revision=2)
-        self.rows.pop(2)
-        self.index.last_audit = 0
-        events, pulses = self.snapshot()
-        self.assertEqual([row.id for row in events], [1])
-        self.assertEqual(pulses[1]['peak'], 2)
+        # Clock origins are unspecified; resetting last_audit to zero only
+        # forces an audit on machines whose monotonic clock already exceeds15m.
+        for origin in (0.0, 10000.0):
+            with self.subTest(origin=origin), patch('alert_history_index.time.monotonic', return_value=origin) as clock:
+                self.index = AlertHistoryIndex()
+                self.rows = {1:self.row(1, evidence='{"peak":1}'), 2:self.row(2)}
+                self.snapshot()
+                self.rows[1] = self.row(1, evidence='{"peak":2}', revision=2)
+                self.rows.pop(2)
+                clock.return_value = origin + 901
+                events, pulses = self.snapshot()
+                self.assertEqual([row.id for row in events], [1])
+                self.assertEqual(pulses[1]['peak'], 2)
 
     def test_closed_page_dirty_queue_is_bounded_without_dropping_history(self):
         self.snapshot()

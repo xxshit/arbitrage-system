@@ -3754,12 +3754,15 @@ def enrich_basis_openings(groups, strategy):
     symbols = [group["symbol"] for group in groups]
     if not symbols:
         return
-    # One indexed top-1 lookup per symbol on the server, not all past episodes
-    # materialized in Python. ID makes tied timestamps deterministic.
-    requested = db.session.query(BasisTracking.symbol).filter(BasisTracking.strategy == strategy, BasisTracking.symbol.in_(symbols)).distinct().subquery()
-    latest_id = db.session.query(BasisTracking.id).filter(BasisTracking.strategy == strategy, BasisTracking.symbol == requested.c.symbol).order_by(BasisTracking.started_at.desc(), BasisTracking.id.desc()).limit(1).correlate(requested).scalar_subquery()
-    ids = db.session.query(latest_id).select_from(requested).subquery()
-    latest = {item.symbol: item for item in BasisTracking.query.filter(BasisTracking.id.in_(db.select(ids))).all()}
+    # Group once by symbol, then break timestamp ties by ID. A correlated
+    # ORDER BY ... LIMIT 1 can rescan every episode per symbol with fresh MySQL
+    # statistics (25M rows for 500x100 history), even with the composite index.
+    latest_times = db.session.query(BasisTracking.symbol, func.max(BasisTracking.started_at).label("latest_at")).filter(BasisTracking.strategy == strategy, BasisTracking.symbol.in_(symbols)).group_by(BasisTracking.symbol).subquery()
+    latest_ids = db.session.query(func.max(BasisTracking.id)).join(latest_times, and_(BasisTracking.symbol == latest_times.c.symbol, BasisTracking.started_at == latest_times.c.latest_at)).filter(BasisTracking.strategy == strategy).group_by(BasisTracking.symbol)
+    # Only one scalar per requested symbol enters Python; detail rows are read
+    # directly by primary key, without nesting this query in another semijoin.
+    ids = db.session.execute(latest_ids.statement).scalars().all()
+    latest = {item.symbol: item for item in BasisTracking.query.filter(BasisTracking.id.in_(ids)).all()} if ids else {}
     tracking_ids = [item.id for item in latest.values()]
     counts, first_logs = {}, {}
     if tracking_ids:

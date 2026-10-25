@@ -1170,6 +1170,10 @@ MARKET_HTTP = PublicMarketHttp()
 MARKET_HTTP_EXECUTOR = ThreadPoolExecutor(max_workers=24, thread_name_prefix="market-http")
 DASHBOARD_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="dashboard-quotes")
 DASHBOARD_HTTP_EXECUTOR = ThreadPoolExecutor(max_workers=9, thread_name_prefix="dashboard-http")
+# Recurring background analyses and history syncs must not create a fresh
+# executor on every 10s/30s/5m cycle.  A bounded shared pool keeps their
+# worker arenas alive and caps total background HTTP concurrency.
+BACKGROUND_HTTP_EXECUTOR = ThreadPoolExecutor(max_workers=12, thread_name_prefix="background-http")
 SPOT_VIEW_CACHE = {"key": None, "symbols": None}
 DUAL_VIEW_CACHE = {"key": None, "symbols": None}
 FUNDING_HISTORY_CACHE = {}
@@ -3063,15 +3067,14 @@ def refresh_index_components():
     batch = (pending + pending)[start:start + batch_size]
     INDEX_COMPONENT_CURSOR = (start + len(batch)) % len(pending)
     collected = []
-    with ThreadPoolExecutor(max_workers=15) as executor:
-        futures = {executor.submit(fetch_index_components, exchange, symbol): (exchange, symbol) for exchange, symbol in batch}
-        for future in as_completed(futures):
-            exchange, symbol = futures[future]
-            try:
-                components = future.result()
-            except Exception:
-                continue
-            collected.append(dict(exchange=exchange, symbol=symbol, components_json=json.dumps(components, ensure_ascii=False), captured_at=now))
+    futures = {BACKGROUND_HTTP_EXECUTOR.submit(fetch_index_components, exchange, symbol): (exchange, symbol) for exchange, symbol in batch}
+    for future in as_completed(futures):
+        exchange, symbol = futures[future]
+        try:
+            components = future.result()
+        except Exception:
+            continue
+        collected.append(dict(exchange=exchange, symbol=symbol, components_json=json.dumps(components, ensure_ascii=False), captured_at=now))
     for values in collected:
         # A second collector may have published while network I/O was pending.
         if not IndexComponentSnapshot.query.filter_by(exchange=values["exchange"], symbol=values["symbol"]).first():
@@ -3354,13 +3357,12 @@ def backfill_price_history(groups, batch_size=2):
         return
     db.session.rollback()  # Finished scalar reads; release the connection before network waits.
     fetched = []
-    with ThreadPoolExecutor(max_workers=batch_size) as executor:
-        futures = [executor.submit(fetch_price_history_from_binance, symbol) for symbol in batch]
-        for future in as_completed(futures):
-            try:
-                fetched.append(future.result())
-            except Exception:
-                continue
+    futures = [BACKGROUND_HTTP_EXECUTOR.submit(fetch_price_history_from_binance, symbol) for symbol in batch]
+    for future in as_completed(futures):
+        try:
+            fetched.append(future.result())
+        except Exception:
+            continue
     if not fetched:
         return
     symbols = [symbol for symbol, _ in fetched]
@@ -6640,13 +6642,12 @@ def fetch_major_market_overview(force=False):
     if not force and MAJOR_MARKET_CACHE["items"] and now_ts - MAJOR_MARKET_CACHE["ts"] < MAJOR_MARKET_CACHE_SECONDS:
         return MAJOR_MARKET_CACHE["items"]
     items = []
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(fetch_major_market_symbol, raw_symbol): raw_symbol for raw_symbol in MAJOR_MARKET_SYMBOLS}
-        for future in as_completed(futures):
-            try:
-                items.append(future.result())
-            except Exception:
-                continue
+    futures = {BACKGROUND_HTTP_EXECUTOR.submit(fetch_major_market_symbol, raw_symbol): raw_symbol for raw_symbol in MAJOR_MARKET_SYMBOLS}
+    for future in as_completed(futures):
+        try:
+            items.append(future.result())
+        except Exception:
+            continue
     order = {symbol[:-4] + "/USDT": idx for idx, symbol in enumerate(MAJOR_MARKET_SYMBOLS)}
     items.sort(key=lambda item: order.get(item["symbol"], 99))
     if items:
@@ -6869,18 +6870,17 @@ def load_momentum_scores(force=False):
         candidates = momentum_price_candidates()
         db.session.rollback()
         scored = []
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(fetch_momentum_structure, item) for item in candidates]
-            for future in as_completed(futures):
-                try:
-                    item = future.result()
-                except Exception:
-                    item = None
-                if item:
-                    item["label"] = momentum_score_label(item["score"])
-                    item["reason"] = momentum_score_reason(item)
-                    item["evaluated_at"] = format_shanghai_time(utc_now_naive(), "%H:%M:%S")
-                    scored.append(item)
+        futures = [BACKGROUND_HTTP_EXECUTOR.submit(fetch_momentum_structure, item) for item in candidates]
+        for future in as_completed(futures):
+            try:
+                item = future.result()
+            except Exception:
+                item = None
+            if item:
+                item["label"] = momentum_score_label(item["score"])
+                item["reason"] = momentum_score_reason(item)
+                item["evaluated_at"] = format_shanghai_time(utc_now_naive(), "%H:%M:%S")
+                scored.append(item)
         scored.sort(key=lambda item: (item["score"], item["candidate_score"]), reverse=True)
         if scored:
             MOMENTUM_SCORE_CACHE.update({
@@ -9069,27 +9069,26 @@ def scan_intraday_sudden_pumps():
             time.monotonic() + SUDDEN_PUMP_FAST_SCAN_HOLD_SECONDS,
         )
         verified = []
-        with ThreadPoolExecutor(max_workers=min(4, len(symbols))) as executor:
-            futures = [executor.submit(fetch_sudden_pump_context, symbol, threshold) for symbol in symbols]
-            for future in as_completed(futures):
-                item = future.result()
-                if not item:
-                    continue
-                observed_at = time.monotonic()
-                observed_epoch = time.time()
-                if sudden_pump_confirmation_ready(
-                    item["symbol"], item["trigger_bucket"], item["closed_trigger"],
-                    observed_at=observed_at, observed_epoch=observed_epoch,
-                    stage_key=item["stage_key"],
-                ):
-                    confirmation = SUDDEN_PUMP_CONFIRMATIONS.get(
-                        (item["symbol"], int(item["trigger_bucket"]), item["stage_key"]), {}
-                    )
-                    item["first_detected_epoch"] = int(
-                        confirmation.get("first_seen_epoch", observed_epoch)
-                    )
-                    item["confirmed_epoch"] = int(observed_epoch)
-                    verified.append(item)
+        futures = [BACKGROUND_HTTP_EXECUTOR.submit(fetch_sudden_pump_context, symbol, threshold) for symbol in symbols]
+        for future in as_completed(futures):
+            item = future.result()
+            if not item:
+                continue
+            observed_at = time.monotonic()
+            observed_epoch = time.time()
+            if sudden_pump_confirmation_ready(
+                item["symbol"], item["trigger_bucket"], item["closed_trigger"],
+                observed_at=observed_at, observed_epoch=observed_epoch,
+                stage_key=item["stage_key"],
+            ):
+                confirmation = SUDDEN_PUMP_CONFIRMATIONS.get(
+                    (item["symbol"], int(item["trigger_bucket"]), item["stage_key"]), {}
+                )
+                item["first_detected_epoch"] = int(
+                    confirmation.get("first_seen_epoch", observed_epoch)
+                )
+                item["confirmed_epoch"] = int(observed_epoch)
+                verified.append(item)
         cutoff_bucket = int(time.time()) - 20 * 60
         for key in list(SUDDEN_PUMP_CONFIRMATIONS):
             if key[1] < cutoff_bucket:
@@ -15773,22 +15772,21 @@ def run_funding_sync_batch(exchange, schedule):
         start = end - (31 if full else 2)*DAY_MS
         return FUNDING_HISTORY_CLIENT.fetch(exchange, targets[key]["candidates"], start, end)
 
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="settled-" + exchange.lower()) as executor:
-        pending = {executor.submit(fetch, key, full): (key, full) for key, full in plans}
-        for future in as_completed(pending):
-            key, full = pending[future]
-            try:
-                raw, rows = future.result()
-                inserted += store_settled_funding(exchange, [(raw if exchange == "Binance" else key, stamp, rate) for stamp, rate in rows])
-                actual_latest = max([latest.get(key, 0)] + [stamp for stamp, _ in rows])
-                latest[key] = actual_latest
-                schedule.done(key, targets[key], time.time(), actual_latest, full=full)
-            except Exception as exc:
-                db.session.rollback()
-                errors += 1
-                schedule.done(key, targets[key], time.time(), latest.get(key, 0), error=type(exc).__name__)
-                code = str(exc) if isinstance(exc, FundingHistoryError) else type(exc).__name__
-                app.logger.warning("funding_history_target_failed exchange=%s symbol=%s error=%s", exchange, key, code)
+    pending = {BACKGROUND_HTTP_EXECUTOR.submit(fetch, key, full): (key, full) for key, full in plans}
+    for future in as_completed(pending):
+        key, full = pending[future]
+        try:
+            raw, rows = future.result()
+            inserted += store_settled_funding(exchange, [(raw if exchange == "Binance" else key, stamp, rate) for stamp, rate in rows])
+            actual_latest = max([latest.get(key, 0)] + [stamp for stamp, _ in rows])
+            latest[key] = actual_latest
+            schedule.done(key, targets[key], time.time(), actual_latest, full=full)
+        except Exception as exc:
+            db.session.rollback()
+            errors += 1
+            schedule.done(key, targets[key], time.time(), latest.get(key, 0), error=type(exc).__name__)
+            code = str(exc) if isinstance(exc, FundingHistoryError) else type(exc).__name__
+            app.logger.warning("funding_history_target_failed exchange=%s symbol=%s error=%s", exchange, key, code)
     # Bounded cleanup once per hour, not a table-wide DELETE per HTTP response.
     if now - getattr(schedule, "last_cleanup", 0) >= 3600:
         model = FundingRateRecord if exchange == "Binance" else ExchangeFundingRateRecord

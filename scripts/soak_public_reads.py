@@ -78,6 +78,7 @@ def main():
         from tests.test_alert_screening import quotes, reference
         from scripts.snapshot_write_workload import SnapshotWriteWorkload
         from scripts.maintenance_workload import MaintenanceWorkload
+        from scripts.public_decode_workload import PublicDecodeWorkload
         from sqlalchemy import text
         def no_network(*args, **kwargs):
             raise AssertionError("offline soak cannot call upstream")
@@ -131,10 +132,12 @@ def main():
                 module.EquitySpotSnapshot.__table__)
             module.db.session.commit()
             maintenance_load = MaintenanceWorkload(module)
+        decode_load = PublicDecodeWorkload()
         fingerprints = {name: hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in (
             "app.py", "alert_history_index.py", "alert_read_payload.py", "read_performance.py", "static/app.js",
             "snapshot_persistence.py", "market_transport.py", "scripts/snapshot_write_workload.py", "scripts/soak_public_reads.py",
-            "scripts/soak_snapshot_writes.py", "background_runtime.py", "scripts/maintenance_workload.py")}
+            "scripts/soak_snapshot_writes.py", "background_runtime.py", "scripts/maintenance_workload.py",
+            "scripts/public_decode_workload.py")}
         print(json.dumps(dict(event="ready", at_utc=datetime.now(timezone.utc).isoformat(), rows=args.rows, pid=os.getpid(), files=fingerprints)), flush=True)
         stop, background_errors = threading.Event(), []
         def refresh_history():
@@ -190,9 +193,12 @@ def main():
             time.sleep(.1)
         print(json.dumps(dict(event="warm", at_utc=datetime.now(timezone.utc).isoformat(), seconds=round(time.monotonic()-warm_started,3))), flush=True)
         started, last_report, tick, rss_samples = time.monotonic(), 0, 0, []
-        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="soak-http") as executor:
+        decode_seconds = []
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="soak-http") as executor, \
+                ThreadPoolExecutor(max_workers=1, thread_name_prefix="soak-decode-caller") as decoder:
             while time.monotonic()-started < args.seconds:
                 cycle = time.monotonic()
+                decode_future = decoder.submit(decode_load.step)
                 update_quotes(tick)
                 with module.app.app_context():
                     snapshot_load.step(module.db.session)
@@ -208,6 +214,7 @@ def main():
                 for future in futures:
                     key, elapsed = future.result(timeout=45)
                     measurements[key].append(elapsed)
+                decode_seconds.append(decode_future.result(timeout=30))
                 state = module.BACKGROUND_RUNTIME.snapshot()
                 assert not background_errors, background_errors
                 assert all(holder["worker"] == "soak-history" and holder["seconds"] < 5 for holder in state["db_holders"]), state
@@ -215,7 +222,7 @@ def main():
                 if elapsed-last_report >= 60 or tick == 0:
                     rss = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(os.getpid())], text=True).strip())*1024
                     rss_samples.append(rss)
-                    print(json.dumps(dict(event="progress", seconds=round(elapsed), cycles=tick+1, requests=sum(map(len, measurements.values())), rss_bytes=rss, snapshot_rows_updated=snapshot_load.row_updates, index=module.ALERT_HISTORY_INDEX.status(), db=state, latency={key: dict(last=round(values[-1],3), p95=round(sorted(values)[int(.95*(len(values)-1))],3), max=round(max(values),3)) for key, values in measurements.items()})), flush=True)
+                    print(json.dumps(dict(event="progress", seconds=round(elapsed), cycles=tick+1, requests=sum(map(len, measurements.values())), rss_bytes=rss, snapshot_rows_updated=snapshot_load.row_updates, decode_responses=decode_load.responses, decode_last_seconds=round(decode_seconds[-1],3), decode_max_seconds=round(max(decode_seconds),3), index=module.ALERT_HISTORY_INDEX.status(), db=state, latency={key: dict(last=round(values[-1],3), p95=round(sorted(values)[int(.95*(len(values)-1))],3), max=round(max(values),3)) for key, values in measurements.items()})), flush=True)
                     last_report = elapsed
                 tick += 1
                 time.sleep(max(0, 5-(time.monotonic()-cycle)))
@@ -232,7 +239,9 @@ def main():
             maintenance_check = maintenance_load.verify()
             check_integrity(module.db.session, module.db.metadata, module.db.engine.dialect.name)
             module.db.session.remove()
-        print(json.dumps(dict(event="passed", seconds=round(time.monotonic()-started), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints, snapshot_check=snapshot_check, maintenance_check=maintenance_check, source_counts_unchanged=True, integrity="ok")), flush=True)
+        decode_check = decode_load.verify()
+        assert decode_check["cycles"] == tick
+        print(json.dumps(dict(event="passed", seconds=round(time.monotonic()-started), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints, snapshot_check=snapshot_check, maintenance_check=maintenance_check, decode_check=decode_check, source_counts_unchanged=True, integrity="ok")), flush=True)
 
 
 if __name__ == "__main__":

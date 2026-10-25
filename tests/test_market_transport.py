@@ -2,6 +2,7 @@ import gzip
 import http.client
 import io
 import json
+import tracemalloc
 import unittest
 from unittest.mock import patch
 
@@ -194,6 +195,64 @@ class PublicTransportTests(unittest.TestCase):
         self.assertEqual(len(result), 256)
         result[next(iter(result))]["attempts"] = 999
         self.assertNotEqual(self.client.status()[next(iter(result))]["attempts"], 999)
+
+
+class BoundedGzipAllocationTests(unittest.TestCase):
+    def test_small_payload_does_not_reserve_the_16mib_response_limit(self):
+        body = gzip.compress(b'{"rate":"0.00005001"}')
+        self.assertFalse(tracemalloc.is_tracing())
+        tracemalloc.start()
+        try:
+            result = transport.decode_json(body, "gzip")
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(result, ({"rate": "0.00005001"}, 21))
+        self.assertLess(peak, 2*1024*1024, "small reads must not preallocate MAX_BODY")
+
+    def test_decompressor_requests_are_small_even_for_multichunk_payloads(self):
+        raw = json.dumps({"value": "x"*200000}).encode()
+        original_read = gzip.GzipFile.read
+        requests = []
+        def observed_read(stream, size=-1):
+            requests.append(size)
+            return original_read(stream, size)
+        with patch.object(gzip.GzipFile, "read", observed_read):
+            result, length = transport.decode_json(gzip.compress(raw), "GZIP")
+        self.assertEqual(result, json.loads(raw))
+        self.assertEqual(length, len(raw))
+        self.assertTrue(requests)
+        self.assertTrue(all(0 < size <= 65536 for size in requests), requests)
+
+    def test_exact_limit_is_accepted_and_one_extra_byte_rejected(self):
+        for limit in (100, 65536, 65537, 131072, transport.MAX_BODY):
+            with self.subTest(limit=limit), patch.object(transport, "MAX_BODY", limit):
+                raw = b'"'+b'x'*(limit-2)+b'"'
+                value, length = transport.decode_json(gzip.compress(raw), "gzip")
+                self.assertEqual(value, "x"*(limit-2))
+                self.assertEqual(length, limit)
+                with self.assertRaisesRegex(ValueError, "public_payload_too_large"):
+                    transport.decode_json(gzip.compress(raw+b' '), "gzip")
+
+    def test_concatenated_members_and_zero_padding_keep_exact_values(self):
+        body = gzip.compress(b'{"value":') + gzip.compress(b'"0.100000001"}') + b'\0'*17
+        self.assertEqual(transport.decode_json(body, "gzip"), ({"value": "0.100000001"}, 23))
+
+    def test_full_read_checks_trailer_crc_and_size(self):
+        raw = b'"'+b'x'*65534+b'"'
+        body = gzip.compress(raw)
+        variants = (body[:-1], body[:-8]+b'wrongCRC', body[:-4]+b'bad!')
+        for corrupt in variants:
+            with self.subTest(corrupt=corrupt[-8:]), self.assertRaises((OSError, EOFError)):
+                transport.decode_json(corrupt, "gzip")
+
+    def test_malformed_json_and_encoding_still_fail(self):
+        with self.assertRaises(json.JSONDecodeError):
+            transport.decode_json(gzip.compress(b'not json'), "gzip")
+        with self.assertRaises(UnicodeDecodeError):
+            transport.decode_json(gzip.compress(b'"\xff"'), "gzip")
+        with self.assertRaisesRegex(ValueError, "unsupported_content_encoding"):
+            transport.decode_json(b'{}', "br")
 
 
 class SourceAttributionTests(unittest.TestCase):

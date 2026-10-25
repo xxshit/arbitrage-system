@@ -34,8 +34,20 @@ def decode_json(body, encoding=""):
     if len(body) > MAX_BODY:
         raise ValueError("public_payload_too_large")
     if encoding.lower() == "gzip":
+        chunks, length = [], 0
         with gzip.GzipFile(fileobj=io.BytesIO(body)) as stream:
-            body = stream.read(MAX_BODY + 1)
+            # BufferedReader preallocates the requested size, even for a tiny
+            # gzip response. Limit each temporary buffer, not just the final
+            # body; still consume EOF/trailers and detect one byte over budget.
+            while True:
+                chunk = stream.read(min(65536, MAX_BODY + 1 - length))
+                if not chunk:
+                    break
+                length += len(chunk)
+                if length > MAX_BODY:
+                    raise ValueError("public_payload_too_large")
+                chunks.append(chunk)
+        body = b"".join(chunks)
     elif encoding not in ("", "identity"):
         raise ValueError("unsupported_content_encoding")
     if len(body) > MAX_BODY:

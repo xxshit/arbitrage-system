@@ -1161,6 +1161,15 @@ LAST_MARKET_DB_PERSIST_AT = {"spot": 0.0, "dual": 0.0}
 MARKET_PAYLOAD_CACHE = {}
 MARKET_PAYLOAD_CACHE_LOCK = threading.Lock()
 MARKET_HTTP = PublicMarketHttp()
+# The two five-second market loops previously created and destroyed a fresh
+# executor for every batch of public requests.  That made hundreds of short-
+# lived worker threads per hour; glibc kept their arenas after the threads
+# exited, so RSS climbed even though live Python allocations stayed flat.
+# Keep one bounded pool for all market I/O instead.  It caps concurrency while
+# retaining the workers and their allocators, without changing request timing.
+MARKET_HTTP_EXECUTOR = ThreadPoolExecutor(max_workers=24, thread_name_prefix="market-http")
+DASHBOARD_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="dashboard-quotes")
+DASHBOARD_HTTP_EXECUTOR = ThreadPoolExecutor(max_workers=9, thread_name_prefix="dashboard-http")
 SPOT_VIEW_CACHE = {"key": None, "symbols": None}
 DUAL_VIEW_CACHE = {"key": None, "symbols": None}
 FUNDING_HISTORY_CACHE = {}
@@ -1620,26 +1629,25 @@ def fetch_market_payloads(urls, cache_seconds=None, live_timeout=1.5):
         else:
             pending[name] = url
     if pending:
-        with ThreadPoolExecutor(max_workers=len(pending)) as executor:
-            futures = {executor.submit(MARKET_HTTP.get_json, url, live_timeout): (name, url) for name, url in pending.items()}
-            for future in as_completed(futures):
-                name, url = futures[future]
-                try:
-                    payload = future.result()
-                    results[name] = payload
-                    with MARKET_PAYLOAD_CACHE_LOCK:
-                        previous = MARKET_PAYLOAD_CACHE.get(url)
-                        if not previous or previous["fetched_at"] <= now:
-                            MARKET_PAYLOAD_CACHE[url] = {"payload": payload, "fetched_at": now}
-                    results.observed_at[name] = wall
-                except Exception as exc:
-                    cached = MARKET_PAYLOAD_CACHE.get(url)
-                    if cached:
-                        results[name] = cached["payload"]
-                        results.observed_at[name] = wall - (now - cached["fetched_at"])
-                        errors[name] = f"using cached payload: {exc}"
-                    else:
-                        errors[name] = str(exc)
+        futures = {MARKET_HTTP_EXECUTOR.submit(MARKET_HTTP.get_json, url, live_timeout): (name, url) for name, url in pending.items()}
+        for future in as_completed(futures):
+            name, url = futures[future]
+            try:
+                payload = future.result()
+                results[name] = payload
+                with MARKET_PAYLOAD_CACHE_LOCK:
+                    previous = MARKET_PAYLOAD_CACHE.get(url)
+                    if not previous or previous["fetched_at"] <= now:
+                        MARKET_PAYLOAD_CACHE[url] = {"payload": payload, "fetched_at": now}
+                results.observed_at[name] = wall
+            except Exception as exc:
+                cached = MARKET_PAYLOAD_CACHE.get(url)
+                if cached:
+                    results[name] = cached["payload"]
+                    results.observed_at[name] = wall - (now - cached["fetched_at"])
+                    errors[name] = f"using cached payload: {exc}"
+                else:
+                    errors[name] = str(exc)
     return results, errors
 
 
@@ -2379,14 +2387,13 @@ def refresh_binance_open_interest(contracts):
     def fetch(symbol):
         return symbol, get_json("https://fapi.binance.com/fapi/v1/openInterest?" + urlencode({"symbol": symbol}), timeout=1)
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = [executor.submit(fetch, symbol) for symbol in batch]
-        for future in as_completed(futures):
-            try:
-                symbol, payload = future.result()
-                BINANCE_OPEN_INTEREST_CACHE[symbol] = {"contracts": float(payload.get("openInterest", 0) or 0), "updated_at": now}
-            except Exception:
-                continue
+    futures = [MARKET_HTTP_EXECUTOR.submit(fetch, symbol) for symbol in batch]
+    for future in as_completed(futures):
+        try:
+            symbol, payload = future.result()
+            BINANCE_OPEN_INTEREST_CACHE[symbol] = {"contracts": float(payload.get("openInterest", 0) or 0), "updated_at": now}
+        except Exception:
+            continue
 
 
 def funding_statistics_window_starts(now):
@@ -3149,23 +3156,22 @@ def refresh_okx_funding(inst_ids):
         data = payload.get("data", [])
         return inst_id, data[0] if data else None
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = [executor.submit(fetch, inst_id) for inst_id in batch]
-        for future in as_completed(futures):
-            try:
-                inst_id, item = future.result()
-                if item:
-                    current_funding_time = item.get("fundingTime")
-                    next_funding_time = item.get("nextFundingTime")
-                    OKX_FUNDING_CACHE[inst_id] = {
-                        "funding_rate": float(item.get("fundingRate", 0)) * 100,
-                        "funding_interval_hours": max(1, round((int(next_funding_time or 0) - int(current_funding_time or 0)) / 3_600_000)) if next_funding_time and current_funding_time else 8,
-                        # OKX fundingTime 是下一次实际结算，nextFundingTime 是再下一期；页面倒计时必须看 fundingTime。
-                        "next_funding_time": format_funding_time(current_funding_time or next_funding_time),
-                        "updated_at": now,
-                    }
-            except Exception:
-                continue
+    futures = [MARKET_HTTP_EXECUTOR.submit(fetch, inst_id) for inst_id in batch]
+    for future in as_completed(futures):
+        try:
+            inst_id, item = future.result()
+            if item:
+                current_funding_time = item.get("fundingTime")
+                next_funding_time = item.get("nextFundingTime")
+                OKX_FUNDING_CACHE[inst_id] = {
+                    "funding_rate": float(item.get("fundingRate", 0)) * 100,
+                    "funding_interval_hours": max(1, round((int(next_funding_time or 0) - int(current_funding_time or 0)) / 3_600_000)) if next_funding_time and current_funding_time else 8,
+                    # OKX fundingTime 是下一次实际结算，nextFundingTime 是再下一期；页面倒计时必须看 fundingTime。
+                    "next_funding_time": format_funding_time(current_funding_time or next_funding_time),
+                    "updated_at": now,
+                }
+        except Exception:
+            continue
 
 
 def save_latest_dual_futures_snapshot(groups):
@@ -6662,30 +6668,29 @@ def fetch_dashboard_symbol_quotes(raw_symbol):
         "Bybit": "https://api.bybit.com/v5/market/tickers?" + urlencode({"category": "linear", "symbol": raw_symbol}),
     }
     quotes, quote_times, ticker_metrics = {}, {}, {}
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(get_json, url, 1.5): exchange for exchange, url in urls.items()}
-        for future in as_completed(futures):
-            exchange = futures[future]
-            try:
-                payload = future.result()
+    futures = {DASHBOARD_HTTP_EXECUTOR.submit(get_json, url, 1.5): exchange for exchange, url in urls.items()}
+    for future in as_completed(futures):
+        exchange = futures[future]
+        try:
+            payload = future.result()
+            if exchange == "Binance":
+                price = float(payload.get("lastPrice", 0) or 0)
+            elif exchange == "OKX":
+                rows = payload.get("data") or []
+                price = float((rows[0] if rows else {}).get("last", 0) or 0)
+            else:
+                rows = ((payload.get("result") or {}).get("list") or [])
+                price = float((rows[0] if rows else {}).get("lastPrice", 0) or 0)
+            if math.isfinite(price) and price > 0:
+                quotes[exchange] = price
+                quote_times[exchange] = time.time()
                 if exchange == "Binance":
-                    price = float(payload.get("lastPrice", 0) or 0)
-                elif exchange == "OKX":
-                    rows = payload.get("data") or []
-                    price = float((rows[0] if rows else {}).get("last", 0) or 0)
-                else:
-                    rows = ((payload.get("result") or {}).get("list") or [])
-                    price = float((rows[0] if rows else {}).get("lastPrice", 0) or 0)
-                if math.isfinite(price) and price > 0:
-                    quotes[exchange] = price
-                    quote_times[exchange] = time.time()
-                    if exchange == "Binance":
-                        ticker_metrics = {
-                            "change_24h": float(payload.get("priceChangePercent", 0) or 0),
-                            "volume_24h": float(payload.get("quoteVolume", 0) or 0),
-                        }
-            except Exception:
-                continue
+                    ticker_metrics = {
+                        "change_24h": float(payload.get("priceChangePercent", 0) or 0),
+                        "volume_24h": float(payload.get("quoteVolume", 0) or 0),
+                    }
+        except Exception:
+            continue
     return raw_symbol[:-4] + "/USDT", quotes, quote_times, ticker_metrics
 
 
@@ -7129,43 +7134,42 @@ def refresh_dashboard_opportunities():
     global DASHBOARD_OPPORTUNITY_CACHE
     rows = []
     previous = {item["symbol"]: item for item in DASHBOARD_OPPORTUNITY_CACHE["items"]}
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        futures = {executor.submit(fetch_dashboard_symbol_quotes, symbol): symbol[:-4] + "/USDT" for symbol in MAJOR_MARKET_SYMBOLS}
-        for future in as_completed(futures):
-            try:
-                symbol, quotes, quote_times, ticker_metrics = future.result()
-            except Exception:
-                if futures[future] in previous:
-                    rows.append(previous[futures[future]])
-                continue
-            if not quotes:
-                if symbol in previous:
-                    rows.append(previous[symbol])
-                continue
-            buy_exchange = min(quotes, key=quotes.get)
-            sell_exchange = max(quotes, key=quotes.get)
-            buy, sell = quotes[buy_exchange], quotes[sell_exchange]
-            # One surviving exchange is useful for price display, not a cross-exchange opportunity.
-            spread = (sell / buy - 1) * 100 if len(quotes) >= 2 else None
-            captured_at = min(quote_times.values())
-            rows.append({
-                "symbol": symbol,
-                "buy_exchange": buy_exchange,
-                "sell_exchange": sell_exchange,
-                "buy_price": round(buy, 8),
-                "sell_price": round(sell, 8),
-                "exchange_prices": {
-                    "Binance": round(quotes["Binance"], 8) if "Binance" in quotes else None,
-                    "OKX": round(quotes["OKX"], 8) if "OKX" in quotes else None,
-                    "Bybit": round(quotes["Bybit"], 8) if "Bybit" in quotes else None,
-                },
-                "spread": round(spread, 4) if spread is not None else None,
-                "estimated_profit": round(spread - 0.12, 4) if spread is not None else None,
-                "quote_times": quote_times,
-                "ticker_metrics": ticker_metrics,
-                "updated_at_epoch": captured_at,
-                "updated_at": datetime.fromtimestamp(captured_at, SHANGHAI_TZ).strftime("%H:%M:%S"),
-            })
+    futures = {DASHBOARD_EXECUTOR.submit(fetch_dashboard_symbol_quotes, symbol): symbol[:-4] + "/USDT" for symbol in MAJOR_MARKET_SYMBOLS}
+    for future in as_completed(futures):
+        try:
+            symbol, quotes, quote_times, ticker_metrics = future.result()
+        except Exception:
+            if futures[future] in previous:
+                rows.append(previous[futures[future]])
+            continue
+        if not quotes:
+            if symbol in previous:
+                rows.append(previous[symbol])
+            continue
+        buy_exchange = min(quotes, key=quotes.get)
+        sell_exchange = max(quotes, key=quotes.get)
+        buy, sell = quotes[buy_exchange], quotes[sell_exchange]
+        # One surviving exchange is useful for price display, not a cross-exchange opportunity.
+        spread = (sell / buy - 1) * 100 if len(quotes) >= 2 else None
+        captured_at = min(quote_times.values())
+        rows.append({
+            "symbol": symbol,
+            "buy_exchange": buy_exchange,
+            "sell_exchange": sell_exchange,
+            "buy_price": round(buy, 8),
+            "sell_price": round(sell, 8),
+            "exchange_prices": {
+                "Binance": round(quotes["Binance"], 8) if "Binance" in quotes else None,
+                "OKX": round(quotes["OKX"], 8) if "OKX" in quotes else None,
+                "Bybit": round(quotes["Bybit"], 8) if "Bybit" in quotes else None,
+            },
+            "spread": round(spread, 4) if spread is not None else None,
+            "estimated_profit": round(spread - 0.12, 4) if spread is not None else None,
+            "quote_times": quote_times,
+            "ticker_metrics": ticker_metrics,
+            "updated_at_epoch": captured_at,
+            "updated_at": datetime.fromtimestamp(captured_at, SHANGHAI_TZ).strftime("%H:%M:%S"),
+        })
     rows.sort(key=lambda item: item["estimated_profit"] if item["estimated_profit"] is not None else -math.inf, reverse=True)
     if rows:
         # Publish an entire generation atomically; failed sources retain their original timestamp.

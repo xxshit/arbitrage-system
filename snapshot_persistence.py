@@ -77,6 +77,30 @@ def update_snapshots(session, table, updates):
             )
 
 
+def _walk_json_delta(old, new, path, sets, removes, limit):
+    # A recursive local closure owns itself and these accumulators, retaining
+    # patch values until cyclic GC even after a full-value fallback. Explicit
+    # arguments give the plan its ordinary caller-owned lifetime on every exit.
+    if len(sets) + len(removes) > limit:
+        raise OverflowError
+    if json_equal(old, new):
+        return
+    if isinstance(old, dict) and isinstance(new, dict):
+        for key in old.keys() - new.keys():
+            removes.append(path + "." + json.dumps(key, ensure_ascii=False))
+        for key, value in new.items():
+            child = path + "." + json.dumps(key, ensure_ascii=False)
+            if key not in old:
+                sets.append((child, value))
+            else:
+                _walk_json_delta(old[key], value, child, sets, removes, limit)
+    elif isinstance(old, list) and isinstance(new, list) and len(old) == len(new):
+        for index, (left, right) in enumerate(zip(old, new)):
+            _walk_json_delta(left, right, f"{path}[{index}]", sets, removes, limit)
+    else:
+        sets.append((path, new))
+
+
 def json_delta(previous, current, limit=JSON_PATCH_LIMIT):
     """Bounded JSON_SET/REMOVE plan, or None for a full replacement.
 
@@ -85,28 +109,8 @@ def json_delta(previous, current, limit=JSON_PATCH_LIMIT):
     """
     sets, removes = [], []
 
-    def walk(old, new, path):
-        if len(sets) + len(removes) > limit:
-            raise OverflowError
-        if json_equal(old, new):
-            return
-        if isinstance(old, dict) and isinstance(new, dict):
-            for key in old.keys() - new.keys():
-                removes.append(path + "." + json.dumps(key, ensure_ascii=False))
-            for key, value in new.items():
-                child = path + "." + json.dumps(key, ensure_ascii=False)
-                if key not in old:
-                    sets.append((child, value))
-                else:
-                    walk(old[key], value, child)
-        elif isinstance(old, list) and isinstance(new, list) and len(old) == len(new):
-            for index, (left, right) in enumerate(zip(old, new)):
-                walk(left, right, f"{path}[{index}]")
-        else:
-            sets.append((path, new))
-
     try:
-        walk(previous, current, "$")
+        _walk_json_delta(previous, current, "$", sets, removes, limit)
     except OverflowError:
         return None
     if len(sets) + len(removes) > limit:

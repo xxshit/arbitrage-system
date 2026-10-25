@@ -6,6 +6,7 @@ import subprocess
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+import weakref
 
 from sqlalchemy import Column, DateTime, Float, Integer, JSON, MetaData, Table, create_engine, event, select
 from sqlalchemy.dialects import mysql
@@ -108,6 +109,67 @@ class SnapshotDeltaTests(unittest.TestCase):
 
 
 class EquityDeltaTests(unittest.TestCase):
+    def test_sparse_patch_releases_values_when_the_caller_releases_the_plan(self):
+        class TrackedValue(dict):
+            pass
+
+        def build_plan():
+            value = TrackedValue(price=1.25, missing=None)
+            reference = weakref.ref(value)
+            padding = "unchanged metadata" * 1000
+            plan = json_delta({"data": None, "metadata": padding},
+                              {"data": value, "metadata": padding})
+            self.assertIs(plan[0][0][1], value)
+            return plan, reference
+
+        plan, reference = build_plan()
+        self.assertIsNotNone(reference())  # The live patch must retain its value.
+        del plan
+        self.assertIsNone(reference())  # No hidden recursive-closure owner.
+
+    def test_dense_fallback_does_not_retain_abandoned_patch_values(self):
+        class TrackedValue(dict):
+            pass
+
+        def build_plan():
+            value = TrackedValue(price=1.25, evidence="synthetic" * 1000)
+            reference = weakref.ref(value)
+            self.assertIsNone(json_delta({"data": None}, {"data": value}))
+            return reference
+
+        self.assertIsNone(build_plan()())
+
+    def test_limit_fallback_does_not_retain_partially_built_patch_values(self):
+        class TrackedValue(dict):
+            pass
+
+        def build_plan():
+            value = TrackedValue(price=1.25)
+            reference = weakref.ref(value)
+            # The second child exceeds the limit after the first child is saved.
+            self.assertIsNone(json_delta({"data": None, "next": 0},
+                                         {"data": value, "next": 1}, limit=0))
+            return reference
+
+        self.assertIsNone(build_plan()())
+
+    def test_encoding_error_does_not_leave_a_hidden_patch_owner(self):
+        class TrackedValue(dict):
+            pass
+
+        def build_plan():
+            value = TrackedValue(price=float("nan"))
+            reference = weakref.ref(value)
+            try:
+                json_delta({"data": None}, {"data": value})
+            except ValueError:
+                pass  # Invalid JSON stays invalid; discard its traceback.
+            else:
+                self.fail("non-finite JSON must still be rejected")
+            return reference
+
+        self.assertIsNone(build_plan()())
+
     def test_unchanged_metadata_is_not_in_patch_and_json_null_is_explicit(self):
         old = dict(metadata="issuer evidence" * 100, rows=[dict(price=1, rate=.005, error=None)])
         new = copy.deepcopy(old)

@@ -10,6 +10,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
+import gzip
 import hashlib
 import json
 import os
@@ -64,10 +65,13 @@ def main():
     parser.add_argument("--seconds", type=int, default=7200)
     parser.add_argument("--rows", type=int, default=100000)
     parser.add_argument("--mysql-socket")
+    parser.add_argument("--exercise-background", action="store_true")
+    parser.add_argument("--accept-gzip", action="store_true")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo))
     os.environ["TZ"] = "UTC"
+    os.environ["PYTHON_DOTENV_DISABLED"] = "1"
     time.tzset()
     with tempfile.TemporaryDirectory(prefix="arbiscope-public-soak-") as directory, ExitStack() as cleanup:
         database_url = synthetic_database_url(directory, args.mysql_socket)
@@ -79,6 +83,7 @@ def main():
         from scripts.snapshot_write_workload import SnapshotWriteWorkload
         from scripts.maintenance_workload import MaintenanceWorkload
         from scripts.public_decode_workload import PublicDecodeWorkload
+        from scripts.background_executor_workload import BackgroundExecutorWorkload
         from sqlalchemy import text
         def no_network(*args, **kwargs):
             raise AssertionError("offline soak cannot call upstream")
@@ -102,7 +107,9 @@ def main():
             cleanup.callback(module.db.engine.dispose)
             if module.db.engine.dialect.name == "sqlite":
                 with module.db.engine.connect() as conn:
-                    conn.execute(text("PRAGMA journal_mode=WAL"))
+                    journal_mode = os.environ.get("SOAK_SQLITE_JOURNAL_MODE", "WAL").upper()
+                    assert journal_mode in {"WAL", "DELETE", "TRUNCATE", "MEMORY"}
+                    conn.execute(text("PRAGMA journal_mode=" + journal_mode))
             else:
                 assert module.db.engine.url.database.startswith("snapshot_soak_")
                 assert module.db.engine.url.query.get("unix_socket") == args.mysql_socket
@@ -133,12 +140,16 @@ def main():
             module.db.session.commit()
             maintenance_load = MaintenanceWorkload(module)
         decode_load = PublicDecodeWorkload()
+        background_load = BackgroundExecutorWorkload(repo) if args.exercise_background else None
+        if background_load:
+            cleanup.callback(background_load.close)
         fingerprints = {name: hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in (
             "app.py", "alert_history_index.py", "alert_read_payload.py", "read_performance.py", "static/app.js",
             "snapshot_persistence.py", "market_transport.py", "scripts/snapshot_write_workload.py", "scripts/soak_public_reads.py",
             "scripts/soak_snapshot_writes.py", "background_runtime.py", "scripts/maintenance_workload.py",
-            "scripts/public_decode_workload.py")}
-        print(json.dumps(dict(event="ready", at_utc=datetime.now(timezone.utc).isoformat(), rows=args.rows, pid=os.getpid(), files=fingerprints)), flush=True)
+            "scripts/public_decode_workload.py", "scripts/background_executor_workload.py")}
+        print(json.dumps(dict(event="ready", at_utc=datetime.now(timezone.utc).isoformat(), rows=args.rows, pid=os.getpid(), files=fingerprints,
+                             exercise_background=args.exercise_background, accept_gzip=args.accept_gzip)), flush=True)
         stop, background_errors = threading.Event(), []
         def refresh_history():
             while not stop.is_set():
@@ -154,15 +165,22 @@ def main():
         module.BACKGROUND_WORKERS_STARTED = True
         history_thread = cleanup.enter_context(background_task(refresh_history, stop, name="soak-history"))
         measurements = {key: [] for key in ("summary", "detail", "active", "spot", "dual")}
+        compressed_responses = {key: 0 for key in measurements}
+        compression_lock = threading.Lock()
         paths = dict(summary="/api/alerts?view=summary", detail="/api/alerts?view=detail&symbol=SOAK1/USDT&page=2", active="/api/alerts?view=active", spot="/api/spot-futures", dual="/api/dual-futures")
         def request(key):
             began = time.monotonic()
             client = module.app.test_client()
             with client.session_transaction() as session:
                 session.update(user_id=user_id, auth_token="synthetic-token")
-            response = client.get(paths[key])
+            response = client.get(paths[key], headers={"Accept-Encoding": "gzip"} if args.accept_gzip else {})
             assert response.status_code == 200, (key, response.status_code, response.get_data(as_text=True)[:150])
-            data = response.get_json()
+            raw = response.get_data()
+            if response.headers.get("Content-Encoding") == "gzip":
+                raw = gzip.decompress(raw)
+                with compression_lock:
+                    compressed_responses[key] += 1
+            data = json.loads(raw)
             if key == "summary" and not data.get("history_loading"):
                 assert data["total_observations"] == args.rows
             if key == "detail":
@@ -193,12 +211,21 @@ def main():
             time.sleep(.1)
         print(json.dumps(dict(event="warm", at_utc=datetime.now(timezone.utc).isoformat(), seconds=round(time.monotonic()-warm_started,3))), flush=True)
         started, last_report, tick, rss_samples = time.monotonic(), 0, 0, []
+        started_wall = last_cycle_wall = time.time()
+        max_cycle_gap = 0
         decode_seconds = []
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="soak-http") as executor, \
-                ThreadPoolExecutor(max_workers=1, thread_name_prefix="soak-decode-caller") as decoder:
+                ThreadPoolExecutor(max_workers=1, thread_name_prefix="soak-decode-caller") as decoder, \
+                ThreadPoolExecutor(max_workers=1, thread_name_prefix="soak-background-driver") as background:
             while time.monotonic()-started < args.seconds:
                 cycle = time.monotonic()
+                wall_now = time.time()
+                max_cycle_gap = max(max_cycle_gap, wall_now-last_cycle_wall)
+                assert max_cycle_gap < 30, "sustained workload interrupted by a wall-clock gap"
+                assert abs((wall_now-started_wall)-(cycle-started)) < 10, "wall/monotonic clock divergence"
+                last_cycle_wall = wall_now
                 decode_future = decoder.submit(decode_load.step)
+                background_future = background.submit(background_load.step) if background_load else None
                 update_quotes(tick)
                 with module.app.app_context():
                     snapshot_load.step(module.db.session)
@@ -215,17 +242,26 @@ def main():
                     key, elapsed = future.result(timeout=45)
                     measurements[key].append(elapsed)
                 decode_seconds.append(decode_future.result(timeout=30))
+                if background_future:
+                    background_future.result(timeout=30)
                 state = module.BACKGROUND_RUNTIME.snapshot()
                 assert not background_errors, background_errors
                 assert all(holder["worker"] == "soak-history" and holder["seconds"] < 5 for holder in state["db_holders"]), state
                 elapsed = time.monotonic()-started
                 if elapsed-last_report >= 60 or tick == 0:
-                    rss = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(os.getpid())], text=True).strip())*1024
+                    raw_rss = int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(os.getpid())], text=True).strip())
+                    # `ps -o rss` reports KiB on both supported runners.
+                    rss = raw_rss * 1024
+                    assert 0 < rss < 640*1048576, "synthetic combined RSS exceeded its original bound"
                     rss_samples.append(rss)
-                    print(json.dumps(dict(event="progress", seconds=round(elapsed), cycles=tick+1, requests=sum(map(len, measurements.values())), rss_bytes=rss, snapshot_rows_updated=snapshot_load.row_updates, decode_responses=decode_load.responses, decode_last_seconds=round(decode_seconds[-1],3), decode_max_seconds=round(max(decode_seconds),3), index=module.ALERT_HISTORY_INDEX.status(), db=state, latency={key: dict(last=round(values[-1],3), p95=round(sorted(values)[int(.95*(len(values)-1))],3), max=round(max(values),3)) for key, values in measurements.items()})), flush=True)
+                    print(json.dumps(dict(event="progress", at_utc=datetime.now(timezone.utc).isoformat(), seconds=round(elapsed), wall_seconds=round(time.time()-started_wall,3), max_cycle_gap_seconds=round(max_cycle_gap,3), cycles=tick+1, requests=sum(map(len, measurements.values())), rss_bytes=rss, snapshot_rows_updated=snapshot_load.row_updates, decode_responses=decode_load.responses, decode_last_seconds=round(decode_seconds[-1],3), decode_max_seconds=round(max(decode_seconds),3), index=module.ALERT_HISTORY_INDEX.status(), db=state, compressed_responses=dict(compressed_responses), background=background_load.status() if background_load else None, latency={key: dict(last=round(values[-1],3), p95=round(sorted(values)[int(.95*(len(values)-1))],3), max=round(max(values),3)) for key, values in measurements.items()})), flush=True)
                     last_report = elapsed
                 tick += 1
                 time.sleep(max(0, 5-(time.monotonic()-cycle)))
+        # A sleep during the final interval can end the loop without another
+        # iteration. Check it too before accepting a continuous workload.
+        assert time.time()-last_cycle_wall < 30, "final workload interval interrupted by a wall-clock gap"
+        assert abs((time.time()-started_wall)-(time.monotonic()-started)) < 10, "final wall/monotonic clock divergence"
         assert all(hashlib.sha256((repo/name).read_bytes()).hexdigest() == digest for name, digest in fingerprints.items()), "candidate changed during soak"
         stop.set()
         history_thread.join(30)
@@ -241,7 +277,14 @@ def main():
             module.db.session.remove()
         decode_check = decode_load.verify()
         assert decode_check["cycles"] == tick
-        print(json.dumps(dict(event="passed", seconds=round(time.monotonic()-started), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints, snapshot_check=snapshot_check, maintenance_check=maintenance_check, decode_check=decode_check, source_counts_unchanged=True, integrity="ok")), flush=True)
+        background_check = background_load.verify() if background_load else None
+        if background_check:
+            assert background_check["cycles"] == tick
+        if args.accept_gzip:
+            assert compressed_responses["summary"] >= tick and compressed_responses["detail"] == tick
+        for values in measurements.values():
+            assert sorted(values)[int(.95*(len(values)-1))] < 5 and max(values) < 10, "HTTP latency outside original bounds"
+        print(json.dumps(dict(event="passed", at_utc=datetime.now(timezone.utc).isoformat(), seconds=round(time.monotonic()-started), wall_seconds=round(time.time()-started_wall,3), max_cycle_gap_seconds=round(max_cycle_gap,3), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints, snapshot_check=snapshot_check, maintenance_check=maintenance_check, decode_check=decode_check, background_check=background_check, compressed_responses=compressed_responses, source_counts_unchanged=True, integrity="ok")), flush=True)
 
 
 if __name__ == "__main__":

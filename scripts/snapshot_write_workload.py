@@ -7,7 +7,7 @@ import copy
 from datetime import datetime, timedelta
 import random
 
-from sqlalchemy import DateTime, Double, Float, Integer, JSON, String, cast, select
+from sqlalchemy import DateTime, Double, Float, Integer, JSON, String, cast, event, select
 
 from snapshot_persistence import equity_payload_update, update_snapshots
 
@@ -23,6 +23,46 @@ def exact_snapshot_select(table, dialect):
     return select(table)
 
 
+class SnapshotSqlCoverage:
+    """Count completed DBAPI executions, not a dialect label or mocked calls.
+
+    Retains only counters; SQL text and parameters are never saved. A MySQL
+    acceptance run must execute JSON_SET, JSON_REMOVE, full value and heartbeat
+    updates against its own real native-JSON database.
+    """
+    def __init__(self, engine):
+        self.engine = engine
+        self.native_mysql = engine.dialect.name == "mysql" and not getattr(engine.dialect, "is_mariadb", False)
+        self.counts = dict(updates=0, json_set=0, json_remove=0, full_value=0, heartbeat=0)
+        self._listener = self._after_execute
+        event.listen(engine, "after_cursor_execute", self._listener)
+
+    def _after_execute(self, connection, cursor, statement, parameters, context, executemany):
+        compiled = getattr(context, "compiled", None)
+        expression = getattr(compiled, "statement", None)
+        if not getattr(expression, "is_update", False):
+            return
+        if expression.table.name != "equity_spot_snapshot":
+            return
+        self.counts["updates"] += 1
+        assignment = statement.lower().split(" where ", 1)[0]
+        has_set, has_remove = "json_set(" in assignment, "json_remove(" in assignment
+        self.counts["json_set"] += has_set
+        self.counts["json_remove"] += has_remove
+        if not (has_set or has_remove):
+            self.counts["full_value" if "payload" in assignment else "heartbeat"] += 1
+
+    def close(self):
+        event.remove(self.engine, "after_cursor_execute", self._listener)
+
+    def verify(self, cycles, require_native=False):
+        assert self.counts["updates"] == cycles, "equity update execution count differs"
+        if require_native:
+            assert self.native_mysql, "native MySQL execution required; SQLite is only a smoke test"
+            assert all(self.counts[key] > 0 for key in ("json_set", "json_remove", "full_value", "heartbeat")), "native JSON branches not executed"
+        return dict(native_mysql=self.native_mysql, required=require_native, executed=dict(self.counts))
+
+
 class SnapshotWriteWorkload:
     def __init__(self, session, quote_tables, equity_table):
         assert {table.name for table in quote_tables} == {
@@ -34,9 +74,10 @@ class SnapshotWriteWorkload:
         self.expected, self.fields = {}, {}
         self.cycles = 0
         self.row_updates = 0
+        self.equity_row_count = 160
         self.payload = {"metadata": "synthetic issuer reference" * 200,
                         "rows": [{"id": i, "price": 1, "rate": .005, "flag": True,
-                                  "evidence": "synthetic only" * 15} for i in range(100)]}
+                                  "evidence": "synthetic only " * 70} for i in range(self.equity_row_count)]}
         for table in self.tables:
             assert session.execute(select(table.c.id).limit(1)).first() is None, "requires empty synthetic tables"
             self.fields[table.name] = [column.name for column in table.c if isinstance(column.type, Float)]
@@ -81,14 +122,22 @@ class SnapshotWriteWorkload:
             update_snapshots(session, table, rows)
             self.row_updates += count
         current = copy.deepcopy(self.payload)
-        for identity in self.random.sample(range(100), self.random.randint(1, 40)):
-            current["rows"][identity].update(price=self.cycles + identity / 4,
-                                              rate=None if identity % 3 else 0,
-                                              flag=bool(self.cycles % 2))
-        if self.cycles % 2:
-            current.pop("temporary", None)
-        else:
-            current["temporary"] = {"odd\"key": self.cycles}
+        if self.cycles % 12 == 10:
+            # A large list-size change exercises the full-value fallback.
+            if len(current["rows"]) == self.equity_row_count:
+                current["rows"].append(dict(current["rows"][0], id=self.equity_row_count))
+            else:
+                current["rows"].pop()
+        elif self.cycles % 12 != 11:
+            for identity in self.random.sample(range(self.equity_row_count), self.random.randint(1, 40)):
+                current["rows"][identity].update(price=self.cycles + identity / 4,
+                                                  rate=None if identity % 3 else 0,
+                                                  flag=bool(self.cycles % 2))
+            if self.cycles % 2:
+                current.pop("temporary", None)
+            else:
+                current["temporary"] = {"odd\"key": self.cycles}
+        # Cycle 11 changes only updated_at, independently of JSON content.
         equity_payload_update(session, self.equity, self.payload, current, stamp)
         self.payload = current
         self.cycles += 1

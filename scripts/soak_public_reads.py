@@ -84,6 +84,7 @@ def main():
         from scripts.maintenance_workload import MaintenanceWorkload
         from scripts.public_decode_workload import PublicDecodeWorkload
         from scripts.background_executor_workload import BackgroundExecutorWorkload
+        from scripts.thought_lock_workload import ThoughtLockWorkload
         from sqlalchemy import text
         def no_network(*args, **kwargs):
             raise AssertionError("offline soak cannot call upstream")
@@ -140,6 +141,8 @@ def main():
             module.db.session.commit()
             maintenance_load = MaintenanceWorkload(module)
         decode_load = PublicDecodeWorkload()
+        lock_load = ThoughtLockWorkload(repo)
+        cleanup.callback(lock_load.close)
         background_load = BackgroundExecutorWorkload(repo) if args.exercise_background else None
         if background_load:
             cleanup.callback(background_load.close)
@@ -147,7 +150,8 @@ def main():
             "app.py", "alert_history_index.py", "alert_read_payload.py", "read_performance.py", "static/app.js",
             "snapshot_persistence.py", "market_transport.py", "scripts/snapshot_write_workload.py", "scripts/soak_public_reads.py",
             "scripts/soak_snapshot_writes.py", "background_runtime.py", "scripts/maintenance_workload.py",
-            "scripts/public_decode_workload.py", "scripts/background_executor_workload.py")}
+            "scripts/public_decode_workload.py", "scripts/background_executor_workload.py",
+            "scripts/thought_lock_workload.py")}
         print(json.dumps(dict(event="ready", at_utc=datetime.now(timezone.utc).isoformat(), rows=args.rows, pid=os.getpid(), files=fingerprints,
                              exercise_background=args.exercise_background, accept_gzip=args.accept_gzip)), flush=True)
         stop, background_errors = threading.Event(), []
@@ -237,6 +241,7 @@ def main():
                     if tick%12 == 0:
                         module.store_transfer_networks("Gate", wallets)
                         maintenance_load.step()
+                        lock_load.step()
                 futures = [executor.submit(request, key) for key in paths]
                 for future in futures:
                     key, elapsed = future.result(timeout=45)
@@ -254,7 +259,7 @@ def main():
                     rss = raw_rss * 1024
                     assert 0 < rss < 640*1048576, "synthetic combined RSS exceeded its original bound"
                     rss_samples.append(rss)
-                    print(json.dumps(dict(event="progress", at_utc=datetime.now(timezone.utc).isoformat(), seconds=round(elapsed), wall_seconds=round(time.time()-started_wall,3), max_cycle_gap_seconds=round(max_cycle_gap,3), cycles=tick+1, requests=sum(map(len, measurements.values())), rss_bytes=rss, snapshot_rows_updated=snapshot_load.row_updates, decode_responses=decode_load.responses, decode_last_seconds=round(decode_seconds[-1],3), decode_max_seconds=round(max(decode_seconds),3), index=module.ALERT_HISTORY_INDEX.status(), db=state, compressed_responses=dict(compressed_responses), background=background_load.status() if background_load else None, latency={key: dict(last=round(values[-1],3), p95=round(sorted(values)[int(.95*(len(values)-1))],3), max=round(max(values),3)) for key, values in measurements.items()})), flush=True)
+                    print(json.dumps(dict(event="progress", at_utc=datetime.now(timezone.utc).isoformat(), seconds=round(elapsed), wall_seconds=round(time.time()-started_wall,3), max_cycle_gap_seconds=round(max_cycle_gap,3), cycles=tick+1, requests=sum(map(len, measurements.values())), rss_bytes=rss, snapshot_rows_updated=snapshot_load.row_updates, decode_responses=decode_load.responses, decode_last_seconds=round(decode_seconds[-1],3), decode_max_seconds=round(max(decode_seconds),3), index=module.ALERT_HISTORY_INDEX.status(), db=state, compressed_responses=dict(compressed_responses), background=background_load.status() if background_load else None, named_lock=lock_load.status(), latency={key: dict(last=round(values[-1],3), p95=round(sorted(values)[int(.95*(len(values)-1))],3), max=round(max(values),3)) for key, values in measurements.items()})), flush=True)
                     last_report = elapsed
                 tick += 1
                 time.sleep(max(0, 5-(time.monotonic()-cycle)))
@@ -276,6 +281,9 @@ def main():
             check_integrity(module.db.session, module.db.metadata, module.db.engine.dialect.name)
             module.db.session.remove()
         decode_check = decode_load.verify()
+        lock_check = lock_load.verify()
+        assert lock_check["cycles"] == (tick + 11) // 12
+        assert module.BACKGROUND_RUNTIME.snapshot()["db_checked_out"] == 0
         assert decode_check["cycles"] == tick
         background_check = background_load.verify() if background_load else None
         if background_check:
@@ -284,7 +292,7 @@ def main():
             assert compressed_responses["summary"] >= tick and compressed_responses["detail"] == tick
         for values in measurements.values():
             assert sorted(values)[int(.95*(len(values)-1))] < 5 and max(values) < 10, "HTTP latency outside original bounds"
-        print(json.dumps(dict(event="passed", at_utc=datetime.now(timezone.utc).isoformat(), seconds=round(time.monotonic()-started), wall_seconds=round(time.time()-started_wall,3), max_cycle_gap_seconds=round(max_cycle_gap,3), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints, snapshot_check=snapshot_check, maintenance_check=maintenance_check, decode_check=decode_check, background_check=background_check, compressed_responses=compressed_responses, source_counts_unchanged=True, integrity="ok")), flush=True)
+        print(json.dumps(dict(event="passed", at_utc=datetime.now(timezone.utc).isoformat(), seconds=round(time.monotonic()-started), wall_seconds=round(time.time()-started_wall,3), max_cycle_gap_seconds=round(max_cycle_gap,3), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints, snapshot_check=snapshot_check, maintenance_check=maintenance_check, decode_check=decode_check, background_check=background_check, lock_check=lock_check, compressed_responses=compressed_responses, source_counts_unchanged=True, integrity="ok")), flush=True)
 
 
 if __name__ == "__main__":

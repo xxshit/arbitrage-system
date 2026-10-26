@@ -10938,8 +10938,17 @@ def acquire_thought_push_lock():
     if db.engine.dialect.name not in {"mysql", "mariadb"}:
         return None, True
     connection = db.engine.connect()
-    acquired = connection.execute(text("SELECT GET_LOCK('arbitrage_thought_push', 0)")).scalar()
-    return connection, acquired == 1
+    try:
+        acquired = connection.execute(text("SELECT GET_LOCK('arbitrage_thought_push', 0)")).scalar()
+        return connection, acquired == 1
+    except BaseException:
+        # The server may have acquired the lock before its response was lost.
+        # Discard that physical connection instead of returning it to the pool.
+        try:
+            connection.invalidate()
+        finally:
+            connection.close()
+        raise
 
 
 def release_thought_push_lock(connection):
@@ -10947,6 +10956,9 @@ def release_thought_push_lock(connection):
         return
     try:
         connection.execute(text("SELECT RELEASE_LOCK('arbitrage_thought_push')"))
+    except BaseException:
+        connection.invalidate()
+        raise
     finally:
         connection.close()
 

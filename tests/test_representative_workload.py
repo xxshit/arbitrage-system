@@ -97,6 +97,80 @@ class FundingWorkloadTests(unittest.TestCase):
         result = load.verify()
         self.assertEqual((result["state_rows"], result["event_rows"], result["http_checks"]), (524, 32, 2))
 
+    def test_clock_capture_scheduling_delay_preserves_exact_source_cache_minimum(self):
+        import time
+        module, load = self.module, self.load
+
+        class ScheduledClock:
+            delayed = False
+
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+            def monotonic(self):
+                if not self.delayed:
+                    self.delayed = True
+                    time.sleep(.05)
+                return time.monotonic()
+
+        with patch.object(module, "time", ScheduledClock()):
+            load.step(0)
+        live = module.FUNDING_ALERT_LIVE_STATES[load.contracts[0]]
+        source = module.MARKET_PAYLOAD_CACHE["https://fapi.binance.com/fapi/v1/premiumIndex"]["payload"][0]["time"] / 1000
+        self.assertGreater(source - live["rate_at"], .01)
+        self.assertEqual(live["rate_at"], min(source, live["info_at"]))
+        self.assertGreaterEqual(load.max_clock_capture_seconds, .05)
+        self.assertEqual(load.timestamp_checks, 524)
+        load.verify_http(module.funding_alert_payload())
+        self.assertTrue(load.verify()["exact_values"])
+
+    def test_clock_contract_rejects_invented_cache_capture_time(self):
+        module, load = self.module, self.load
+        original = module.binance_observations
+
+        def bad_time(instruments, rates, info, rate_at, info_at, observed_at):
+            # Keep a plausible, fresh timestamp but change the recorded result.
+            rows = original(instruments, rates, info, rate_at, info_at, observed_at)
+            for row in rows:
+                row["info_at"] -= 1
+                row["rate_at"] -= 1
+            return rows
+
+        with patch.object(module, "binance_observations", bad_time):
+            with self.assertRaises(AssertionError):
+                load.step(0)
+        self.assertEqual(load.cycles, 0)
+        self.assertEqual(load.expected_states, {})
+
+    def test_clock_contract_rejects_modified_live_info_timestamp(self):
+        module, load = self.module, self.load
+        original = module.refresh_funding_alerts
+
+        def bad_time():
+            result = original()
+            module.FUNDING_ALERT_LIVE_STATES[load.contracts[0]]["info_at"] += 1
+            return result
+
+        with patch.object(module, "refresh_funding_alerts", bad_time):
+            with self.assertRaises(AssertionError):
+                load.step(0)
+        self.assertEqual(load.timestamp_checks, 0)
+        self.assertEqual(load.cycles, 0)
+
+    def test_clock_contract_rejects_modified_live_observation_time(self):
+        module, load = self.module, self.load
+        original = module.refresh_funding_alerts
+
+        def bad_time():
+            result = original()
+            module.FUNDING_ALERT_LIVE_STATES[load.contracts[0]]["observed_at"] += 1
+            return result
+
+        with patch.object(module, "refresh_funding_alerts", bad_time):
+            with self.assertRaises(AssertionError):
+                load.step(0)
+        self.assertEqual(load.cycles, 0)
+
     def test_core_reread_detects_corruption_even_with_live_cache_populated(self):
         module, load = self.module, self.load
         load.step(0)

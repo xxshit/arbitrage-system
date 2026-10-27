@@ -1670,13 +1670,19 @@ def fetch_market_payloads(urls, cache_seconds=None, live_timeout=1.5):
                         MARKET_PAYLOAD_CACHE[url] = {"payload": payload, "fetched_at": now}
                 results.observed_at[name] = wall
             except Exception as exc:
-                cached = MARKET_PAYLOAD_CACHE.get(url)
-                if cached:
-                    results[name] = cached["payload"]
-                    results.observed_at[name] = wall - (now - cached["fetched_at"])
-                    errors[name] = f"using cached payload: {exc}"
-                else:
-                    errors[name] = str(exc)
+                try:
+                    cached = MARKET_PAYLOAD_CACHE.get(url)
+                    if cached:
+                        results[name] = cached["payload"]
+                        results.observed_at[name] = wall - (now - cached["fetched_at"])
+                        errors[name] = f"using cached payload: {exc}"
+                    else:
+                        errors[name] = str(exc)
+                finally:
+                    # This private future is fully consumed. Its saved exception
+                    # must not retain this batch frame, successful payloads and
+                    # the prior cache generation until cyclic GC runs.
+                    exc.__traceback__ = None
     return results, errors
 
 

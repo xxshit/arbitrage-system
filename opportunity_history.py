@@ -120,9 +120,12 @@ class ProfileCache:
                     if key not in accumulators and len(accumulators) >= 4000:
                         continue
                     state = accumulators.setdefault(key, {})
-                    acc = state.setdefault(metric, dict(values=array("d", [math.nan])*289,
-                                                       low=math.inf, high=-math.inf,
-                                                       first=now, last=0))
+                    acc = state.get(metric)
+                    if acc is None:
+                        # Initialize once per path/metric, not once per hour.
+                        acc = state[metric] = dict(values=array("d", [math.nan])*289,
+                                                  low=math.inf, high=-math.inf,
+                                                  first=now, last=0)
                     minutes = decode_chunk(payload)
                     for minute in sorted(minutes, key=int):
                         for segment in minutes[minute]:
@@ -190,7 +193,9 @@ class ProfileCache:
                         key = symbol, exchange
                         if key not in ranges and len(ranges) >= 4000:
                             continue
-                        data = ranges.setdefault(key, array("d", [math.nan])*168)
+                        data = ranges.get(key)
+                        if data is None:
+                            data = ranges[key] = array("d", [math.nan])*168
                         offset = (int(hour)//3600 % 24)*7
                         values = [p for segments in decode_chunk(payload).values() for segment in segments for p in segment
                                   if len(p) == 2 and number(p[0]) and number(p[1])]
@@ -234,8 +239,11 @@ class ProfileCache:
                             if values is None or not math.isfinite(values[0]) or values[4] > now:
                                 continue
                             low, high, low_at, high_at, first, last, bins = values
-                            acc = output.setdefault(key, {}).setdefault(name, dict(
-                                low=low,high=high,low_at=low_at,high_at=high_at,first_at=first,last_at=last,bins=0))
+                            path_ranges = output.setdefault(key, {})
+                            acc = path_ranges.get(name)
+                            if acc is None:
+                                acc = path_ranges[name] = dict(
+                                    low=low,high=high,low_at=low_at,high_at=high_at,first_at=first,last_at=last,bins=0)
                             if low < acc["low"]:
                                 acc.update(low=low,low_at=low_at)
                             if high > acc["high"]:

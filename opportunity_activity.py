@@ -129,9 +129,15 @@ class ActivityLedger:
             output = {}
             for symbol, exchange, started, direction, peak, peak_at, ended, continuous in conn.execute(
                     "SELECT * FROM episodes WHERE started>? ORDER BY started DESC", (now-RETENTION,)):
-                profile = output.setdefault((symbol, exchange), dict(
-                    count=0, returned=0, peak=0, peak_at=None, last_at=started,
-                    windows={name: dict(positive=0, negative=0, recent=[]) for name in WINDOWS}))
+                key = symbol, exchange
+                profile = output.get(key)
+                if profile is None:
+                    # Older episodes update the existing summary; allocating
+                    # fresh windows/lists for each row only to discard them
+                    # multiplies allocation with retained history length.
+                    profile = output[key] = dict(
+                        count=0, returned=0, peak=0, peak_at=None, last_at=started,
+                        windows={name: dict(positive=0, negative=0, recent=[]) for name in WINDOWS})
                 profile["count"] += 1
                 profile["returned"] += bool(ended is not None and continuous)
                 if abs(peak) > abs(profile["peak"]):
@@ -146,8 +152,10 @@ class ActivityLedger:
                                                      ended=ended, returned=bool(ended and continuous)))
             with self.lock:
                 for key, state in self.states.items():
-                    profile = output.setdefault(key, dict(count=0, returned=0, peak=0, peak_at=None,
-                        last_at=None, windows={name: dict(positive=0, negative=0, recent=[]) for name in WINDOWS}))
+                    profile = output.get(key)
+                    if profile is None:
+                        profile = output[key] = dict(count=0, returned=0, peak=0, peak_at=None,
+                            last_at=None, windows={name: dict(positive=0, negative=0, recent=[]) for name in WINDOWS})
                     profile.update(since=state["first"], observed_at=state["last"], computed_at=now)
                 self.summaries = output
         finally:

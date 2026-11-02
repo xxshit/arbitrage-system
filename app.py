@@ -2427,7 +2427,8 @@ def refresh_binance_open_interest(contracts):
         try:
             symbol, payload = future.result()
             BINANCE_OPEN_INTEREST_CACHE[symbol] = {"contracts": float(payload.get("openInterest", 0) or 0), "updated_at": now}
-        except Exception:
+        except Exception as exc:
+            exc.__traceback__ = None
             continue
 
 
@@ -2513,8 +2514,8 @@ def sync_funding_history(symbols):
                         if key not in existing_keys:
                             db.session.add(FundingRateRecord(symbol=symbol, funding_time=item["fundingTime"], funding_rate=float(item["fundingRate"]) * 100))
                             existing_keys.add(key)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    exc.__traceback__ = None
     FundingRateRecord.query.filter(FundingRateRecord.funding_time < start_time).delete(synchronize_session=False)
     db.session.commit()
     invalidate_funding_statistics()
@@ -3104,7 +3105,8 @@ def refresh_index_components():
             exchange, symbol = futures[future]
             try:
                 components = future.result()
-            except Exception:
+            except Exception as exc:
+                exc.__traceback__ = None
                 continue
             collected.append(dict(exchange=exchange, symbol=symbol, components_json=json.dumps(components, ensure_ascii=False), captured_at=now))
     for values in collected:
@@ -3205,7 +3207,8 @@ def refresh_okx_funding(inst_ids):
                     "next_funding_time": format_funding_time(current_funding_time or next_funding_time),
                     "updated_at": now,
                 }
-        except Exception:
+        except Exception as exc:
+            exc.__traceback__ = None
             continue
 
 
@@ -3394,7 +3397,8 @@ def backfill_price_history(groups, batch_size=2):
         for future in as_completed(futures):
             try:
                 fetched.append(future.result())
-            except Exception:
+            except Exception as exc:
+                exc.__traceback__ = None
                 continue
     if not fetched:
         return
@@ -3906,8 +3910,11 @@ def collect_equity_metadata():
             MARKET_PAYLOAD_CACHE[EQUITY_SPOT_URLS[key]] = dict(payload=payload, fetched_at=observed)
             EQUITY_METADATA_ERRORS.pop(key, None)
         except Exception as exc:
-            EQUITY_METADATA_ERRORS[key] = type(exc).__name__
-            EQUITY_METADATA_RETRY_AT[key] = now + 5
+            try:
+                EQUITY_METADATA_ERRORS[key] = type(exc).__name__
+                EQUITY_METADATA_RETRY_AT[key] = now + 5
+            finally:
+                exc.__traceback__ = None
     results, errors = {}, {}
     # Refresh time-sensitive multipliers first; at most one pending job per source.
     keys = ['equity_bybit_instruments', *[key for key in EQUITY_SPOT_TTLS if key != 'equity_bybit_instruments']]
@@ -6680,7 +6687,8 @@ def fetch_major_market_overview(force=False):
         for future in as_completed(futures):
             try:
                 items.append(future.result())
-            except Exception:
+            except Exception as exc:
+                exc.__traceback__ = None
                 continue
     order = {symbol[:-4] + "/USDT": idx for idx, symbol in enumerate(MAJOR_MARKET_SYMBOLS)}
     items.sort(key=lambda item: order.get(item["symbol"], 99))
@@ -6724,7 +6732,8 @@ def fetch_dashboard_symbol_quotes(raw_symbol):
                         "change_24h": float(payload.get("priceChangePercent", 0) or 0),
                         "volume_24h": float(payload.get("quoteVolume", 0) or 0),
                     }
-        except Exception:
+        except Exception as exc:
+            exc.__traceback__ = None
             continue
     return raw_symbol[:-4] + "/USDT", quotes, quote_times, ticker_metrics
 
@@ -6909,8 +6918,9 @@ def load_momentum_scores(force=False):
             for future in as_completed(futures):
                 try:
                     item = future.result()
-                except Exception:
+                except Exception as exc:
                     item = None
+                    exc.__traceback__ = None
                 if item:
                     item["label"] = momentum_score_label(item["score"])
                     item["reason"] = momentum_score_reason(item)
@@ -7173,10 +7183,13 @@ def refresh_dashboard_opportunities():
     for future in as_completed(futures):
         try:
             symbol, quotes, quote_times, ticker_metrics = future.result()
-        except Exception:
-            if futures[future] in previous:
-                rows.append(previous[futures[future]])
-            continue
+        except Exception as exc:
+            try:
+                if futures[future] in previous:
+                    rows.append(previous[futures[future]])
+                continue
+            finally:
+                exc.__traceback__ = None
         if not quotes:
             if symbol in previous:
                 rows.append(previous[symbol])
@@ -15831,11 +15844,14 @@ def run_funding_sync_batch(exchange, schedule):
                 latest[key] = actual_latest
                 schedule.done(key, targets[key], time.time(), actual_latest, full=full)
             except Exception as exc:
-                db.session.rollback()
-                errors += 1
-                schedule.done(key, targets[key], time.time(), latest.get(key, 0), error=type(exc).__name__)
-                code = str(exc) if isinstance(exc, FundingHistoryError) else type(exc).__name__
-                app.logger.warning("funding_history_target_failed exchange=%s symbol=%s error=%s", exchange, key, code)
+                try:
+                    db.session.rollback()
+                    errors += 1
+                    schedule.done(key, targets[key], time.time(), latest.get(key, 0), error=type(exc).__name__)
+                    code = str(exc) if isinstance(exc, FundingHistoryError) else type(exc).__name__
+                    app.logger.warning("funding_history_target_failed exchange=%s symbol=%s error=%s", exchange, key, code)
+                finally:
+                    exc.__traceback__ = None
     # Bounded cleanup once per hour, not a table-wide DELETE per HTTP response.
     if now - getattr(schedule, "last_cleanup", 0) >= 3600:
         model = FundingRateRecord if exchange == "Binance" else ExchangeFundingRateRecord

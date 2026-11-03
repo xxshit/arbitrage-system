@@ -103,6 +103,8 @@ class _IndexMapBuilder:
 
 
 class AlertHistoryIndex:
+    MAX_DIRTY_IDS = 10000
+
     def __init__(self):
         self.read_lock = threading.Lock()
         self.cache_lock = threading.Lock()
@@ -131,12 +133,12 @@ class AlertHistoryIndex:
         with self.change_lock:
             if not self.full:
                 self.dirty.update(identities)
-                if len(self.dirty) > 10000:
+                if len(self.dirty) > self.MAX_DIRTY_IDS:
                     self.full = True
                     self.published_ready = False
                     self.dirty.clear()
 
-    def snapshot(self, start, now, load, audit, project, symbol=None, materialize=True):
+    def snapshot(self, start, now, load, audit, project, symbol=None, materialize=True, *, changes_since=None):
         """load(ids|None, since|None) yields (12 scalar columns, JSON, revision).
 
         Refresh work is serialized separately from the stream and commit locks.
@@ -150,13 +152,26 @@ class AlertHistoryIndex:
                 self.full, self.dirty = False, set()
             full = full or self.last_now is None or now < self.last_now
             try:
-                revisions = None
                 audit_at = time.monotonic()
-                if not full and audit_at - self.last_audit >= 900:
-                    revisions = dict(audit())
-                    dirty.update(identity for identity, revision in revisions.items()
-                                 if identity not in self.revisions or self.revisions[identity] != revision)
-                    dirty.update(self.revisions.keys() - revisions.keys())
+                audit_due = not full and audit_at - self.last_audit >= 900
+                if audit_due:
+                    missing = set(self.revisions)
+                    for identity, revision in audit():
+                        missing.discard(identity)
+                        if identity not in self.revisions or self.revisions[identity] != revision:
+                            dirty.add(identity)
+                    dirty.update(missing)
+                    del missing
+                if not full and changes_since is not None and now > self.last_now and len(dirty) <= self.MAX_DIRTY_IDS:
+                    for identity in changes_since(self.last_now):
+                        dirty.add(identity)
+                        if len(dirty) > self.MAX_DIRTY_IDS:
+                            break
+                if len(dirty) > self.MAX_DIRTY_IDS:
+                    # A catch-up scan can span hours. Stream a complete rebuild
+                    # rather than retaining every changed ID from a backlog.
+                    full = True
+                    dirty.clear()
                 replacements, versions = {}, {}
                 spool = PulseSpool() if full or self.spool is None else self.spool
                 for row in load(None if full else dirty, None if full else self.last_now):
@@ -182,8 +197,10 @@ class AlertHistoryIndex:
                 rows = _IndexMapBuilder(None if full else self.rows)
                 revisions_before = _IndexMapBuilder(None if full else self.revisions)
                 for identity in dirty:
-                    rows.pop(identity, None)
-                    revisions_before.pop(identity, None)
+                    if identity not in replacements:
+                        rows.pop(identity, None)
+                    if identity not in versions:
+                        revisions_before.pop(identity, None)
                 rows.update(replacements)
                 revisions_before.update(versions)
                 # Exact rolling window, including a record on the 24H boundary.
@@ -191,11 +208,11 @@ class AlertHistoryIndex:
                 for identity in [identity for identity, (item, _) in rows.items()
                                  if not start <= item.created_at <= now]:
                     rows.pop(identity)
-                    revisions_before.pop(identity, None)
-                if revisions is not None:
-                    revisions_before = _IndexMapBuilder()
-                    revisions_before.update(revisions)
-                if full or revisions is not None:
+                    # On audit, absent IDs were removed above. Keep a revision
+                    # explicitly returned by the source even if the row is hidden.
+                    if not audit_due or identity not in versions:
+                        revisions_before.pop(identity, None)
+                if full or audit_due:
                     self.last_audit = audit_at
                 # Repeated updates append immutable blobs. Bound dead cache
                 # space without changing snapshots currently used by readers.

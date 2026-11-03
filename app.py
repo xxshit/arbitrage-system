@@ -13758,7 +13758,7 @@ def read_alert_history(window_start, now, *, live_only=False, symbol=None, refre
         AlertEvent.created_at >= window_start, AlertEvent.created_at <= now,
         or_(AlertEvent.alert_type == "basis_threshold", AlertEvent.alert_type.startswith("rapid_", autoescape=True), AlertEvent.message.contains("确认后的")))
 
-    def read_rows(query):
+    def read_rows(query, stamp=AlertEvent.created_at, identity=AlertEvent.id):
         # The request's auth SELECT may already hold an older repeatable-read
         # snapshot. Read committed history on a separate short-lived connection
         # so a consumed after_commit invalidation cannot fetch the old version.
@@ -13768,37 +13768,38 @@ def read_alert_history(window_start, now, *, live_only=False, symbol=None, refre
         while True:
             batch_query = query
             if cursor is not None:
-                batch_query = batch_query.filter(or_(AlertEvent.created_at > cursor[0], and_(AlertEvent.created_at == cursor[0], AlertEvent.id > cursor[1])))
+                batch_query = batch_query.filter(or_(stamp > cursor[0], and_(stamp == cursor[0], identity > cursor[1])))
             with db.engine.connect() as connection:
                 if connection.dialect.name in {"mysql", "mariadb"}:
                     connection = connection.execution_options(isolation_level="READ COMMITTED")
-                rows = connection.execute(batch_query.order_by(AlertEvent.created_at, AlertEvent.id).limit(250).statement).all()
+                rows = connection.execute(batch_query.order_by(stamp, identity).limit(250).statement).all()
             if not rows:
                 break
             yield from rows
-            # Audit includes created_at explicitly; normal rows already have it.
-            cursor = (rows[-1][9] if len(rows[-1]) > 3 else rows[-1][2], rows[-1][0])
             if len(rows) < 250:
                 break
+            last = rows[-1]._mapping
+            cursor = (last[stamp.key], last[identity.key])
 
-    def load(identities, since):
+    def changes_since(since):
+        # Previously future-dated events enter at their real boundary. The
+        # overlapping pulse scan catches independent writers at MySQL second precision.
+        entering = db.session.query(AlertEvent.id, AlertEvent.created_at).filter(
+            AlertEvent.created_at > since, AlertEvent.created_at >= window_start, AlertEvent.created_at <= now)
+        for row in read_rows(entering):
+            yield row.id
+        revised = db.session.query(AlertPulse.alert_event_id, AlertPulse.updated_at).filter(
+            AlertPulse.updated_at >= since - timedelta(seconds=2))
+        for row in read_rows(revised, AlertPulse.updated_at, AlertPulse.alert_event_id):
+            yield row.alert_event_id
+
+    def load(identities, _since):
         if identities is None:
             yield from read_rows(base)
             return
         identities = sorted(identities)
         for offset in range(0, len(identities), 500):
             yield from read_rows(base.filter(AlertEvent.id.in_(identities[offset:offset+500])))
-        # Previously future-dated rows become visible at their real boundary,
-        # even without a new commit. Normal inserts are also covered by IDs.
-        if since is not None and now > since:
-            yield from read_rows(base.filter(AlertEvent.created_at > since))
-            # Indexed external-writer recovery; overlap covers second-resolution
-            # MySQL timestamps. In-process commits still invalidate exact IDs.
-            changed = db.session.query(AlertPulse.alert_event_id).filter(AlertPulse.updated_at >= since - timedelta(seconds=2))
-            with db.engine.connect() as connection:
-                changed_ids = [row[0] for row in connection.execute(changed.statement)]
-            for offset in range(0, len(changed_ids), 250):
-                yield from read_rows(base.filter(AlertEvent.id.in_(changed_ids[offset:offset+250])))
 
     def audit():
         return ((row[0], row[1]) for row in read_rows(base.with_entities(AlertEvent.id, AlertPulse.updated_at, AlertEvent.created_at)))
@@ -13818,7 +13819,8 @@ def read_alert_history(window_start, now, *, live_only=False, symbol=None, refre
         return sorted(events, key=lambda item: (item.created_at, item.id), reverse=True), pulses
 
     return ALERT_HISTORY_INDEX.snapshot(window_start, now, load, audit,
-                                        lambda evidence: alert_pulse_read_payload(evidence, qualified_only=True), symbol=symbol, materialize=not refresh_only)
+                                        lambda evidence: alert_pulse_read_payload(evidence, qualified_only=True),
+                                        symbol=symbol, materialize=not refresh_only, changes_since=changes_since)
 
 
 @app.get("/api/alerts")

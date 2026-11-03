@@ -306,6 +306,48 @@ class AlertHistoryTests(unittest.TestCase):
         self.assertNotIn("basis_tracking", data)
         self.assertIn("funding", data)
 
+    def test_overlapping_delta_selectors_fetch_each_committed_pulse_once(self):
+        from tests.test_alert_quality import historical_pulse
+        with module.app.app_context():
+            start = self.now - timedelta(hours=24)
+            module.read_alert_history(start, self.now, refresh_only=True)
+            stamp = self.now + timedelta(seconds=1)
+            for identity in range(1, 252):  # span a keyset page with tied timestamps
+                module.db.session.add(self.event(id=identity, created_at=stamp))
+                pulse = historical_pulse(trigger=1.5, peak=1.5, identifier=str(identity))
+                module.db.session.add(module.AlertPulse(id=str(identity), alert_event_id=identity,
+                    evidence_json=json.dumps(pulse), updated_at=stamp))
+            module.db.session.commit()
+            module.db.session.remove()
+            with patch.object(module, 'alert_pulse_read_payload', wraps=module.alert_pulse_read_payload) as decode:
+                events, pulses = module.read_alert_history(start, self.now + timedelta(seconds=5))
+                self.assertEqual(decode.call_count, 251)
+                self.assertEqual([row.id for row in events], list(range(251, 0, -1)))
+                self.assertEqual([pulses[i].unpack()['id'] for i in range(1, 252)], list(map(str, range(1, 252))))
+
+    def test_independent_same_second_updates_replace_or_withdraw_only_the_projection(self):
+        from tests.test_alert_quality import historical_pulse
+        with module.app.app_context():
+            start = self.now - timedelta(hours=24)
+            event = self.event(id=1)
+            qualified = historical_pulse(trigger=1.5, peak=1.5)
+            module.db.session.add_all([event, module.AlertPulse(id='old', alert_event_id=1,
+                evidence_json=json.dumps(qualified), updated_at=self.now)])
+            module.db.session.commit()
+            module.db.session.remove()
+            _, old = module.read_alert_history(start, self.now)
+            for seconds, payload, visible in [(1, historical_pulse(), False), (2, qualified, True)]:
+                # Direct writes have no ORM notifications and keep the previous timestamp.
+                with module.db.engine.begin() as conn:
+                    conn.execute(module.AlertPulse.__table__.update().where(
+                        module.AlertPulse.alert_event_id == 1).values(evidence_json=json.dumps(payload)))
+                self.assertFalse(module.ALERT_HISTORY_INDEX.dirty)
+                _, current = module.read_alert_history(start, self.now + timedelta(seconds=seconds))
+                self.assertEqual(1 in current, visible)
+                self.assertEqual(old[1].unpack()['peak'], 1.5)
+            self.assertEqual(module.AlertPulse.query.count(), 1)
+            self.assertEqual(module.AlertEvent.query.count(), 1)
+
     def test_public_read_connection_is_returned_before_json_and_gzip(self):
         from tests.test_alert_screening import PATH, quotes
 

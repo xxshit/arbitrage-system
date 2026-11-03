@@ -110,6 +110,36 @@ class HistoryIndexTests(unittest.TestCase):
         self.rows = {1:self.row(1)}
         self.assertEqual(len(self.snapshot()[0]), 1)
 
+    def test_audit_preserves_unchanged_revisions_and_keeps_the_last_row_read(self):
+        self.rows = {1: self.row(1, revision=1), 2: self.row(2, revision=1)}
+        with patch('alert_history_index.time.monotonic', return_value=10000) as clock:
+            self.snapshot()
+            original = self.index.revisions
+            clock.return_value += 901
+            self.snapshot()
+            self.assertIs(self.index.revisions, original)
+            self.rows[1] = self.row(1, revision=2)
+            def newer_commit(identities, since):
+                self.assertEqual(identities, {1})
+                self.rows[1] = self.row(1, revision=3)
+                return self.load(identities, since)
+            clock.return_value += 901
+            self.snapshot(load=newer_commit)
+            self.assertEqual(self.index.revisions[1], 3)
+            self.assertEqual(original[1], 1)
+
+    def test_large_external_backlog_switches_to_a_streamed_full_read(self):
+        self.rows = {1: self.row(1)}
+        self.snapshot()
+        self.now += timedelta(seconds=5)
+        def changes(since):
+            yield from range(self.index.MAX_DIRTY_IDS + 1)
+            self.fail('scanned beyond the bounded delta')
+        events, _ = self.index.snapshot(self.now-timedelta(days=1), self.now, self.load,
+            lambda: (), self.project, changes_since=changes)
+        self.assertIsNone(self.loads[-1][0])
+        self.assertEqual([item.id for item in events], [1])
+
     def test_commit_notification_does_not_block_behind_history_read(self):
         with self.index.read_lock:
             completed = threading.Event()

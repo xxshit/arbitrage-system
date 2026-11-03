@@ -306,6 +306,30 @@ class AlertHistoryTests(unittest.TestCase):
         self.assertNotIn("basis_tracking", data)
         self.assertIn("funding", data)
 
+    def test_public_read_connection_is_returned_before_json_and_gzip(self):
+        from tests.test_alert_screening import PATH, quotes
+
+        epoch = self.screening_pulses()
+        self.insert([self.event("SECOND/USDT", long_exchange="Gate", short_exchange="Binance")])
+        jsonify, compress = module.jsonify, module.gzip.compress
+        for view in ("summary", "active", "legacy", "detail"):
+            samples = []
+            def capture(function):
+                def wrapper(*args, **kwargs):
+                    samples.append((function.__name__, module.BACKGROUND_RUNTIME.snapshot()["db_checked_out"]))
+                    return function(*args, **kwargs)
+                return wrapper
+            params = {"view": view}
+            if view == "detail":
+                params["symbol"] = "DEMO/USDT"
+            with self.subTest(view=view), patch.object(module, "jsonify", capture(jsonify)), \
+                    patch.object(module.gzip, "compress", capture(compress)), \
+                    patch.object(module.ALERT_STREAM_HUB, "screening_quotes",
+                                 return_value={PATH: quotes(long_at=epoch, short_at=epoch, metadata_at=epoch)}):
+                response = self.client.get("/api/alerts", query_string=params, headers={"Accept-Encoding": "gzip"})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(samples, [("jsonify", 0), ("compress", 0)])
+
     def test_cold_background_index_serves_live_reminders_without_emptying_history(self):
         self.screening_pulses(retraced=True)
         with patch.object(module, "BACKGROUND_WORKERS_STARTED", True), patch.object(module.ALERT_HISTORY_INDEX, "ready", return_value=False):

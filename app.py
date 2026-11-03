@@ -13946,6 +13946,8 @@ def alerts():
     if event_symbols:
         for item in LatestMarketSnapshot.query.filter(LatestMarketSnapshot.symbol.in_(event_symbols)).all():
             market_context.setdefault(item.symbol, item)
+    # Only loaded scalar columns are used to format market context below.
+    db.session.remove()
 
     @lru_cache(maxsize=None)
     def cached_alert_context(strategy, symbol, long_exchange, short_exchange):
@@ -14017,11 +14019,12 @@ def alerts():
         return {"id": item.id, "symbol": item.symbol, "type": item.alert_type, "message": item.message, "open_spread": item.open_spread, "close_spread": item.close_spread, "basis": item.basis, "binance_basis": basis, "basis_exchange": "Binance" if basis is not None else None, "path_id": path_id(path_key(item)), "pulse": pulse, "round_id": round_ids[item.id], "notice_key": notice_key, "reminder": {"eligible": bool(ticket), "count": reminder_count({"reminder": reminder}, screening_now), "record_only": not bool(reminder["notices"])} if reminder is not None else None, "attention": assessment, "audible": bool(ticket) and assessment["tier"] == "candidate" and assessment["live"], "funding_rate": item.funding_rate, "created_at": format_shanghai_time(item.created_at, "%m-%d %H:%M:%S"), "created_at_epoch": item.created_at.replace(tzinfo=timezone.utc).timestamp(), "remaining_seconds": max(0, int((30 if assessment.get("transient") else 120) - (screening_now - notice_epoch(item)))), **alert_context(item)}
 
     if view == "active":
+        payload = {"view": "active", "history_loading": history_loading, "checked_at_epoch": time.time(),
+                   "realtime": ALERT_STREAM_HUB.status(), "funding": funding_alert_payload(screening_now)}
         db.session.remove()
-        return jsonify({"view": "active", "history_loading": history_loading, "checked_at_epoch": time.time(), "realtime": ALERT_STREAM_HUB.status(),
-                        "funding": funding_alert_payload(screening_now),
-                        "active_events": [event_payload(item, alert_round_ids(grouped_events[key], pulses))
-                                          for key, item in active_events.items()]})
+        payload["active_events"] = [event_payload(item, alert_round_ids(grouped_events[key], pulses))
+                                    for key, item in active_events.items()]
+        return jsonify(payload)
 
     if view == "detail":
         items = grouped_events.get(symbol, ())
@@ -14084,6 +14087,8 @@ def alerts():
     checked_at = time.time()
     realtime = ALERT_STREAM_HUB.status()
     funding = funding_alert_payload(screening_now)
+    # Funding is now plain data. Release the read transaction before building and compressing the response.
+    db.session.remove()
     groups, active_payloads = [], []
     for group_symbol, items in grouped_events.items():
         # Episode and 30-second round correlation are both scoped to a symbol.

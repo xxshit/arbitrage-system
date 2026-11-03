@@ -31,6 +31,16 @@ class SoakCleanupTests(unittest.TestCase):
         database = "snapshot_soak_" + "1" * 32
         socket_dir = "/tmp/arbiscope-read-mysql.test"
         url = make_url(f"mysql+pymysql://root@localhost/{database}?unix_socket={socket_dir}/mysql.sock")
+        # Flask-SQLAlchemy adds its default charset when it creates the engine.
+        from flask import Flask
+        from flask_sqlalchemy import SQLAlchemy
+        app = Flask(__name__)
+        app.config["SQLALCHEMY_DATABASE_URI"] = url
+        db = SQLAlchemy(app)
+        with app.app_context():
+            url = db.engine.url
+            self.assertEqual(url.query["charset"], "utf8mb4")
+            db.engine.dispose()
         session.get_bind.return_value.url = url
         metadata = MetaData()
         for name in ("event", "alert_pulse"):
@@ -71,7 +81,9 @@ class SoakCleanupTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "identity changed"):
             run(received=(database, "/var/lib/mysql", 0, 1))
         for bad_url in (url.set(database="production"), url.set(host="remote"),
-                        url.set(query={"unix_socket": "/run/mysqld/mysqld.sock"})):
+                        url.set(query={"unix_socket": "/run/mysqld/mysqld.sock"}),
+                        url.update_query_dict({"charset": "latin1"}),
+                        url.update_query_dict({"read_default_file": "/example.cnf"})):
             session.get_bind.return_value.url = bad_url
             with patch("sqlalchemy.create_engine") as create, self.assertRaisesRegex(ValueError, "private synthetic"):
                 check_integrity(session, metadata, "mysql")

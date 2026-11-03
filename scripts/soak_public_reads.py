@@ -46,7 +46,8 @@ def check_integrity(session, metadata, dialect):
     if (url.drivername != "mysql+pymysql" or url.host != "localhost" or url.port is not None
             or url.username != "root" or url.password is not None
             or not re.fullmatch(r"snapshot_soak_[0-9a-f]{32}", url.database or "")
-            or set(url.query) != {"unix_socket"} or socket_path.parent.parent != Path("/tmp")
+            or set(url.query) - {"unix_socket", "charset"} or url.query.get("charset", "utf8mb4") != "utf8mb4"
+            or socket_path.parent.parent != Path("/tmp")
             or not socket_path.parent.name.startswith("arbiscope-read-mysql.")
             or socket_path.name != "mysql.sock" or socket_path.is_symlink()
             or socket_path.parent.is_symlink() or not socket_path.is_socket()):

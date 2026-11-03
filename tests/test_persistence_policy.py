@@ -54,6 +54,27 @@ class PulseCoalescingTests(unittest.TestCase):
         self.assertEqual(first, self.hub.batch(now=1000.1))
         self.assertEqual(self.hub.persisted_checkpoints, {})
 
+    def test_retired_pulse_releases_only_its_acknowledged_checkpoint(self):
+        from types import SimpleNamespace
+        path = ('spot_futures', 'TEST/USDT', 'Gate', 'Binance')
+        pulse = dict(self.pulse, path=path, metric='spread')
+        track = self.hub.detector.tracks[(path, 'spread')] = SimpleNamespace(pulse=pulse)
+        self.hub._updates([pulse])
+        self.commit(1000)
+        self.assertIn(pulse['id'], self.hub.persisted_checkpoints)
+        self.hub._updates([dict(pulse, version=2, peak=1.2)])
+        in_flight = self.hub.batch(now=1001)
+        self.assertEqual(in_flight[0]['version'], 2)
+        track.pulse = dict(pulse, id='next')
+        final = dict(pulse, version=3, peak=1.2, state='data_gap', ended_at=1002)
+        self.hub._updates([final])
+        self.hub.acknowledge(in_flight, now=1002)
+        self.assertIn(pulse['id'], self.hub.persisted_checkpoints)
+        self.assertEqual(self.hub.batch(now=1002), [final])
+        self.commit(1002)
+        self.assertNotIn(pulse['id'], self.hub.persisted_checkpoints)
+        self.assertFalse(self.hub.pending)
+
     def test_update_during_commit_is_not_acknowledged_as_saved(self):
         self.put()
         first = self.hub.batch(now=1000)

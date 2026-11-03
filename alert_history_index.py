@@ -8,6 +8,7 @@ No original evidence, accounts or database connections are retained here.
 """
 from collections import namedtuple
 from collections.abc import Mapping
+from operator import attrgetter
 import threading
 import time
 import copy
@@ -100,6 +101,29 @@ class _IndexMapBuilder:
         self._sealed = True
         return (_IndexMap(tuple(self._parts), self._size)
                 if self._owned else self._base)
+
+
+class _WindowPulses(Mapping):
+    """Read pulses directly from the immutable publication held by this reader."""
+    __slots__ = ('rows', 'start', 'end', 'count')
+
+    def __init__(self, rows, start, end, count):
+        self.rows, self.start, self.end, self.count = rows, start, end, count
+
+    def __getitem__(self, identity):
+        if not isinstance(identity, int):
+            raise KeyError(identity)
+        event, pulse = self.rows[identity]
+        if pulse is None or not self.start <= event.created_at <= self.end:
+            raise KeyError(identity)
+        return pulse
+
+    def __iter__(self):
+        return (event.id for event, pulse in self.rows.values()
+                if pulse is not None and self.start <= event.created_at <= self.end)
+
+    def __len__(self):
+        return self.count
 
 
 class AlertHistoryIndex:
@@ -252,10 +276,20 @@ class AlertHistoryIndex:
         # Immutable publication; no DB, read-lock, network or full JSON parsing.
         with self.cache_lock:
             rows = self.rows
-        values = (value for value in rows.values() if (symbol is None or value[0].symbol == symbol) and start <= value[0].created_at <= now)
-        values = tuple(values)
-        events = sorted((item for item, _ in values), key=lambda item: (item.created_at, item.id), reverse=True)
-        pulses = {item.id: pulse for item, pulse in values if pulse is not None}
+        events, selected_pulses, pulse_count = [], {}, 0
+        for item, pulse in rows.values():
+            if (symbol is None or item.symbol == symbol) and start <= item.created_at <= now:
+                events.append(item)
+                if pulse is not None:
+                    pulse_count += 1
+                    if symbol is not None:
+                        selected_pulses[item.id] = pulse
+        # Stable sorts keep the same (created_at, id) ordering without a
+        # temporary two-field tuple for every event in every summary request.
+        events.sort(key=attrgetter('id'), reverse=True)
+        events.sort(key=attrgetter('created_at'), reverse=True)
+        # A single-symbol detail retains only its own usually small selection.
+        pulses = _WindowPulses(rows, start, now, pulse_count) if symbol is None else selected_pulses
         return events, pulses
 
     def ready(self):

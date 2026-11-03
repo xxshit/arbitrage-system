@@ -164,6 +164,23 @@ class HistoryIndexTests(unittest.TestCase):
         self.snapshot(loading)
         self.assertTrue(self.index.ready())
 
+    def test_pulse_mapping_respects_window_and_keeps_its_own_publication(self):
+        self.rows = {1: self.row(1, age=1, evidence='{"peak":1}'),
+                     2: self.row(2, age=9, evidence='{"peak":2}'), 3: self.row(3)}
+        self.snapshot()
+        events, before = self.index.cached_snapshot(self.now-timedelta(seconds=5), self.now)
+        self.assertEqual([item.id for item in events], [3, 1])
+        self.assertEqual(list(before), [1])
+        self.assertEqual(len(before), 1)
+        self.assertIsNone(before.get(2))
+        self.assertNotIn(3, before)
+        self.rows[1] = self.row(1, evidence='{"peak":99}')
+        self.index.invalidate([1])
+        _, after = self.snapshot()
+        self.assertEqual(before[1].unpack()['peak'], 1)
+        self.assertEqual(after[1].unpack()['peak'], 99)
+        self.assertEqual(self.index.cached_snapshot(self.now-timedelta(hours=24), self.now, 'COIN2/USDT')[1][2].unpack()['peak'], 2)
+
     def test_spool_compaction_preserves_inflight_snapshots_and_all_values(self):
         self.rows = {1: self.row(1, evidence='{"peak":1}')}
         before = self.snapshot()

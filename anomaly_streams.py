@@ -371,10 +371,18 @@ class AlertStreamHub:
         now = time.time() if now is None else now
         with self.lock:
             for item in batch:
-                self.persisted_checkpoints.pop(item["id"], None)
-                self.persisted_checkpoints[item["id"]] = pulse_checkpoint(item, now)
-                if self.pending.get(item["id"], {}).get("version") == item["version"]:
-                    self.pending.pop(item["id"], None)
+                key = item["id"]
+                if self.pending.get(key, {}).get("version") == item["version"]:
+                    self.pending.pop(key, None)
+                self.persisted_checkpoints.pop(key, None)
+                if key not in self.pending and item.get("path") and item.get("metric"):
+                    # Only the detector can create a later version of a real pulse.
+                    # A retired ID with its last write acknowledged has no future
+                    # heartbeat to throttle. Its complete history is already durable.
+                    track = self.detector.tracks.get((tuple(item["path"]), item["metric"]))
+                    if track is None or not track.pulse or track.pulse["id"] != key:
+                        continue
+                self.persisted_checkpoints[key] = pulse_checkpoint(item, now)
             while len(self.persisted_checkpoints) > 20000:
                 self.persisted_checkpoints.pop(next(iter(self.persisted_checkpoints)))
             self.persistence_error = False

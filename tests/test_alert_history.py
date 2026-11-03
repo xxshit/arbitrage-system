@@ -120,6 +120,39 @@ class AlertHistoryTests(unittest.TestCase):
         with module.app.app_context():
             self.assertEqual(module.AlertEvent.query.order_by(module.AlertEvent.created_at).first().created_at, older)
 
+    def test_mixed_reminders_and_legacy_rounds_remain_symbol_local_across_views(self):
+        from tests.test_alert_quality import historical_pulse
+
+        first = {}
+        epoch = self.now.replace(tzinfo=timezone.utc).timestamp()
+        with module.app.app_context():
+            for symbol in ("ONE/USDT", "TWO/USDT"):
+                for age, venue in [(90, "Gate"), (70, "Bitget"), (40, "Gate")]:
+                    stamp = self.now - timedelta(seconds=age)
+                    event = self.event(symbol, created_at=stamp, long_exchange=venue, short_exchange="Binance")
+                    module.db.session.add(event)
+                    module.db.session.flush()
+                    pulse = historical_pulse(trigger=.9, peak=1.1, identifier=f"generated-{event.id}")
+                    pulse["path"] = ["spot_futures", symbol, venue, "Binance"]
+                    if age == 90:
+                        first[symbol] = event.id
+                    if age == 40:
+                        pulse["reminder"] = {"policy": 1, "notices": [
+                            {"key": f"{symbol}-{n}", "at": epoch-200-n, "kind": "breakout"}
+                            for n in (0, 1)]}
+                    module.db.session.add(module.AlertPulse(id=pulse["id"], alert_event_id=event.id,
+                        evidence_json=json.dumps(pulse), updated_at=stamp))
+            module.db.session.commit()
+        summary = self.get(view="summary")
+        self.assertEqual((summary["total_observations"], summary["total_alerts"]), (6, 6))
+        self.assertEqual({g["symbol"]: g["alert_count"] for g in summary["events"]},
+                         {"ONE/USDT": 3, "TWO/USDT": 3})
+        for symbol, event_id in first.items():
+            detail = self.get(view="detail", symbol=symbol,
+                              path=json.dumps(["spot_futures", "Bitget", "Binance"]))
+            self.assertEqual(detail["total"], 1)
+            self.assertEqual(detail["items"][0]["round_id"], f"pulse:{event_id}")
+
     def test_ranges_use_all_24h_confirmed_events_not_the_current_page_or_legacy_timeline(self):
         self.insert([self.event(created_at=self.now - timedelta(minutes=i + 1)) for i in range(90)] + [
             self.event(open_spread=10, basis=4, created_at=self.now - timedelta(hours=23)),

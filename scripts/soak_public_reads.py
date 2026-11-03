@@ -14,6 +14,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import statistics
 import subprocess
@@ -31,14 +32,52 @@ def synthetic_database_url(directory, mysql_socket=None):
 
 
 def check_integrity(session, metadata, dialect):
-    from sqlalchemy import text
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.pool import NullPool
+
     if dialect == "sqlite":
-        assert session.execute(text("PRAGMA integrity_check")).scalar() == "ok"
-    else:
-        assert dialect == "mysql"
-        for table in metadata.sorted_tables:
-            rows = session.execute(text("CHECK TABLE `" + table.name + "`")).all()
-            assert rows and rows[-1][-2:] == ("status", "OK"), table.name
+        assert session.execute(text("PRAGMA integrity_check")).scalars().all() == ["ok"]
+        return {}
+    if dialect != "mysql":
+        raise ValueError("unsupported synthetic database")
+
+    url = session.get_bind().url
+    socket_path = Path(url.query.get("unix_socket", ""))
+    if (url.drivername != "mysql+pymysql" or url.host != "localhost" or url.port is not None
+            or url.username != "root" or url.password is not None
+            or not re.fullmatch(r"snapshot_soak_[0-9a-f]{32}", url.database or "")
+            or set(url.query) != {"unix_socket"} or socket_path.parent.parent != Path("/tmp")
+            or not socket_path.parent.name.startswith("arbiscope-read-mysql.")
+            or socket_path.name != "mysql.sock" or socket_path.is_symlink()
+            or socket_path.parent.is_symlink() or not socket_path.is_socket()):
+        raise ValueError("integrity check requires a private synthetic MySQL socket and schema")
+
+    # A full physical table scan runs after the timed workload and its readers.
+    # End the verification read transaction before taking CHECK TABLE's locks.
+    session.rollback()
+    audit = create_engine(url, poolclass=NullPool, isolation_level="AUTOCOMMIT",
+                          connect_args={"connect_timeout": 5, "read_timeout": 120, "write_timeout": 30})
+    try:
+        with audit.connect() as connection:
+            schema, datadir, private, server_id = connection.execute(text(
+                "SELECT DATABASE(), @@datadir, @@skip_networking, @@server_id")).one()
+            if (schema != url.database or Path(datadir) != socket_path.parent / "data"
+                    or (private, server_id) != (1, 83024)):
+                raise ValueError("synthetic MySQL identity changed")
+            tables = {table.name for table in metadata.sorted_tables}
+            actual = {row[0] for row in connection.execute(text("SHOW FULL TABLES"))
+                      if row[1] == "BASE TABLE"}
+            assert tables and actual == tables, "synthetic schema table set differs"
+            durations = {}
+            for name in sorted(tables):
+                identifier = connection.dialect.identifier_preparer.quote_identifier(name)
+                started = time.monotonic()
+                rows = connection.exec_driver_sql("CHECK TABLE " + identifier).all()
+                assert rows == [(schema + "." + name, "check", "status", "OK")], name
+                durations[name] = time.monotonic() - started
+            return durations
+    finally:
+        audit.dispose()
 
 
 @contextmanager
@@ -296,7 +335,7 @@ def main():
             if tick >= 13:
                 assert funding_check["event_rows"] > 0 and funding_check["active_http_checks"] > 0
             json_check = json_coverage.verify(tick, require_native=args.require_native_mysql)
-            check_integrity(module.db.session, module.db.metadata, module.db.engine.dialect.name)
+            integrity_tables = check_integrity(module.db.session, module.db.metadata, module.db.engine.dialect.name)
             module.db.session.remove()
         decode_check = decode_load.verify()
         lock_check = lock_load.verify()
@@ -310,7 +349,7 @@ def main():
             assert compressed_responses["summary"] >= tick and compressed_responses["detail"] == tick
         for values in measurements.values():
             assert sorted(values)[int(.95*(len(values)-1))] < 5 and max(values) < 10, "HTTP latency outside original bounds"
-        print(json.dumps(dict(event="passed", at_utc=datetime.now(timezone.utc).isoformat(), seconds=round(time.monotonic()-started), wall_seconds=round(time.time()-started_wall,3), max_cycle_gap_seconds=round(max_cycle_gap,3), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints, snapshot_check=snapshot_check, maintenance_check=maintenance_check, funding_check=funding_check, native_json_check=json_check, decode_check=decode_check, background_check=background_check, lock_check=lock_check, compressed_responses=compressed_responses, source_counts_unchanged=True, integrity="ok")), flush=True)
+        print(json.dumps(dict(event="passed", at_utc=datetime.now(timezone.utc).isoformat(), seconds=round(time.monotonic()-started), wall_seconds=round(time.time()-started_wall,3), max_cycle_gap_seconds=round(max_cycle_gap,3), cycles=tick, requests=sum(map(len, measurements.values())), rss_first=rss_samples[0], rss_last=rss_samples[-1], rss_max=max(rss_samples), files=fingerprints, snapshot_check=snapshot_check, maintenance_check=maintenance_check, funding_check=funding_check, native_json_check=json_check, decode_check=decode_check, background_check=background_check, lock_check=lock_check, compressed_responses=compressed_responses, source_counts_unchanged=True, integrity="ok", integrity_table_seconds=integrity_tables)), flush=True)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 import threading
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from scripts.soak_public_reads import background_task, check_integrity, synthetic_database_url
 from scripts.soak_snapshot_writes import isolated_mysql_url
@@ -21,15 +21,61 @@ class SoakCleanupTests(unittest.TestCase):
                 with self.assertRaises(AssertionError): isolated_mysql_url(path)
         engine.assert_not_called()
 
-    def test_mysql_integrity_rejects_bad_table_status(self):
-        session, metadata = Mock(), Mock()
-        metadata.sorted_tables = [Mock(name='table')]
-        metadata.sorted_tables[0].name = 'synthetic_table'
-        session.execute.return_value.all.return_value = [('db.synthetic_table','check','status','OK')]
-        check_integrity(session,metadata,'mysql')
-        self.assertEqual(str(session.execute.call_args.args[0]), 'CHECK TABLE `synthetic_table`')
-        session.execute.return_value.all.return_value = [('db.synthetic_table','check','error','damaged')]
-        with self.assertRaises(AssertionError): check_integrity(session,metadata,'mysql')
+    def test_mysql_integrity_checks_every_table_on_a_separate_guarded_connection(self):
+        from sqlalchemy import MetaData, Table
+        from sqlalchemy.dialects.mysql import dialect
+        from sqlalchemy.engine import make_url
+        from sqlalchemy.pool import NullPool
+
+        session = Mock()
+        database = "snapshot_soak_" + "1" * 32
+        socket_dir = "/tmp/arbiscope-read-mysql.test"
+        url = make_url(f"mysql+pymysql://root@localhost/{database}?unix_socket={socket_dir}/mysql.sock")
+        session.get_bind.return_value.url = url
+        metadata = MetaData()
+        for name in ("event", "alert_pulse"):
+            Table(name, metadata)
+        connection = MagicMock()
+        connection.dialect = dialect()
+        tables = [("event", "BASE TABLE"), ("alert_pulse", "BASE TABLE")]
+        identity = (database, socket_dir + "/data/", 1, 83024)
+        def run(last_status="OK", actual=tables, received=identity):
+            names = []
+            def table_check(sql):
+                name = sql.split("`")[1]
+                names.append(name)
+                return Mock(all=lambda: [(database+"."+name, "check", "status",
+                                          last_status if name == "event" else "OK")])
+            connection.execute.side_effect = [Mock(one=lambda: received), actual]
+            connection.exec_driver_sql.side_effect = table_check
+            with patch("sqlalchemy.create_engine") as create, patch("pathlib.Path.is_socket", return_value=True):
+                audit = create.return_value
+                audit.connect.return_value.__enter__.return_value = connection
+                try:
+                    result = check_integrity(session, metadata, "mysql")
+                finally:
+                    self.assertIs(create.call_args.kwargs["poolclass"], NullPool)
+                    self.assertEqual(create.call_args.args[0], url)
+                    self.assertEqual(create.call_args.kwargs["connect_args"]["read_timeout"], 120)
+                    audit.dispose.assert_called_once()
+                    audit.connect.return_value.__exit__.assert_called_once()
+                    session.execute.assert_not_called()
+            self.assertEqual(names, ["alert_pulse", "event"])
+            return result
+        self.assertEqual(set(run()), {"event", "alert_pulse"})
+        session.rollback.assert_called_once()
+        with self.assertRaisesRegex(AssertionError, "event"):
+            run(last_status="damaged")
+        with self.assertRaisesRegex(AssertionError, "table set"):
+            run(actual=tables[:1])
+        with self.assertRaisesRegex(ValueError, "identity changed"):
+            run(received=(database, "/var/lib/mysql", 0, 1))
+        for bad_url in (url.set(database="production"), url.set(host="remote"),
+                        url.set(query={"unix_socket": "/run/mysqld/mysqld.sock"})):
+            session.get_bind.return_value.url = bad_url
+            with patch("sqlalchemy.create_engine") as create, self.assertRaisesRegex(ValueError, "private synthetic"):
+                check_integrity(session, metadata, "mysql")
+            create.assert_not_called()
 
     def test_normal_exit_stops_and_joins_synthetic_worker(self):
         stop = threading.Event()

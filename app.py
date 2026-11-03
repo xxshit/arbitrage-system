@@ -13872,46 +13872,56 @@ def alerts():
     isolated = [item for item in episodes if item.resolved_at is None and not is_rwa_stock_pair(item.symbol)]
     db.session.remove()  # All quarantine/auth fields used below are already loaded.
     if BACKGROUND_WORKERS_STARTED and view != "active":
-        indexed_events, indexed_pulses = ALERT_HISTORY_INDEX.cached_snapshot(window_start, now, symbol if view == "detail" else None)
+        indexed_events, pulses = ALERT_HISTORY_INDEX.cached_snapshot(window_start, now, symbol if view == "detail" else None)
     else:
-        indexed_events, indexed_pulses = read_alert_history(window_start, now, live_only=view == "active", symbol=symbol if view == "detail" else None)
+        indexed_events, pulses = read_alert_history(window_start, now, live_only=view == "active", symbol=symbol if view == "detail" else None)
     asset_types = {symbol: is_rwa_stock_pair(symbol) for symbol in {item.symbol for item in indexed_events}}
-    all_events = [item for item in indexed_events if (view != "detail" or item.symbol == symbol)
-                  and not asset_types[item.symbol] and not alert_is_divergent(item, by_path)]
-    pulses = {item.id: indexed_pulses[item.id] for item in all_events if item.id in indexed_pulses}
-    round_ids = alert_round_ids(all_events, pulses)
     grouped_events = {}
-    for item in all_events:
+    paths = set()
+    for item in indexed_events:
+        if (view == "detail" and item.symbol != symbol) or asset_types[item.symbol] or alert_is_divergent(item, by_path):
+            continue
         grouped_events.setdefault(item.symbol, []).append(item)
+        pulse = pulses.get(item.id)
+        if pulse and pulse.path:
+            paths.add(pulse.path)
+    del indexed_events
+
     def notice_epoch(item):
-        pulse = pulses.get(item.id) or {}
+        pulse = pulses.get(item.id)
         return pulse.notice_at if pulse and pulse.notice_at is not None else item.created_at.replace(tzinfo=timezone.utc).timestamp()
+
     screening_now = time.time()
-    notice_epochs = {item.id: notice_epoch(item) for item in all_events}
-    reminder_counts = {item.id: pulses[item.id].count(screening_now)
-                       for item in all_events if pulses.get(item.id) and pulses[item.id].has_reminder}
-    def count_reminders(items):
-        # Legacy non-pulse history keeps its old count; migrated and new pulses
-        # count only first/breakthrough admissions, never repeat observations.
-        return sum(reminder_counts.get(item.id, 0) for item in items) + len({round_ids[item.id] for item in items if item.id not in reminder_counts})
-    paths = {pulse.path for pulse in pulses.values() if pulse.path}
+
+    def count_reminders(items, round_ids):
+        # A round belongs to exactly one symbol. Modern tickets count separately.
+        count = 0
+        legacy_rounds = set()
+        for item in items:
+            pulse = pulses.get(item.id)
+            if pulse and pulse.has_reminder:
+                count += pulse.count(screening_now)
+            else:
+                legacy_rounds.add(round_ids[item.id])
+        return count + len(legacy_rounds)
+
     live_quotes = ALERT_STREAM_HUB.screening_quotes(paths, screening_now)
     attention = Screenings(pulses, live_quotes, screening_now, notional, screen_pulse)
     def priority(item):
         pulse = pulses.get(item.id)
         if pulse is None or not pulse.can_screen_live(screening_now):
-            return (0, 0, notice_epochs[item.id])
+            return (0, 0, notice_epoch(item))
         assessment = attention[item.id]
-        return ({"candidate": 2, "watch": 1}.get(assessment["tier"], 0), assessment.get("net_edge") or 0, notice_epochs[item.id])
-    active_events = []
-    for items in grouped_events.values():
+        return ({"candidate": 2, "watch": 1}.get(assessment["tier"], 0), assessment.get("net_edge") or 0, notice_epoch(item))
+    active_events = {}
+    for group_symbol, items in grouped_events.items():
         active = []
         for item in items:
             packed = pulses.get(item.id)
             if packed is None or not packed.ticket(screening_now):
                 continue
             assessment, pulse = attention[item.id], packed.unpack()
-            age = screening_now-notice_epochs[item.id]
+            age = screening_now-notice_epoch(item)
             if assessment["live"] and 0 <= age <= 120:
                 active.append(item)
             elif pulse and pulse.get("state") == "retraced" and not pulse.get("ended_at") and 0 <= age <= 30 and pulse_has_watch_peak(pulse):
@@ -13920,7 +13930,7 @@ def alerts():
                 attention[item.id] = {**assessment, "transient": True, "reason": "冲击已回落，非当前机会"}
                 active.append(item)
         if active:
-            active_events.append(max(active, key=priority))
+            active_events[group_symbol] = max(active, key=priority)
     tracking = [item for item in BasisTracking.query.filter_by(resolved_at=None).order_by(BasisTracking.max_abs_basis.desc()).limit(50).all() if not is_rwa_stock_pair(item.symbol)] if view not in {"detail", "active"} else []
     if isolated and tracking:
         isolated_keys = {spot_divergence_key(item.symbol, item.long_exchange, item.short_exchange) for item in isolated}
@@ -13992,7 +14002,7 @@ def alerts():
             ranges[field] = {"max": max(values, default=None), "min": min(values, default=None)}
         return ranges
 
-    def event_payload(item):
+    def event_payload(item, round_ids):
         basis = alert_binance_basis(item)
         packed = pulses.get(item.id)
         pulse = packed.unpack() if packed is not None else None
@@ -14009,14 +14019,18 @@ def alerts():
     if view == "active":
         db.session.remove()
         return jsonify({"view": "active", "history_loading": history_loading, "checked_at_epoch": time.time(), "realtime": ALERT_STREAM_HUB.status(),
-                        "funding": funding_alert_payload(screening_now), "active_events": [event_payload(item) for item in active_events]})
+                        "funding": funding_alert_payload(screening_now),
+                        "active_events": [event_payload(item, alert_round_ids(grouped_events[key], pulses))
+                                          for key, item in active_events.items()]})
 
     if view == "detail":
-        filtered = [item for item in all_events if (not selected_strategy or alert_context(item)["strategy"] == selected_strategy) and (selected_path is None or path_key(item) == selected_path)]
+        items = grouped_events.get(symbol, ())
+        round_ids = alert_round_ids(items, pulses)
+        filtered = [item for item in items if (not selected_strategy or alert_context(item)["strategy"] == selected_strategy) and (selected_path is None or path_key(item) == selected_path)]
         total = len(filtered)
         pages = max(1, math.ceil(total / page_size))
         page = min(page, pages)
-        return jsonify({"symbol": symbol, "strategy": selected_strategy or None, "path_id": path_id(selected_path) if selected_path is not None else None, "items": [event_payload(item) for item in filtered[(page - 1) * page_size:page * page_size]], "total": total, "page": page, "pages": pages, "page_size": page_size, "window_hours": 24, "checked_at_epoch": time.time()})
+        return jsonify({"symbol": symbol, "strategy": selected_strategy or None, "path_id": path_id(selected_path) if selected_path is not None else None, "items": [event_payload(item, round_ids) for item in filtered[(page - 1) * page_size:page * page_size]], "total": total, "page": page, "pages": pages, "page_size": page_size, "window_hours": 24, "checked_at_epoch": time.time()})
 
     transfer_exchanges = {}
     for symbol, items in grouped_events.items():
@@ -14028,9 +14042,9 @@ def alerts():
     transfer_statuses = load_transfer_statuses((symbol, exchange) for symbol, exchanges in transfer_exchanges.items() for exchange in exchanges)
     db.session.remove()
 
-    def alert_group_payload(symbol, items):
-        timeline = [event_payload(item) for item in items[:20]] if view == "legacy" else []
-        latest = event_payload(items[0])
+    def alert_group_payload(symbol, items, round_ids):
+        timeline = [event_payload(item, round_ids) for item in items[:20]] if view == "legacy" else []
+        latest = event_payload(items[0], round_ids)
         spread_items = [item for item in items if item.open_spread is not None]
         basis_items = [item for item in items if item.basis is not None]
         max_spread_item = max(spread_items, key=lambda item: abs(item.open_spread or 0), default=None)
@@ -14046,13 +14060,13 @@ def alerts():
         paths = []
         for key, samples in path_items.items():
             context = alert_context(samples[0])
-            paths.append({"id": key, **context, "attention": attention[max(samples, key=priority).id], "alert_count": count_reminders(samples), "observation_count": len(samples), "latest": event_payload(samples[0]), "value_ranges": value_ranges(samples), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
+            paths.append({"id": key, **context, "attention": attention[max(samples, key=priority).id], "alert_count": count_reminders(samples, round_ids), "observation_count": len(samples), "latest": event_payload(samples[0], round_ids), "value_ranges": value_ranges(samples), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
         return {
             "symbol": symbol,
             "attention": attention[max(items, key=priority).id],
             "latest": latest,
             "first_at": format_shanghai_time(items[-1].created_at, "%m-%d %H:%M:%S"),
-            "alert_count": count_reminders(items),
+            "alert_count": count_reminders(items, round_ids),
             "observation_count": len(items),
             "move_peaks": {
                 "open_spread": absolute_peak("open_spread", max_spread_item.open_spread if max_spread_item else None),
@@ -14060,25 +14074,38 @@ def alerts():
                 "basis": absolute_peak("basis", max_basis_item.basis if max_basis_item else None),
                 "basis_at": format_shanghai_time(max_basis_item.created_at, "%m-%d %H:%M:%S") if max_basis_item else None,
             },
-            "value_ranges": value_ranges(items),
+            "value_ranges": ranges,
             "paths": paths,
             "basis_exchange": "Binance",
             "transfer_statuses": [transfer_statuses[(symbol, exchange)] for exchange in transfer_exchanges[symbol]],
             "timeline": timeline,
         }
 
+    checked_at = time.time()
+    realtime = ALERT_STREAM_HUB.status()
+    funding = funding_alert_payload(screening_now)
+    groups, active_payloads = [], []
+    for group_symbol, items in grouped_events.items():
+        # Episode and 30-second round correlation are both scoped to a symbol.
+        # Consume this symbol's map before building the next one.
+        round_ids = alert_round_ids(items, pulses)
+        groups.append(alert_group_payload(group_symbol, items, round_ids))
+        if group_symbol in active_events:
+            active_payloads.append(event_payload(active_events[group_symbol], round_ids))
+        del round_ids
+
     return jsonify({
-        "checked_at_epoch": time.time(),
-        "realtime": ALERT_STREAM_HUB.status(),
+        "checked_at_epoch": checked_at,
+        "realtime": realtime,
         "window_hours": 24,
-        "funding": funding_alert_payload(screening_now),
+        "funding": funding,
         "screening": {"notional": notional, "min_net_edge": .30, "version": 3},
         "total_symbols": len(grouped_events),
-        "total_alerts": count_reminders(all_events),
-        "total_observations": len(all_events),
+        "total_alerts": sum(group["alert_count"] for group in groups),
+        "total_observations": sum(map(len, grouped_events.values())),
         "isolated_paths": [spot_divergence_payload(item, now) for item in sorted(isolated, key=lambda item: (item.symbol, item.long_exchange))],
-        "events": [alert_group_payload(symbol, items) for symbol, items in grouped_events.items()],
-        "active_events": [event_payload(item) for item in active_events],
+        "events": groups,
+        "active_events": active_payloads,
         "basis_tracking": [{"symbol": item.symbol, "strategy": item.strategy or "spot_futures", "direction": item.direction, "started_at": format_shanghai_time(item.started_at, "%m-%d %H:%M:%S"), "opening_basis": item.opening_basis, "last_level": item.last_recorded_level, "max_basis": item.max_basis, "max_at": format_shanghai_time(item.max_at, "%m-%d %H:%M:%S")} for item in tracking],
     })
 

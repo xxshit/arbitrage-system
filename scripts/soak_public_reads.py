@@ -184,7 +184,7 @@ def main():
                 module.EquitySpotSnapshot.__table__)
             module.db.session.commit()
             maintenance_load = MaintenanceWorkload(module)
-            funding_load = FundingAlertWorkload(module)
+            funding_load = FundingAlertWorkload(module, events_path=Path(directory).resolve() / "expected-funding.sqlite3")
             funding_load.step(0)
             json_coverage = SnapshotSqlCoverage(module.db.engine)
             cleanup.callback(json_coverage.close)

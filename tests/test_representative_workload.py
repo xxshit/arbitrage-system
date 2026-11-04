@@ -97,6 +97,30 @@ class FundingWorkloadTests(unittest.TestCase):
         result = load.verify()
         self.assertEqual((result["state_rows"], result["event_rows"], result["http_checks"]), (524, 32, 2))
 
+    def test_private_disk_expectations_detect_durable_event_corruption_after_full_http_check(self):
+        import tempfile
+        from pathlib import Path
+        from scripts.funding_alert_workload import FundingAlertWorkload
+        with tempfile.TemporaryDirectory() as directory:
+            module = self.module
+            load = FundingAlertWorkload(module, events_path=Path(directory).resolve() / "expected-funding.sqlite3")
+            self.assertEqual(load.step(0), 0)
+            with patch.object(module.db.session, "commit", side_effect=RuntimeError("synthetic failure")):
+                with self.assertRaisesRegex(RuntimeError, "synthetic failure"):
+                    load.step(12)
+            module.db.session.rollback()
+            self.assertEqual(len(load.expected_events), 0)
+            self.assertEqual(load.step(12), 32)
+            load.verify_http(module.funding_alert_payload())
+            self.assertEqual(load.verify()["event_rows"], 32)
+            table = module.FundingAlertEvent.__table__
+            key = module.db.session.query(module.FundingAlertEvent.id).first()[0]
+            module.db.session.execute(update(table).where(table.c.id == key).values(evidence_json="{}"))
+            with self.assertRaisesRegex(AssertionError, "durable funding events differ"):
+                load.verify()
+            module.db.session.rollback()
+            self.assertTrue(load.verify()["exact_values"])
+
     def test_clock_capture_scheduling_delay_preserves_exact_source_cache_minimum(self):
         import time
         module, load = self.module, self.load

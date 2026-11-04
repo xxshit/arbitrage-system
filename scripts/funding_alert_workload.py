@@ -4,7 +4,10 @@ Uses the real writer and real wall/monotonic clocks, never upstream HTTP. The
 intent journal is captured before database serialization; final checks read
 Core rows back, so the ORM identity map cannot hide persistence corruption.
 """
+from contextlib import closing
 import json
+import os
+import sqlite3
 from pathlib import Path
 import threading
 import time
@@ -12,8 +15,62 @@ import time
 from sqlalchemy import event, select
 
 
+class FundingEventJournal:
+    """Full synthetic expectations on disk, independent of the database under test."""
+    def __init__(self, path, *, create=False):
+        self.path = Path(path)
+        if (self.path.name != "expected-funding.sqlite3" or self.path.resolve() != self.path
+                or self.path.parent.stat().st_mode & 0o077):
+            raise ValueError("expected a private synthetic workload directory")
+        self.writable = create
+        if create:
+            os.close(os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            with closing(sqlite3.connect(self.path)) as conn:
+                conn.executescript("""
+                    CREATE TABLE events(id TEXT PRIMARY KEY, contract TEXT NOT NULL,
+                        observed_at_ms INTEGER NOT NULL, evidence_json TEXT NOT NULL);
+                    CREATE INDEX read_order ON events(observed_at_ms DESC, id);
+                    CREATE INDEX contract_names ON events(contract);
+                """)
+        elif not self.path.is_file():
+            raise FileNotFoundError(self.path)
+
+    def read(self):
+        return sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)
+
+    def update(self, rows):
+        if not self.writable:
+            raise ValueError("read-only expectation journal")
+        if rows:
+            with closing(sqlite3.connect(self.path)) as conn, conn:
+                conn.executemany("""INSERT INTO events VALUES(:id,:contract,:observed_at_ms,:evidence_json)
+                    ON CONFLICT(id) DO UPDATE SET contract=excluded.contract,
+                    observed_at_ms=excluded.observed_at_ms,evidence_json=excluded.evidence_json""", rows.values())
+
+    def __len__(self):
+        with closing(self.read()) as conn:
+            return conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+
+    def contains_all(self, keys):
+        with closing(self.read()) as conn:
+            return all(conn.execute("SELECT 1 FROM events WHERE id=?", (key,)).fetchone() for key in keys)
+
+    def contracts(self):
+        with closing(self.read()) as conn:
+            return {row[0] for row in conn.execute("SELECT DISTINCT contract FROM events")}
+
+    def ordered(self):
+        with closing(self.read()) as conn:
+            conn.row_factory = sqlite3.Row
+            yield from conn.execute("SELECT * FROM events ORDER BY observed_at_ms DESC, id")
+
+    def verify_storage(self):
+        with closing(self.read()) as conn:
+            assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+
+
 class FundingAlertWorkload:
-    def __init__(self, module, contracts=524):
+    def __init__(self, module, contracts=524, *, events_path=None):
         engine = module.db.engine
         if engine.dialect.name == "sqlite":
             path = engine.url.database
@@ -33,7 +90,8 @@ class FundingAlertWorkload:
         assert not module.FUNDING_ALERT_LIVE_STATES
         self.module = module
         self.contracts = [f"SYNFUND{i:04d}USDT" for i in range(contracts)]
-        self.expected_states, self.expected_events, self.latest = {}, {}, {}
+        self.expected_states, self.latest = {}, {}
+        self.expected_events = {} if events_path is None else FundingEventJournal(events_path, create=True)
         self.cycles = self.state_writes = self.http_checks = self.active_http_checks = 0
         self.http_lock = threading.Lock()
         self.timestamp_checks = 0
@@ -128,7 +186,9 @@ class FundingAlertWorkload:
         # Validate each expected event in order, then release its decoded copy.
         required = set(self.contracts[:16])
         consumed = {}
-        for row in sorted(self.expected_events.values(), key=lambda e: (-e["observed_at_ms"], e["id"])):
+        ordered = (self.expected_events.ordered() if isinstance(self.expected_events, FundingEventJournal)
+                   else sorted(self.expected_events.values(), key=lambda e: (-e["observed_at_ms"], e["id"])))
+        for row in ordered:
             contract = row["contract"]
             required.add(contract)
             assert contract in groups, "funding HTTP omitted an event group"
@@ -142,7 +202,12 @@ class FundingAlertWorkload:
             assert type(item["history"]) is list and len(item["history"]) == consumed.get(contract, 0), "unexpected funding HTTP history rows"
         active = payload["active_events"]
         assert len({item["contract"] for item in active}) == len(active)
-        assert all(item["id"] in self.expected_events and item["notice"] for item in active)
+        assert all(item["notice"] for item in active)
+        active_ids = (item["id"] for item in active)
+        if isinstance(self.expected_events, FundingEventJournal):
+            assert self.expected_events.contains_all(active_ids)
+        else:
+            assert all(key in self.expected_events for key in active_ids)
         with self.http_lock:
             self.http_checks += 1
             self.active_http_checks += bool(active)
@@ -151,12 +216,29 @@ class FundingAlertWorkload:
         module = self.module
         states = {row["contract"]: dict(row) for row in module.db.session.execute(
             select(module.FundingAlertState.__table__)).mappings()}
-        events = {row["id"]: dict(row) for row in module.db.session.execute(
-            select(module.FundingAlertEvent.__table__)).mappings()}
         assert states == self.expected_states, "full durable funding states differ"
-        assert events == self.expected_events, "full durable funding events differ"
+        if isinstance(self.expected_events, FundingEventJournal):
+            from itertools import islice
+            table = module.FundingAlertEvent.__table__
+            count = module.FundingAlertEvent.query.count()
+            assert count == len(self.expected_events), "durable funding event count differs"
+            self.expected_events.verify_storage()
+            seen = 0
+            with closing(self.expected_events.ordered()) as rows:
+                while batch := list(islice(rows, 128)):
+                    expected = {row["id"]: dict(row) for row in batch}
+                    actual = {row["id"]: dict(row) for row in module.db.session.execute(
+                        select(table).where(table.c.id.in_(expected))).mappings()}
+                    assert actual == expected, "full durable funding events differ"
+                    seen += len(batch)
+            assert seen == count
+        else:
+            events = {row["id"]: dict(row) for row in module.db.session.execute(
+                select(module.FundingAlertEvent.__table__)).mappings()}
+            assert events == self.expected_events, "full durable funding events differ"
+            count = len(events)
         assert self.http_checks > 0, "nonempty funding HTTP was not exercised"
-        return dict(exact_values=True, state_rows=len(states), event_rows=len(events),
+        return dict(exact_values=True, state_rows=len(states), event_rows=count,
                     cycles=self.cycles, state_writes=self.state_writes,
                     http_checks=self.http_checks, active_http_checks=self.active_http_checks,
                     real_clocks=True, timestamp_checks=self.timestamp_checks,

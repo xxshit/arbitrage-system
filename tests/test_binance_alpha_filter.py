@@ -74,7 +74,7 @@ class BinanceAlphaFilterTests(unittest.TestCase):
             "app.enrich_basis_openings"
         ), patch("app.enrich_transfer_networks"), patch("app.mark_announced_delistings"), patch(
             "app.load_binance_alpha_symbols", return_value=(frozenset({"HAJIMI"}), "2026-09-10 12:00:00", False)
-        ), patch("app.SPOT_VIEW_CACHE", {"key": None, "symbols": None}):
+        ):
             response = spot_futures()
 
         data = response.get_json()

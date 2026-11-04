@@ -24,6 +24,17 @@ VIEWS = dict(summary='/api/alerts?view=summary', detail='/api/alerts?view=detail
 MAX_WIRE = 32 * 1024**2
 
 
+def check_market_page(value, epoch):
+    """In this generated feed each group has one path freshly stamped by its writer."""
+    assert value['captured_at_epoch'] == epoch
+    groups = value['symbols']
+    assert len(groups) == min(value['total_symbols'], value['page_size']) > 0
+    for group in groups:
+        rows = group['rows']
+        assert len(rows) == 1 and rows[0]['captured_at_epoch'] == epoch, 'quote page mixed generations'
+    return len(groups)
+
+
 def process_memory():
     result = dict(pid=os.getpid())
     if sys.platform == 'linux':
@@ -93,7 +104,7 @@ def peer_main(path, source):
                 if view in ('summary', 'active'):
                     FundingAlertWorkload.verify_http(oracle, value['funding'])
                 if view in ('spot', 'dual'):
-                    assert value['captured_at_epoch'] == expected_epoch
+                    out['verified_quote_rows'] = check_market_page(value, expected_epoch)
                 if view == 'summary':
                     out['observations'] = value['total_observations']
                 if view == 'detail':

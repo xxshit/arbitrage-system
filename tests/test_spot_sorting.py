@@ -30,7 +30,6 @@ class SpotSortingTests(unittest.TestCase):
         snapshot = dict(symbols=groups, errors={}, updated_at="12:00:00", captured_at_epoch=123)
         with module.app.test_request_context("/api/spot-futures?" + query), ExitStack() as stack:
             stack.enter_context(patch.object(module, "load_latest_market_snapshot", return_value=snapshot))
-            stack.enter_context(patch.object(module, "SPOT_VIEW_CACHE", {"key": None, "symbols": None}))
             for name in ("enrich_funding_statistics", "enrich_price_changes", "enrich_basis_openings",
                          "enrich_transfer_networks", "mark_announced_delistings"):
                 stack.enter_context(patch.object(module, name))

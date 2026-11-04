@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -103,8 +104,8 @@ class TransferStatusTests(unittest.TestCase):
         payload = {"code": "000000", "success": True, "data": [{"coin": "DEMO", "networkList": []}]}
         with patch.object(module, "urlopen") as opened:
             opened.return_value.__enter__.return_value.headers = {}
-            opened.return_value.__enter__.return_value.read.return_value = json.dumps(payload).encode()
-            module.get_json(module.TRANSFER_PUBLIC_SOURCES["Binance"], timeout=8)
+            opened.return_value.__enter__.return_value.read.side_effect = BytesIO(json.dumps(payload).encode()).read
+            self.assertEqual(module.get_json(module.TRANSFER_PUBLIC_SOURCES["Binance"], timeout=8), payload)
         request = opened.call_args.args[0]
         self.assertEqual(request.get_method(), "GET")
         self.assertEqual(request.full_url, "https://www.binance.com/bapi/capital/v1/public/capital/getNetworkCoinAll")
@@ -227,7 +228,7 @@ class TransferStatusTests(unittest.TestCase):
         symbols = [{"symbol": "DEMO/USDT", "rows": [{"long_exchange": "Gate", "open_spread": 1}]}]
         with module.app.app_context():
             self.record()
-        with patch.object(module, "load_latest_market_snapshot", return_value={"symbols": symbols, "updated_at": "unchanged"}), patch.object(module, "SPOT_VIEW_CACHE", {"key": "unchanged", "symbols": symbols}), patch.object(module, "mark_announced_delistings"), patch.object(module, "is_rwa_stock_pair", return_value=False), patch.object(module, "get_json", side_effect=AssertionError("no upstream reads")):
+        with patch.object(module, "load_latest_market_snapshot", return_value={"symbols": symbols, "updated_at": "unchanged"}), patch.object(module, "enrich_price_changes"), patch.object(module, "enrich_basis_openings"), patch.object(module, "mark_announced_delistings"), patch.object(module, "is_rwa_stock_pair", return_value=False), patch.object(module, "get_json", side_effect=AssertionError("no upstream reads")):
             first = self.client.get("/api/spot-futures").get_json()
             self.assertEqual(first["symbols"][0]["rows"][0]["transfer_status"]["state"], "fresh")
             with module.app.app_context():

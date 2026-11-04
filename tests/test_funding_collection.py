@@ -311,7 +311,8 @@ class FundingCollectionIntegrationTests(unittest.TestCase):
         module.store_settled_funding("Binance", [("SYNCFIXUSDT",stamp-3600000,.005)])
         with module.app.test_request_context('/api/spot-futures'), ExitStack() as stack:
             stack.enter_context(patch.object(module,'load_latest_market_snapshot',return_value={'symbols':[group], 'updated_at':'same'}))
-            stack.enter_context(patch.object(module,'SPOT_VIEW_CACHE',{'symbols':[group],'key':'same'}))
+            stack.enter_context(patch.object(module, 'enrich_price_changes'))
+            stack.enter_context(patch.object(module, 'enrich_basis_openings'))
             for name in ('enrich_transfer_networks','mark_announced_delistings'):
                 stack.enter_context(patch.object(module,name))
             stack.enter_context(patch.object(module,'is_rwa_stock_pair',return_value=False))

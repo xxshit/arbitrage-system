@@ -1199,8 +1199,32 @@ def background_http_batch(name):
         wait(pending)
 
 
-SPOT_VIEW_CACHE = {"key": None, "symbols": None}
-DUAL_VIEW_CACHE = {"key": None, "symbols": None}
+class PublishedMarketSnapshot(dict):
+    """Keep the enrichment marker with the live quote generation, off the wire."""
+    __slots__ = ("_view_lock", "_view_ready")
+
+    def __init__(self, values):
+        super().__init__(values)
+        self._view_lock = threading.Lock()
+        self._view_ready = False
+
+
+def market_view_groups(snapshot, prepare):
+    groups = snapshot["symbols"]
+    if not isinstance(snapshot, PublishedMarketSnapshot):
+        # A cold database read owns fresh rows; another reader's rows cannot serve it.
+        prepare(groups)
+    elif not snapshot._view_ready:
+        # Authentication and the snapshot lookup are complete. A reader waiting
+        # behind another reader of this generation must not occupy a connection.
+        db.session.remove()
+        with snapshot._view_lock:
+            if not snapshot._view_ready:
+                prepare(groups)
+                snapshot._view_ready = True
+    return groups
+
+
 FUNDING_HISTORY_CACHE = {}
 FUNDING_STATISTICS_CACHE = {"ts": 0.0, "symbols": frozenset(), "data": {}}
 FUNDING_STATISTICS_LOCK = threading.Lock()
@@ -4079,7 +4103,7 @@ def spot_futures_snapshot():
         for group in rows_by_symbol for row in group["rows"]})
     alerts_finished_at = time.perf_counter()
     captured_at = datetime.now()
-    live_snapshot = {
+    live_snapshot = PublishedMarketSnapshot({
         "symbols": rows_by_symbol,
         "errors": {key: value for key, value in errors.items() if key not in EQUITY_SPOT_URLS},
         "upstream_delays": snapshot_delays(rows_by_symbol, {key: value for key, value in errors.items() if key not in EQUITY_SPOT_URLS}, getattr(results, "observed_at", {}), "spot_futures"),
@@ -4087,7 +4111,7 @@ def spot_futures_snapshot():
         "captured_at_epoch": captured_at.timestamp(),
         "next_refresh_in_seconds": MARKET_REFRESH_SECONDS,
         "stored": True,
-    }
+    })
     SPOT_FUTURES_CACHE["snapshot"] = live_snapshot
     persist_due = time.time() - LAST_MARKET_DB_PERSIST_AT["spot"] >= MARKET_DB_PERSIST_SECONDS
     if persist_due:
@@ -4254,7 +4278,7 @@ def dual_futures_snapshot():
     enrich_next_funding_net(groups)
     evaluate_dual_alerts(groups)
     captured_at = datetime.now()
-    live_snapshot = {
+    live_snapshot = PublishedMarketSnapshot({
         "symbols": groups,
         "errors": errors,
         "upstream_delays": snapshot_delays(groups, errors, getattr(results, "observed_at", {}), "futures_futures"),
@@ -4262,7 +4286,7 @@ def dual_futures_snapshot():
         "captured_at_epoch": captured_at.timestamp(),
         "next_refresh_in_seconds": MARKET_REFRESH_SECONDS,
         "stored": True,
-    }
+    })
     DUAL_FUTURES_CACHE["snapshot"] = live_snapshot
     if time.time() - LAST_MARKET_DB_PERSIST_AT["dual"] >= MARKET_DB_PERSIST_SECONDS:
         save_latest_dual_futures_snapshot(groups)
@@ -7762,16 +7786,15 @@ def spot_futures():
     snapshot = load_latest_market_snapshot()
     if not snapshot:
         return jsonify({"error": "行情正在进行首轮同步，请稍后刷新。"}), 503
-    global SPOT_VIEW_CACHE
-    snapshot_key = snapshot["updated_at"]
-    if SPOT_VIEW_CACHE["key"] != snapshot_key:
-        enrich_price_changes(snapshot["symbols"])
-        enrich_basis_openings(snapshot["symbols"], "spot_futures")
-        SPOT_VIEW_CACHE = {"key": snapshot_key, "symbols": snapshot["symbols"]}
+    def prepare(groups):
+        enrich_price_changes(groups)
+        enrich_basis_openings(groups, "spot_futures")
+
+    groups = market_view_groups(snapshot, prepare)
     # Settlement facts can change even if the upstream quote snapshot does not.
-    enrich_funding_statistics(SPOT_VIEW_CACHE["symbols"])
-    mark_announced_delistings(SPOT_VIEW_CACHE["symbols"])
-    symbols = [group for group in SPOT_VIEW_CACHE["symbols"] if not is_rwa_stock_pair(group["symbol"])]
+    enrich_funding_statistics(groups)
+    mark_announced_delistings(groups)
+    symbols = [group for group in groups if not is_rwa_stock_pair(group["symbol"])]
     if funding_interval != "ALL":
         interval_hours = int(funding_interval[:-1])
         symbols = [
@@ -7995,18 +8018,17 @@ def dual_futures():
     snapshot = load_latest_dual_futures_snapshot()
     if not snapshot:
         return jsonify({"error": "期多期空行情正在进行首轮同步，请稍后刷新。"}), 503
-    global DUAL_VIEW_CACHE
-    snapshot_key = snapshot["updated_at"]
-    if DUAL_VIEW_CACHE["key"] != snapshot_key:
-        enrich_dual_binance_reference(snapshot["symbols"])
-        enrich_dual_basis_references(snapshot["symbols"])
-        enrich_next_funding_net(snapshot["symbols"])
-        enrich_dual_index_overlap(snapshot["symbols"])
-        enrich_basis_openings(snapshot["symbols"], "futures_futures")
-        DUAL_VIEW_CACHE = {"key": snapshot_key, "symbols": snapshot["symbols"]}
-    enrich_dual_funding_statistics(DUAL_VIEW_CACHE["symbols"])
-    mark_announced_delistings(DUAL_VIEW_CACHE["symbols"])
-    symbols = [group for group in DUAL_VIEW_CACHE["symbols"] if not is_rwa_stock_pair(group["symbol"])]
+    def prepare(groups):
+        enrich_dual_binance_reference(groups)
+        enrich_dual_basis_references(groups)
+        enrich_next_funding_net(groups)
+        enrich_dual_index_overlap(groups)
+        enrich_basis_openings(groups, "futures_futures")
+
+    groups = market_view_groups(snapshot, prepare)
+    enrich_dual_funding_statistics(groups)
+    mark_announced_delistings(groups)
+    symbols = [group for group in groups if not is_rwa_stock_pair(group["symbol"])]
     if not include_bybit_okx:
         filtered_symbols = []
         for group in symbols:

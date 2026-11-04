@@ -7,13 +7,16 @@ credentials, sockets, production state, pushes or fake production observations.
 import ast
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 import json
 from pathlib import Path
 import threading
 import time
 from types import SimpleNamespace
+
+from sqlalchemy import column, select, table
+from sqlalchemy.dialects import sqlite
 
 
 LIMITS = {"index": 15, "price-history": 2, "major-analysis": 3, "momentum": 10,
@@ -52,6 +55,16 @@ class Session:
     def add(self, row):
         if not hasattr(self.local, "rows"): self.local.rows = []
         self.local.rows.append(row)
+    def execute(self, statement, parameters=None):
+        # This scheduling workload has no database. Exercise the real statement
+        # construction and capture the rows which would be sent to its price sink.
+        if statement.is_select:
+            assert tuple(statement.selected_columns.keys()) == ("symbol", "bucket_at")
+            return nullcontext(iter(()))
+        assert statement.is_insert and statement.table.name == "futures_price_history"
+        for fields in parameters:
+            self.add(SimpleNamespace(**fields))
+
     def take(self):
         rows = getattr(self.local, "rows", [])
         self.local.rows = []
@@ -88,10 +101,11 @@ class BackgroundExecutorWorkload:
         self.tick = self.cycles = 0
         self.session = Session()
         self.callers = ThreadPoolExecutor(max_workers=8, thread_name_prefix="soak-background-callers")
+        price_table = table("futures_price_history", column("id"), column("symbol"), column("bucket_at"), column("price"))
         self.ns.update(
-            db=SimpleNamespace(session=self.session),
+            db=SimpleNamespace(session=self.session, select=select, engine=SimpleNamespace(dialect=sqlite.dialect())),
             LatestDualFuturesSnapshot=Table("latest", [(f"I{i}/USDT", "Bybit", "OKX") for i in range(10)]),
-            IndexComponentSnapshot=Table("index"), FuturesPriceHistory=Table("price"),
+            IndexComponentSnapshot=Table("index"), FuturesPriceHistory=SimpleNamespace(__table__=price_table),
             INDEX_COMPONENT_CURSOR=0, PRICE_HISTORY_BUCKET_SECONDS=300,
             PRICE_HISTORY_RETENTION_SECONDS=8*86400,
             price_history_integrity=lambda groups: {"missing_symbols": ["P0/USDT", "P1/USDT"]},
@@ -176,7 +190,8 @@ class BackgroundExecutorWorkload:
             ns["backfill_price_history"]([])
             rows = self.session.take()
             assert len(rows) == 40
-            assert sorted((x.bucket_at, x.price) for x in rows if x.symbol == "P0/USDT") == self.prices
+            for symbol in ("P0/USDT", "P1/USDT"):
+                assert sorted((x.bucket_at, x.price) for x in rows if x.symbol == symbol) == self.prices
         else:
             raise AssertionError(lane)
         with self.lock: self.rounds[lane] += 1

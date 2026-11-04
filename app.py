@@ -13735,6 +13735,37 @@ def alert_binance_basis(item):
     return item.basis if alert_has_binance_basis_source(item) and item.basis is not None and math.isfinite(item.basis) else None
 
 
+def alert_value_ranges(items, pulses):
+    """Compute group extrema without allocating arrays proportional to group size."""
+    ranges = {}
+    for field in ("open_spread", "basis"):
+        basis = field == "basis"
+        low = high = None
+        # Observed values preceded pulse extrema in the original result. Preserve
+        # the first value on ties, including -0.0 versus 0.0 on the JSON wire.
+        for item in items:
+            value = alert_binance_basis(item) if basis else item.open_spread
+            if value is not None and math.isfinite(value):
+                if low is None or value < low:
+                    low = value
+                if high is None or value > high:
+                    high = value
+        for item in items:
+            if basis and not alert_has_binance_basis_source(item):
+                continue
+            pulse = pulses.get(item.id)
+            if not pulse:
+                continue
+            for value in (pulse.bounds[2:] if basis else pulse.bounds[:2]):
+                if isinstance(value, (int, float)) and math.isfinite(value):
+                    if low is None or value < low:
+                        low = value
+                    if high is None or value > high:
+                        high = value
+        ranges[field] = {"max": high, "min": low}
+    return ranges
+
+
 def alert_pulse_read_payload(evidence, *, qualified_only=False):
     """Retain only UI/range fields after one parse; full evidence stays in DB."""
     fields = ("id", "episode", "ordinal", "metric", "direction", "baseline", "baseline_at",
@@ -13992,20 +14023,6 @@ def alerts():
     def cached_path_id(key):
         return json.dumps(key, ensure_ascii=False, separators=(",", ":"))
 
-    def value_ranges(items):
-        ranges = {}
-        for field in ("open_spread", "basis"):
-            samples = [alert_binance_basis(item) if field == "basis" else item.open_spread for item in items]
-            values = [value for value in samples if value is not None and math.isfinite(value)]
-            for item in items:
-                if field == "basis" and not alert_has_binance_basis_source(item):
-                    continue
-                pulse = pulses.get(item.id)
-                bounds = pulse.bounds[:2] if field == "open_spread" and pulse else pulse.bounds[2:] if pulse else ()
-                values.extend(value for value in bounds if isinstance(value, (int, float)) and math.isfinite(value))
-            ranges[field] = {"max": max(values, default=None), "min": min(values, default=None)}
-        return ranges
-
     def event_payload(item, round_ids):
         basis = alert_binance_basis(item)
         packed = pulses.get(item.id)
@@ -14054,7 +14071,7 @@ def alerts():
         basis_items = [item for item in items if item.basis is not None]
         max_spread_item = max(spread_items, key=lambda item: abs(item.open_spread or 0), default=None)
         max_basis_item = max(basis_items, key=lambda item: abs(item.basis or 0), default=None)
-        ranges = value_ranges(items)
+        ranges = alert_value_ranges(items, pulses)
         def absolute_peak(field, fallback):
             bounds = ranges[field]
             values = [value for value in (bounds["min"], bounds["max"]) if value is not None]
@@ -14065,7 +14082,7 @@ def alerts():
         paths = []
         for key, samples in path_items.items():
             context = alert_context(samples[0])
-            paths.append({"id": key, **context, "attention": attention[max(samples, key=priority).id], "alert_count": count_reminders(samples, round_ids), "observation_count": len(samples), "latest": event_payload(samples[0], round_ids), "value_ranges": value_ranges(samples), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
+            paths.append({"id": key, **context, "attention": attention[max(samples, key=priority).id], "alert_count": count_reminders(samples, round_ids), "observation_count": len(samples), "latest": event_payload(samples[0], round_ids), "value_ranges": alert_value_ranges(samples, pulses), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
         return {
             "symbol": symbol,
             "attention": attention[max(items, key=priority).id],

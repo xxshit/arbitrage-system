@@ -1,5 +1,7 @@
 """Public JSON reads reuse certificate verification, never cache observations."""
 import gzip
+import http.client
+import tracemalloc
 import io
 import os
 import ssl
@@ -45,6 +47,37 @@ class PublicJsonContextTests(unittest.TestCase):
             self.assertEqual(call.args[0].get_header('Accept-encoding'), 'gzip')
             self.assertIsNone(call.args[0].get_header('Authorization'))
         self.assertTrue(all(response.closed for response in responses))
+
+    def test_close_delimited_short_response_does_not_reserve_body_limit(self):
+        wire = gzip.compress(b'{"rate":"0.00005001"}')
+
+        class Input(io.RawIOBase):
+            def __init__(self, data):
+                self.stream = io.BytesIO(data)
+
+            def readable(self):
+                return True
+
+            def readinto(self, dest):
+                return self.stream.readinto(dest)
+
+        class Socket:
+            def makefile(self, *args):
+                return io.BufferedReader(Input(b'HTTP/1.1 200 OK\r\nConnection: close\r\n'
+                                               b'Content-Encoding: gzip\r\n\r\n' + wire))
+
+        response = http.client.HTTPResponse(Socket())
+        response.begin()
+        with patch.object(module, 'urlopen', return_value=response):
+            tracemalloc.start()
+            try:
+                value = module.get_json('https://example.test/generated')
+                peak = tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+        self.assertEqual(value, {"rate": "0.00005001"})
+        self.assertTrue(response.closed)
+        self.assertLess(peak, 1024 * 1024)
 
     def test_gzip_precision_and_response_cleanup_preserved(self):
         response = Response(gzip.compress(b'{"fundingRate":"0.00005001"}'), 'gzip')

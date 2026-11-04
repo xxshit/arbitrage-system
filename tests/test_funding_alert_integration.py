@@ -68,6 +68,31 @@ class FundingIntegrationTests(unittest.TestCase):
         self.assertEqual(result["groups"][0]["status"], "stale")
         self.assertEqual(result["active_events"], [])
 
+    def test_batched_history_keeps_extra_fields_order_and_external_state(self):
+        self.poll()
+        self.poll(5, rate=.01)
+        with module.app.app_context():
+            event = module.FundingAlertEvent.query.one()
+            value = json.loads(event.evidence_json)
+            extra = {f"extra_{i}": [i, None, "完整"] for i in range(80)}
+            value['future_shape'] = extra
+            event.evidence_json = json.dumps(value)
+            evidence = [value]
+            for i in range(140):
+                row = dict(value, id=f"same-ms-{i:03d}")
+                evidence.append(row)
+                module.db.session.add(module.FundingAlertEvent(
+                    id=row['id'], contract=event.contract, observed_at_ms=event.observed_at_ms,
+                    evidence_json=json.dumps(row)))
+            stored = module.FundingAlertState.query.one()
+            state = json.loads(stored.state_json)
+            state.update(rate=0.72, observed_at=value['observed_at'] + 2)
+            stored.state_json = json.dumps(state)
+            module.db.session.commit()
+        group = self.payload(10)['groups'][0]
+        self.assertEqual(group['rate'], 0.72)
+        self.assertEqual(group['history'], sorted(evidence, key=lambda x: x['id']))
+
     def test_equity_metadata_is_excluded_even_without_durable_catalog(self):
         self.assertEqual(self.poll(rate=.01, instrument={"underlyingType": "EQUITY"}), 0)
         with module.app.app_context():

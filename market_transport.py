@@ -30,24 +30,24 @@ PUBLIC_PATHS = {
 MAX_BODY = 16 * 1024 * 1024
 
 
+def read_bounded_body(read):
+    """Read through EOF without reserving the entire limit for a short response."""
+    with io.BytesIO() as output:
+        while True:
+            part = read(min(65536, MAX_BODY + 1 - output.tell()))
+            if not part:
+                return output.getvalue()
+            if output.tell() + len(part) > MAX_BODY:
+                raise ValueError("public_payload_too_large")
+            output.write(part)
+
+
 def decode_json(body, encoding=""):
     if len(body) > MAX_BODY:
         raise ValueError("public_payload_too_large")
     if encoding.lower() == "gzip":
-        chunks, length = [], 0
         with gzip.GzipFile(fileobj=io.BytesIO(body)) as stream:
-            # BufferedReader preallocates the requested size, even for a tiny
-            # gzip response. Limit each temporary buffer, not just the final
-            # body; still consume EOF/trailers and detect one byte over budget.
-            while True:
-                chunk = stream.read(min(65536, MAX_BODY + 1 - length))
-                if not chunk:
-                    break
-                length += len(chunk)
-                if length > MAX_BODY:
-                    raise ValueError("public_payload_too_large")
-                chunks.append(chunk)
-        body = b"".join(chunks)
+            body = read_bounded_body(stream.read)
     elif encoding not in ("", "identity"):
         raise ValueError("unsupported_content_encoding")
     if len(body) > MAX_BODY:
@@ -183,22 +183,18 @@ class PublicMarketHttp:
                 if at_budget:
                     with self.lock:
                         self.cooldowns[host] = time.monotonic()+60
-            chunks, length = [], 0
-            while True:
+            def read_part(size):
                 if connection.sock:
                     connection.sock.settimeout(remaining())
                 else:
                     remaining()
-                chunk = response.read1(65536)
-                if not chunk:
-                    break
-                length += len(chunk)
-                if length > MAX_BODY:
-                    raise ValueError("public_payload_too_large")
-                chunks.append(chunk)
+                return response.read1(size)
+
+            body = read_bounded_body(read_part)
+            length = len(body)
             remaining()
             encoding = response.getheader("Content-Encoding", "").lower()
-            payload, decoded_length = decode_json(b"".join(chunks), encoding)
+            payload, decoded_length = decode_json(body, encoding)
             if isinstance(payload, dict) and payload.get("retCode") in (10006, 10018, 10429):
                 with self.lock:
                     self.cooldowns[host] = time.monotonic()+60

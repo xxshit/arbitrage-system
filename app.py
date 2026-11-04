@@ -52,7 +52,7 @@ from asset_catalog import NON_CRYPTO_BOOTSTRAP, bootstrap_category, compact_symb
 from equity_spot import EXTRA_URLS as EQUITY_SPOT_URLS, METADATA_TTLS as EQUITY_SPOT_TTLS, build_snapshot as build_equity_spot_snapshot
 from funding_alerts import advance as advance_funding_alert, binance_observations, event_is_active as funding_event_is_active, fresh as funding_fresh, status as funding_alert_status
 from funding_history import DAY_MS, FundingHistoryClient, FundingHistoryError, FundingSyncSchedule, expected_settlement
-from market_transport import PublicMarketHttp, decode_json
+from market_transport import PublicMarketHttp, decode_json, read_bounded_body
 from market_status import snapshot_delays
 from spread_history import (
     HistoryBuffer, HistoryStore, PERIODS as SPREAD_HISTORY_PERIODS,
@@ -1635,7 +1635,7 @@ def get_json(url, timeout=4):
     # urllib otherwise reloads the system CA store for every background GET;
     # share TLS configuration, never responses, cookies or account credentials.
     with urlopen(request, timeout=timeout, context=MARKET_HTTP.context) as response:
-        return decode_json(response.read(16 * 1024 * 1024 + 1), response.headers.get("Content-Encoding", ""))[0]
+        return decode_json(read_bounded_body(response.read), response.headers.get("Content-Encoding", ""))[0]
 
 
 class MarketPayloads(dict):
@@ -15618,22 +15618,20 @@ def background_dual_market_refresh():
         time.sleep(max(0.25, interval - (time.monotonic() - cycle_started_at)))
 
 
-def funding_alert_states():
-    """Committed state plus latest successfully processed public observations."""
+def iter_funding_alert_states():
+    """Choose the newest committed/public value while holding only a batch of SQL rows."""
     live = FUNDING_ALERT_LIVE_STATES  # Immutable dictionary swapped after commit.
-    states = {contract: json.loads(raw) for contract, raw in db.session.query(FundingAlertState.contract, FundingAlertState.state_json)}
-    for contract, state in states.items():
+    for contract, raw in db.session.query(FundingAlertState.contract, FundingAlertState.state_json).yield_per(128):
+        stored = json.loads(raw)
         current = live.get(contract)
-        if current and current["observed_at"] >= state["observed_at"]:
-            states[contract] = current
-    return states
+        yield contract, current if current and current["observed_at"] >= stored["observed_at"] else stored
 
 
 def funding_alert_priority_symbols(now=None):
     """Reuse the existing 60-symbol history budget, never add private/API calls."""
     now = time.time() if now is None else now
     targets = []
-    for contract, state in funding_alert_states().items():
+    for contract, state in iter_funding_alert_states():
         if is_rwa_stock_pair(state["symbol"]):
             continue
         pending = [item for item in state.get("pending", []) if not item.get("resolved")
@@ -15697,12 +15695,23 @@ def refresh_funding_alerts():
 
 def funding_alert_payload(now=None):
     now = time.time() if now is None else now
-    states = funding_alert_states()
+    # A separate JSON column per event otherwise allocates a new copy of each
+    # field name for every row. Share names within this read, never event values.
+    names = {}
+    def event_object(pairs):
+        return {(names.get(k, k) if len(names) >= 64 else names.setdefault(k, k)): v for k, v in pairs}
+    decoder = json.JSONDecoder(object_pairs_hook=event_object)
     events = {}
-    for contract, raw in db.session.query(FundingAlertEvent.contract, FundingAlertEvent.evidence_json).filter(FundingAlertEvent.observed_at_ms >= int((now - 86400)*1000), FundingAlertEvent.observed_at_ms <= int(now*1000)).order_by(FundingAlertEvent.observed_at_ms.desc(), FundingAlertEvent.id):
-        events.setdefault(contract, []).append(json.loads(raw))
+    query = db.session.query(FundingAlertEvent.contract, FundingAlertEvent.evidence_json).filter(
+        FundingAlertEvent.observed_at_ms >= int((now - 86400)*1000),
+        FundingAlertEvent.observed_at_ms <= int(now*1000)).order_by(FundingAlertEvent.observed_at_ms.desc(), FundingAlertEvent.id)
+    for contract, raw in query.yield_per(128):
+        events.setdefault(contract, []).append(decoder.decode(raw))
     groups, active = [], []
-    for contract, state in states.items():
+    observed_at = info_at = None
+    for contract, state in iter_funding_alert_states():
+        observed_at = state["rate_at"] if observed_at is None else max(observed_at, state["rate_at"])
+        info_at = state["info_at"] if info_at is None else max(info_at, state["info_at"])
         if is_rwa_stock_pair(state["symbol"]):
             continue
         history = events.get(contract, [])
@@ -15728,8 +15737,7 @@ def funding_alert_payload(now=None):
                            "remaining_seconds": max(0, int(120 - (now - event["observed_at"]))), "created_at_epoch": event["observed_at"]})
     groups.sort(key=lambda item: (item["history"][0]["observed_at"] if item["history"] else 0, abs(item["rate"])), reverse=True)
     return {"exchange": "Binance", "window_hours": 24, "groups": groups, "active_events": active,
-            "observed_at": max((item["rate_at"] for item in states.values()), default=None),
-            "info_at": max((item["info_at"] for item in states.values()), default=None)}
+            "observed_at": observed_at, "info_at": info_at}
 
 
 def background_funding_alerts():

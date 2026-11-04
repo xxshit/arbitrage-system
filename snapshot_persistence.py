@@ -1,7 +1,6 @@
 """Lossless latest-state deltas; never used for market history or account tables."""
 
 from collections import defaultdict
-from datetime import datetime
 import json
 import math
 import struct
@@ -33,8 +32,7 @@ def storage_value(column, value, dialect):
                 return struct.unpack("f", struct.pack("f", value))[0]
             except OverflowError:
                 pass  # Let the database reject an invalid value as before.
-    if dialect == "mysql" and isinstance(value, datetime):
-        return value.replace(microsecond=0)  # Existing DATETIME has no fsp.
+    # Fractional timestamps must reach MySQL: the session may round or truncate.
     return value
 
 

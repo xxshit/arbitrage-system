@@ -32,9 +32,13 @@ class SnapshotDeltaTests(unittest.TestCase):
         new = dict(price=1, rate=.005, captured_at=self.at+timedelta(seconds=15))
         self.assertEqual(changed_values(self.table, prior, new, "mysql"), {"captured_at": new["captured_at"]})
 
-    def test_no_timestamp_promotion_beyond_existing_storage_precision(self):
-        prior = SimpleNamespace(captured_at=self.at)
-        self.assertEqual(changed_values(self.table, prior, {"captured_at": self.at.replace(microsecond=999999)}, "mysql"), {})
+    def test_mysql_owns_fractional_timestamp_rounding_at_day_boundary(self):
+        prior = SimpleNamespace(captured_at=datetime(2026, 10, 31, 23, 59, 59))
+        for microseconds in (499999, 500000, 999999):
+            with self.subTest(microseconds=microseconds):
+                values = {"captured_at": prior.captured_at.replace(microsecond=microseconds)}
+                self.assertEqual(changed_values(self.table, prior, values, "mysql"), values)
+        self.assertEqual(changed_values(self.table, prior, {"captured_at": prior.captured_at}, "mysql"), {})
 
     def test_bounded_batch_preserves_values_nulls_and_untouched_rows(self):
         engine = create_engine("sqlite://")

@@ -65,7 +65,7 @@ from opportunity_validation import ValidationLedger, HORIZONS as VALIDATION_HORI
 from opportunity_funding import funding_quality, funding_window
 from opportunity_pool import POLICY as OPPORTUNITY_POLICY, classify as classify_opportunity, funding_profile
 from persistence_policy import funding_write_due
-from snapshot_persistence import changed_values, equity_payload_update, update_snapshots
+from snapshot_persistence import changed_values, equity_payload_update, exact_snapshot_select, update_snapshots
 from background_runtime import WorkerRuntime, memory_status, mysql_engine_options
 from read_performance import read_indexes, wallet_symbol_predicate
 
@@ -3236,29 +3236,53 @@ def refresh_okx_funding(inst_ids):
             continue
 
 
-def save_latest_dual_futures_snapshot(groups):
+def write_latest_quote_rows(model, groups, key_fields, values_for, *, replace_missing):
+    """Compare scalar rows one batch at a time, then write on the same transaction."""
     captured_at = datetime.now()
-    current = {(group["symbol"], row["long_exchange"], row["short_exchange"]): row for group in groups for row in group["rows"]}
-    existing = {(item.symbol, item.long_exchange, item.short_exchange): item for item in LatestDualFuturesSnapshot.query.all()}
-    for key, item in existing.items():
-        if key not in current:
-            db.session.delete(item)
-    updates, inserts = [], []
-    dialect = db.session.get_bind().dialect.name
-    for key, row in current.items():
-        values = {field: row.get(field) for field in (
+    table = model.__table__
+    pending = {
+        (group["symbol"], *(row[field] for field in key_fields)): row
+        for group in groups for row in group["rows"]
+    }
+    # Preserve the autoflush of the former ORM read before comparing table rows.
+    db.session.flush()
+    dialect = db.session.get_bind().dialect
+    query = exact_snapshot_select(table, dialect.name)
+    if not replace_missing:
+        query = query.where(model.symbol.in_({key[0] for key in pending}))
+    updates, stale_ids = [], []
+    # Exhaust and close the streaming cursor before any write, including on MySQL.
+    with db.session.execute(query.execution_options(yield_per=128)) as existing:
+        for previous in existing:
+            key = (previous.symbol, *(getattr(previous, field) for field in key_fields))
+            row = pending.pop(key, None)
+            if row is not None:
+                values = values_for(row)
+                values["captured_at"] = captured_at
+                updates.append({"id": previous.id, **changed_values(table, previous, values, dialect.name)})
+            elif replace_missing:
+                stale_ids.append(previous.id)
+    update_snapshots(db.session, table, updates)
+    if pending:
+        fields = ("symbol", *key_fields)
+        inserts = [{**dict(zip(fields, key)), **values_for(row), "captured_at": captured_at}
+                   for key, row in pending.items()]
+        db.session.bulk_insert_mappings(model, inserts)
+    # Preserve the original insert-before-delete ordering and row identities.
+    for start in range(0, len(stale_ids), 128):
+        model.query.filter(model.id.in_(stale_ids[start:start + 128])).delete(synchronize_session="fetch")
+
+
+def save_latest_dual_futures_snapshot(groups):
+    def values_for(row):
+        return {field: row.get(field) for field in (
             "long_ask", "long_bid", "short_bid", "short_ask", "long_basis", "short_basis", "long_index", "short_index", "long_volume", "short_volume", "long_open_interest", "short_open_interest", "funding_difference",
             "long_funding_rate", "short_funding_rate", "long_funding_interval_hours", "short_funding_interval_hours",
             "long_next_funding_time", "short_next_funding_time", "open_spread", "close_spread",
         )}
-        values["captured_at"] = captured_at
-        if key in existing:
-            updates.append({"id": existing[key].id, **changed_values(LatestDualFuturesSnapshot.__table__, existing[key], values, dialect)})
-        else:
-            inserts.append(dict(symbol=key[0], long_exchange=key[1], short_exchange=key[2], **values))
-    update_snapshots(db.session, LatestDualFuturesSnapshot.__table__, updates)
-    if inserts:
-        db.session.bulk_insert_mappings(LatestDualFuturesSnapshot, inserts)
+
+    write_latest_quote_rows(LatestDualFuturesSnapshot, groups, ("long_exchange", "short_exchange"),
+                            values_for, replace_missing=True)
     db.session.commit()
 
 
@@ -3866,26 +3890,16 @@ def enrich_basis_openings(groups, strategy):
 
 
 def save_latest_market_snapshot(groups):
-    captured_at = datetime.now()
-    current = {(group["symbol"], row["long_exchange"]): row for group in groups for row in group["rows"]}
-    symbols = [group["symbol"] for group in groups]
-    existing = {
-        (item.symbol, item.long_exchange): item for item in LatestMarketSnapshot.query.filter(
-            LatestMarketSnapshot.symbol.in_(symbols)
-        ).all()
-    }
-    updates, inserts = [], []
-    dialect = db.session.get_bind().dialect.name
-    for key, row in current.items():
-        item = existing.get(key)
-        values = {"short_exchange": row["short_exchange"], "long_ask": row["long_ask"], "long_bid": row["long_bid"], "short_bid": row["short_bid"], "short_ask": row["short_ask"], "basis": row["basis"], "funding_rate": row["funding_rate"], "funding_interval_hours": row["funding_interval_hours"], "next_funding_time": row["next_funding_time"], "spot_volume": row.get("spot_volume"), "futures_volume": row.get("futures_volume"), "futures_open_interest": row.get("futures_open_interest"), "open_spread": row["open_spread"], "close_spread": row["close_spread"], "captured_at": captured_at}
-        if item:
-            updates.append({"id": item.id, **changed_values(LatestMarketSnapshot.__table__, item, values, dialect)})
-        else:
-            inserts.append({"symbol": key[0], "long_exchange": key[1], **values})
-    update_snapshots(db.session, LatestMarketSnapshot.__table__, updates)
-    if inserts:
-        db.session.bulk_insert_mappings(LatestMarketSnapshot, inserts)
+    def values_for(row):
+        values = {field: row[field] for field in (
+            "short_exchange", "long_ask", "long_bid", "short_bid", "short_ask", "basis",
+            "funding_rate", "funding_interval_hours", "next_funding_time", "open_spread", "close_spread",
+        )}
+        for field in ("spot_volume", "futures_volume", "futures_open_interest"):
+            values[field] = row.get(field)
+        return values
+
+    write_latest_quote_rows(LatestMarketSnapshot, groups, ("long_exchange",), values_for, replace_missing=False)
     for compact_symbol, exchange in SPOT_CONTRACT_SYMBOL_MISMATCHES:
         LatestMarketSnapshot.query.filter_by(symbol=pair_slash(compact_symbol), long_exchange=exchange).delete(synchronize_session=False)
     db.session.commit()

@@ -6,7 +6,7 @@ import json
 import math
 import struct
 
-from sqlalchemy import JSON, Float, String, case, cast, func, literal, update
+from sqlalchemy import JSON, Double, Float, String, case, cast, func, literal, select, update
 
 SNAPSHOT_TABLES = frozenset({"latest_market_snapshot", "latest_dual_futures_snapshot"})
 UPDATE_BATCH_SIZE = 100
@@ -36,6 +36,17 @@ def storage_value(column, value, dialect):
     if dialect == "mysql" and isinstance(value, datetime):
         return value.replace(microsecond=0)  # Existing DATETIME has no fsp.
     return value
+
+
+def exact_snapshot_select(table, dialect):
+    # MySQL's text protocol formats a bare FLOAT with fewer significant digits
+    # than its stored binary32 value (e.g. 359753.5 arrives as 359754). Widen only
+    # the read, so delta comparison and verification see the stored value.
+    # A binary32 value is exactly representable as binary64, including NULL.
+    if dialect == "mysql":
+        return select(*(cast(column, Double).label(column.name)
+                        if isinstance(column.type, Float) else column for column in table.c))
+    return select(table)
 
 
 def changed_values(table, previous, values, dialect):

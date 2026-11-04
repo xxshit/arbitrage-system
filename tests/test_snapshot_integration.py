@@ -3,6 +3,8 @@ from datetime import timedelta
 import unittest
 from unittest.mock import patch
 
+from sqlalchemy import event
+
 from tests import test_alert_history as fixture
 
 module = fixture.module
@@ -55,6 +57,38 @@ class SnapshotIntegrationTests(unittest.TestCase):
                 save(groups)
                 self.assertEqual(model.query.count(), 1)
                 self.assertEqual(model.query.one().open_spread, .9)
+
+    def test_stale_dual_id_is_not_reused_by_a_new_path_in_the_same_save(self):
+        model = module.LatestDualFuturesSnapshot
+        with module.app.app_context():
+            def save(symbol):
+                groups = self.groups()
+                groups[0]["symbol"] = symbol
+                module.save_latest_dual_futures_snapshot(groups)
+                return model.query.one().id
+
+            original = save("OLD/USDT")
+            replacement = save("NEW/USDT")
+            self.assertGreater(replacement, original)
+            self.assertGreater(save("OLD/USDT"), replacement)
+            module.save_latest_dual_futures_snapshot([])
+            self.assertEqual(model.query.count(), 0)
+
+    def test_latest_quote_heartbeats_read_scalars_without_hydrating_snapshot_models(self):
+        with module.app.app_context():
+            for save, model in ((module.save_latest_market_snapshot, module.LatestMarketSnapshot),
+                                (module.save_latest_dual_futures_snapshot, module.LatestDualFuturesSnapshot)):
+                groups = [dict(symbol=f"S{i}/USDT", rows=self.groups()[0]["rows"]) for i in range(260)]
+                save(groups)
+                module.db.session.remove()
+                def reject_load(target, context):
+                    self.fail("a quote heartbeat loaded a full model")
+                event.listen(model, "load", reject_load)
+                try:
+                    save(groups)
+                finally:
+                    event.remove(model, "load", reject_load)
+                self.assertEqual(model.query.count(), 260)
 
     def test_transaction_failure_rolls_back_batch_and_retry_saves_new_value(self):
         with module.app.app_context():

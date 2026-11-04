@@ -16058,24 +16058,31 @@ def background_long_trend_references():
         time.sleep(1.5 if symbol else 15)
 
 
+def price_backfill_universe():
+    # Backfill reads only symbol names. Do not pin either old quote publication
+    # across the network wait or the two-minute sleep of the background lane.
+    spot = load_latest_market_snapshot()
+    groups = [{"symbol": item["symbol"]} for item in spot["symbols"]] if spot else []
+    dual = load_latest_dual_futures_snapshot()
+    if dual:
+        seen = {item["symbol"] for item in groups}
+        for item in dual["symbols"]:
+            symbol = item["symbol"]
+            if symbol in seen or is_rwa_stock_pair(symbol):
+                continue
+            if any(row.get("long_exchange") == "Binance" or row.get("short_exchange") == "Binance"
+                   for row in item["rows"]):
+                groups.append({"symbol": symbol})
+                seen.add(symbol)
+    return groups
+
+
 def background_price_history_backfill():
     time.sleep(60)
     while True:
         try:
             with app.app_context():
-                groups = []
-                spot_snapshot = load_latest_market_snapshot()
-                if spot_snapshot:
-                    groups.extend(spot_snapshot["symbols"])
-                dual_snapshot = load_latest_dual_futures_snapshot()
-                if dual_snapshot:
-                    seen = {group["symbol"] for group in groups}
-                    for group in dual_snapshot["symbols"]:
-                        if group["symbol"] in seen or is_rwa_stock_pair(group["symbol"]):
-                            continue
-                        if any(row.get("long_exchange") == "Binance" or row.get("short_exchange") == "Binance" for row in group["rows"]):
-                            groups.append(group)
-                            seen.add(group["symbol"])
+                groups = price_backfill_universe()
                 if groups:
                     db.session.remove()
                     backfill_price_history(groups)

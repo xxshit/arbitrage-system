@@ -13892,6 +13892,13 @@ def read_alert_history(window_start, now, *, live_only=False, symbol=None, refre
         # committed together with updated_at; keep a 5s boundary overlap.
         spool, events, pulses = PulseSpool(), [], {}
         live = base.filter(AlertPulse.updated_at >= now - timedelta(seconds=125))
+        if db.engine.dialect.name == "mysql":
+            # The writer emits this complete, top-level empty reminder last.
+            # Unfamiliar encodings and malformed evidence still reach the regular reader.
+            empty_reminder = b',"reminder":{"policy":1,"notices":[]}}'
+            evidence = AlertPulse.evidence_json
+            tail = func.right(evidence.cast(db.LargeBinary), len(empty_reminder))
+            live = live.filter(case((tail == empty_reminder, func.json_valid(evidence) == 0), else_=True))
         epoch = now.replace(tzinfo=timezone.utc).timestamp()
         for row in read_rows(live):
             pulse = alert_pulse_read_payload(row[12], qualified_only=True)

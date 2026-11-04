@@ -15695,6 +15695,9 @@ def refresh_funding_alerts():
 
 def funding_alert_payload(now=None):
     now = time.time() if now is None else now
+    # Pin the selected states before reading history. A concurrent poll can
+    # publish a new live map while the event cursor is being consumed.
+    states = dict(iter_funding_alert_states())
     # A separate JSON column per event otherwise allocates a new copy of each
     # field name for every row. Share names within this read, never event values.
     names = {}
@@ -15709,7 +15712,7 @@ def funding_alert_payload(now=None):
         events.setdefault(contract, []).append(decoder.decode(raw))
     groups, active = [], []
     observed_at = info_at = None
-    for contract, state in iter_funding_alert_states():
+    for contract, state in states.items():
         observed_at = state["rate_at"] if observed_at is None else max(observed_at, state["rate_at"])
         info_at = state["info_at"] if info_at is None else max(info_at, state["info_at"])
         if is_rwa_stock_pair(state["symbol"]):

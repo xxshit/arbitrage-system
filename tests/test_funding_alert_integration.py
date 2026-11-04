@@ -68,6 +68,30 @@ class FundingIntegrationTests(unittest.TestCase):
         self.assertEqual(result["groups"][0]["status"], "stale")
         self.assertEqual(result["active_events"], [])
 
+    def test_publication_during_history_read_is_visible_on_the_next_request(self):
+        from sqlalchemy import event
+
+        self.poll(interval=1)
+        initial = module.FUNDING_ALERT_LIVE_STATES
+        self.poll(30, rate=.004, interval=1)
+        published = module.FUNDING_ALERT_LIVE_STATES
+        baseline = self.payload(30)
+        with patch.object(module, "FUNDING_ALERT_LIVE_STATES", initial):
+            expected = self.payload(30)
+            self.assertNotEqual(expected, baseline)
+            with module.app.app_context():
+                engine = module.db.engine
+                def publish_after_event_select(conn, cursor, statement, parameters, context, many):
+                    if "FROM funding_alert_event" in statement:
+                        module.FUNDING_ALERT_LIVE_STATES = published
+                event.listen(engine, "after_cursor_execute", publish_after_event_select)
+                try:
+                    self.assertEqual(self.payload(30), expected)
+                finally:
+                    event.remove(engine, "after_cursor_execute", publish_after_event_select)
+            self.assertIs(module.FUNDING_ALERT_LIVE_STATES, published)
+            self.assertEqual(self.payload(30), baseline)
+
     def test_batched_history_keeps_extra_fields_order_and_external_state(self):
         self.poll()
         self.poll(5, rate=.01)

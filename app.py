@@ -15530,6 +15530,16 @@ with app.app_context():
         db.session.commit()
 
 
+def enroll_opportunity_candidates():
+    """Release the research batch as soon as its durable enrollment work is done."""
+    with app.app_context():
+        refresh_opportunity_quality(time.time())
+        candidates = spot_thinking_candidates(load_latest_market_snapshot(), 1000, 72, for_validation=True)
+        db.session.remove()
+    OPPORTUNITY_VALIDATION.enroll(candidates, time.time())
+
+
+
 def background_spread_history():
     last_cleanup = 0
     last_profiles = 0
@@ -15554,11 +15564,7 @@ def background_spread_history():
                     OPPORTUNITY_VALIDATION.restore()
                 OPPORTUNITY_VALIDATION.observe({}, time.time())  # Expire missed endpoints after outages.
                 if time.time()-last_research >= 120:
-                    with app.app_context():
-                        refresh_opportunity_quality(time.time())
-                        candidates = spot_thinking_candidates(load_latest_market_snapshot(), 1000, 72, for_validation=True)
-                        db.session.remove()
-                    OPPORTUNITY_VALIDATION.enroll(candidates, time.time())
+                    enroll_opportunity_candidates()
                     last_research = time.time()
                 OPPORTUNITY_VALIDATION.persist(time.time())
             except Exception as exc:

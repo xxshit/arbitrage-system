@@ -124,14 +124,22 @@ class FundingAlertWorkload:
     def verify_http(self, payload):
         groups = {item["contract"]: item for item in payload["groups"]}
         assert len(groups) == len(payload["groups"]), "duplicate funding group"
-        histories = {}
-        for row in sorted(self.expected_events.values(), key=lambda item: (-item["observed_at_ms"], item["id"])):
-            histories.setdefault(row["contract"], []).append(json.loads(row["evidence_json"]))
-        required = set(self.contracts[:16]) | set(histories)
+        # The response already contains the complete decoded history.
+        # Validate each expected event in order, then release its decoded copy.
+        required = set(self.contracts[:16])
+        consumed = {}
+        for row in sorted(self.expected_events.values(), key=lambda e: (-e["observed_at_ms"], e["id"])):
+            contract = row["contract"]
+            required.add(contract)
+            assert contract in groups, "funding HTTP omitted an event group"
+            history = groups[contract]["history"]
+            pos = consumed.get(contract, 0)
+            assert pos < len(history) and history[pos] == json.loads(row["evidence_json"]), "funding HTTP history values or order differ"
+            consumed[contract] = pos + 1
         assert set(groups) == required, "funding HTTP is empty or lost generated history"
         for contract, item in groups.items():
             assert {key: item[key] for key in self.latest[contract]} == self.latest[contract]
-            assert item["history"] == histories.get(contract, []), "funding HTTP history values differ"
+            assert type(item["history"]) is list and len(item["history"]) == consumed.get(contract, 0), "unexpected funding HTTP history rows"
         active = payload["active_events"]
         assert len({item["contract"] for item in active}) == len(active)
         assert all(item["id"] in self.expected_events and item["notice"] for item in active)

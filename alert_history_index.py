@@ -20,6 +20,26 @@ from alert_read_payload import PackedPulse, PulseSpool
 HistoryEvent = namedtuple('HistoryEvent', 'id symbol strategy alert_type message open_spread close_spread basis funding_rate created_at long_exchange short_exchange')
 
 
+class _RecentValues:
+    """Return an equal recent immutable value; a collision only forfeits sharing."""
+    __slots__ = ('slots', 'mask')
+
+    def __init__(self, capacity):
+        self.slots = [None] * capacity
+        self.mask = capacity - 1
+
+    def share(self, value):
+        i = hash(value) & self.mask
+        prior = self.slots[i]
+        if prior == value:
+            return prior
+        self.slots[i] = value
+        return value
+
+
+_METRIC_VALUES = {k: k for k in ('spread', 'basis', 'price')}
+
+
 class _IndexMap(Mapping):
     """Immutable publication with bounded copy units for integer event IDs.
 
@@ -143,6 +163,8 @@ class AlertHistoryIndex:
         self.full_reads = self.delta_reads = self.decoded_rows = 0
         self.last_read_seconds = 0
         self.spool = None
+        self._messages = _RecentValues(512)
+        self._paths = _RecentValues(1024)
         self.published_ready = False
 
     def reset(self):
@@ -203,13 +225,21 @@ class AlertHistoryIndex:
                     for position in (1, 2, 3, 10, 11):
                         if isinstance(values[position], str):
                             values[position] = intern(values[position])
+                    if type(values[4]) is str and len(values[4]) <= 255:
+                        values[4] = self._messages.share(values[4])
                     event = HistoryEvent(*values)
                     evidence, revision = row[12:]
                     versions[event.id] = revision
                     pulse = project(evidence) if evidence is not None else None
                     # An ineligible pulse must not masquerade as legacy history.
                     if evidence is None or pulse is not None:
-                        replacements[event.id] = (event, PackedPulse(pulse, spool) if pulse is not None else None)
+                        packed = PackedPulse(pulse, spool) if pulse is not None else None
+                        if packed is not None:
+                            if type(packed.metric) is str:
+                                packed.metric = _METRIC_VALUES.get(packed.metric, packed.metric)
+                            if len(packed.path) == 4 and all(type(el) is str and len(el) <= 64 for el in packed.path):
+                                packed.path = self._paths.share(packed.path)
+                        replacements[event.id] = event, packed
                 with self.change_lock:
                     if self.generation != generation:
                         # Schema/reset raced this read. Do not publish a mixed

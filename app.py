@@ -3433,9 +3433,8 @@ def price_history_integrity(groups):
 
 
 def backfill_price_history(groups, batch_size=2):
-    now_bucket = int(time.time()) // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
     integrity = price_history_integrity(groups)
-    batch = integrity["missing_symbols"][:batch_size]
+    batch = list(dict.fromkeys(integrity["missing_symbols"]))[:batch_size]
     if not batch:
         return
     db.session.rollback()  # Finished scalar reads; release the connection before network waits.
@@ -3450,16 +3449,33 @@ def backfill_price_history(groups, batch_size=2):
                 continue
     if not fetched:
         return
-    symbols = [symbol for symbol, _ in fetched]
-    existing = {
-        (item.symbol, item.bucket_at) for item in FuturesPriceHistory.query.filter(
-            FuturesPriceHistory.symbol.in_(symbols), FuturesPriceHistory.bucket_at >= now_bucket - PRICE_HISTORY_RETENTION_SECONDS
-        ).all()
-    }
+    pending = {}
     for symbol, rows in fetched:
         for bucket_at, price in rows:
-            if (symbol, bucket_at) not in existing:
-                db.session.add(FuturesPriceHistory(symbol=symbol, bucket_at=bucket_at, price=price))
+            pending.setdefault((symbol, bucket_at), price)
+    if not pending:
+        return
+    table = FuturesPriceHistory.__table__
+    buckets = [bucket for _, bucket in pending]
+    query = db.select(table.c.symbol, table.c.bucket_at).where(
+        table.c.symbol.in_({symbol for symbol, _ in pending}),
+        table.c.bucket_at.between(min(buckets), max(buckets)),
+    )
+    with db.session.execute(query.execution_options(yield_per=128)) as existing:
+        for key in existing:
+            pending.pop(tuple(key), None)
+    if pending:
+        # Keep the first committed price if another writer filled a bucket after the read.
+        if db.engine.dialect.name == "mysql":
+            from sqlalchemy.dialects.mysql import insert
+            statement = insert(table).on_duplicate_key_update(id=table.c.id)
+        else:
+            from sqlalchemy.dialects.sqlite import insert
+            statement = insert(table).on_conflict_do_nothing(index_elements=[table.c.symbol, table.c.bucket_at])
+        db.session.execute(statement, [
+            {"symbol": symbol, "bucket_at": bucket, "price": pending[symbol, bucket]}
+            for symbol, bucket in sorted(pending)
+        ])
     db.session.commit()
 
 

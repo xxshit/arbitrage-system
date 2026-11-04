@@ -90,6 +90,50 @@ class SnapshotIntegrationTests(unittest.TestCase):
                     event.remove(model, "load", reject_load)
                 self.assertEqual(model.query.count(), 260)
 
+    def test_backfill_keeps_first_prices_and_reads_each_missing_market_once(self):
+        model = module.FuturesPriceHistory
+        calls = []
+
+        def fetch(symbol):
+            calls.append(symbol)
+            return symbol, [(100, 111.), (400, 112.), (400, 999.)]
+
+        groups = [{"symbol": symbol} for symbol in ("ONE/USDT", "ONE/USDT", "TWO/USDT")]
+        with module.app.app_context(), patch.object(module, "fetch_price_history_from_binance", fetch):
+            prior = model(symbol="ONE/USDT", bucket_at=100, price=88.)
+            module.db.session.add(prior)
+            module.db.session.commit()
+            prior_id = prior.id
+            module.backfill_price_history(groups)
+            module.backfill_price_history(groups)
+            self.assertCountEqual(calls, ["ONE/USDT", "TWO/USDT"] * 2)
+            self.assertEqual([(row.symbol, row.bucket_at, row.price) for row in
+                              model.query.order_by(model.symbol, model.bucket_at)], [
+                ("ONE/USDT", 100, 88.), ("ONE/USDT", 400, 112.),
+                ("TWO/USDT", 100, 111.), ("TWO/USDT", 400, 112.),
+            ])
+            self.assertEqual(model.query.filter_by(symbol="ONE/USDT", bucket_at=100).one().id, prior_id)
+
+    def test_backfill_keeps_a_bucket_inserted_after_its_read(self):
+        model = module.FuturesPriceHistory
+        # Stage the competing row after the actual SELECT, just before the INSERT.
+        def stage_winner(conn, cursor, statement, parameters, context, executemany):
+            if context.isinsert and context.compiled.statement.table.name == model.__tablename__ and not staged:
+                staged.append(True)
+                conn.execute(model.__table__.insert(), dict(symbol="RACE", bucket_at=100, price=42.))
+        staged = []
+        with module.app.app_context(), patch.object(module, "fetch_price_history_from_binance",
+                                                     return_value=("RACE", [(100, 43.), (400, 44.)])):
+            engine = module.db.engine
+            event.listen(engine, "before_cursor_execute", stage_winner)
+            try:
+                module.backfill_price_history([{"symbol": "RACE"}])
+            finally:
+                event.remove(engine, "before_cursor_execute", stage_winner)
+            self.assertEqual(staged, [True])
+            self.assertEqual([(r.bucket_at, r.price) for r in model.query.order_by(model.bucket_at)],
+                             [(100, 42.), (400, 44.)])
+
     def test_transaction_failure_rolls_back_batch_and_retry_saves_new_value(self):
         with module.app.app_context():
             module.save_latest_market_snapshot(self.groups())

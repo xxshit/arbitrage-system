@@ -62,18 +62,28 @@ class FundingHistoryClient:
     def request(self, exchange, url):
         gate = self.gates[exchange]
         gate.wait()
+        http_failure = None
         try:
             payload = self.get_json(url, timeout=5)
         except HTTPError as exc:
-            if exc.code in (403, 418, 429):
-                try:
-                    delay = float(exc.headers.get("Retry-After", "60"))
-                except (TypeError, ValueError, AttributeError):
-                    delay = 60
-                if not math.isfinite(delay):
-                    delay = 60
-                gate.pause(max(600 if exc.code == 403 else 60, min(delay, 86400)))
-            raise FundingHistoryError("http_" + str(exc.code)) from None
+            try:
+                if exc.code in (403, 418, 429):
+                    try:
+                        delay = float(exc.headers.get("Retry-After", "60"))
+                    except (TypeError, ValueError, AttributeError):
+                        delay = 60
+                    if not math.isfinite(delay):
+                        delay = 60
+                    gate.pause(max(600 if exc.code == 403 else 60, min(delay, 86400)))
+                http_failure = "http_" + str(exc.code)
+            finally:
+                # urlopen raises before the caller can enter its response context.
+                # A completed failed future must not hold that response open.
+                exc.close()
+        if http_failure is not None:
+            # Raise after leaving the handler: `from None` alone still stores
+            # HTTPError (including its response/frames) in __context__.
+            raise FundingHistoryError(http_failure) from None
         if isinstance(payload, dict):
             code = str(payload.get("retCode", payload.get("code", "0")))
             if code in {"10006", "10018", "10429", "50011", "-1003"}:

@@ -14,7 +14,7 @@ function harness(){
     displayChange:n=>n==null?'—':`${n}%`,exchangeName:name=>`EXCHANGE:${name}`,intervalClass:()=>'',
     liquidityMetric:(label,value)=>`<span class="liquidity-metric"><b>${label}</b><i>${value??'—'}</i></span>`,
     coinglassKlineUrl:()=>'/chart',delistingSymbolClass:()=>'',basisOpeningMarkup:(_item,key)=>`OPENING:${key}`};
-  vm.createContext(context);vm.runInContext(renderer,context);return context;
+  vm.createContext(context);vm.runInContext(source.slice(source.indexOf('function hedgeQuoteAvailable('),source.indexOf('function hedgePreviewAmounts('))+renderer,context);return context;
 }
 const route=(long,index)=>({long_exchange:long,short_exchange:'Binance',open_spread:index+.51,close_spread:-index-.72,
   long_basis:-.23,short_basis:.45,long_bid:2.1234,long_ask:2.1236,short_bid:2.15,short_ask:2.17,

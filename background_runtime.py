@@ -87,6 +87,19 @@ def mysql_engine_options(uri):
                 connect_args=dict(connect_timeout=5, read_timeout=30, write_timeout=30))
 
 
+def cgroup_memory_limits(root):
+    """Service-local limits, in bytes; unlimited/unreadable is not zero free."""
+    limits = {}
+    for filename, key in (("memory.max", "memory_limit_bytes"),
+                          ("memory.high", "memory_high_bytes")):
+        try:
+            value = int((root / filename).read_text().strip())
+            limits[key] = value if value > 0 else None
+        except (OSError, ValueError):
+            limits[key] = None
+    return limits
+
+
 def memory_status():
     result = {"pid": os.getpid()}
     try:
@@ -96,6 +109,8 @@ def memory_status():
                         if line.startswith("0::"))
         root = Path("/sys/fs/cgroup") / relative.lstrip("/")
         result["cgroup_bytes"] = int((root / "memory.current").read_text())
+        result.update(cgroup_memory_limits(root))
+        result["memory_sampled_at_epoch"] = time.time()
         result["memory_events"] = {k: int(v) for k, v in
                                    (line.split() for line in (root / "memory.events").read_text().splitlines())}
         stats = dict(line.split() for line in (root / "memory.stat").read_text().splitlines())

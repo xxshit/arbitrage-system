@@ -487,3 +487,18 @@ aside nav.workspace-nav>*{order:0!important}.nav-section-heading{grid-column:1/-
 @media(max-width:760px){.section-search{margin-bottom:10px}.section-search input{font-size:16px}.nav-section-heading{margin-top:9px}.section-workspace-bar{align-items:flex-start;gap:10px;margin:0 0 14px;padding:11px 12px}.section-workspace-info p{font-size:10px}.section-workspace-bar button{min-width:76px;padding:8px}.mobile-chat-view .section-workspace-bar{display:none}}
 .mobile-chat-view .section-workspace-bar{display:none}
 @media(max-width:430px){.section-workspace-bar{flex-wrap:wrap}.section-workspace-bar button{margin-left:auto}}
+
+/* Service memory capacity; the separate market refresh ring keeps its cadence. */
+main>header .memory-indicator{--memory-color:#158774;display:flex;align-items:center;gap:9px;padding:7px 10px;border:1px solid #d8e3de;border-radius:12px;background:#fafcf9;max-width:100%;box-sizing:border-box;font-variant-numeric:tabular-nums}
+main>header .memory-indicator[hidden]{display:none!important}
+main>header .memory-indicator[data-state="warning"]{--memory-color:#b97912;background:#fffbef;border-color:#e9d9ad}
+main>header .memory-indicator[data-state="critical"]{--memory-color:#c14545;background:#fff7f5;border-color:#edcccc}
+main>header .memory-indicator[data-state="unknown"]{--memory-color:#8b9ca7}
+main>header .memory-remaining-ring{--memory-angle:0deg;position:relative;flex:0 0 50px;width:50px;height:50px;display:grid;place-items:center;border-radius:50%;background:conic-gradient(var(--memory-color) var(--memory-angle),#e1e9e6 0)}
+main>header .memory-remaining-ring::before{content:"";position:absolute;inset:5px;border-radius:50%;background:#fafcf9}
+main>header .memory-remaining-ring span{position:relative;color:var(--memory-color);font-size:11px;font-weight:700;line-height:1}
+main>header .memory-indicator-copy{display:grid;gap:3px;min-width:0;line-height:1.3}
+main>header .memory-indicator-copy b{font-size:11px;color:#355766;font-weight:600}
+main>header .memory-indicator-copy>span{font-size:12px;color:#163d55;overflow-wrap:anywhere}
+main>header .memory-indicator-copy small{font-size:10px;color:var(--memory-color)}
+@media(max-width:760px){main>header .memory-indicator{justify-self:start;max-width:100%}}

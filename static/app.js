@@ -1155,7 +1155,75 @@ function updateChatNavAttention(){const entry=document.querySelector('aside .cha
 function acknowledgeChatNavAttention(){chatNavAttentionPending=false;updateChatNavAttention()}
 document.querySelectorAll('nav a[data-view]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault();const viewId=link.dataset.view;document.querySelectorAll('.view').forEach(view=>view.classList.toggle('active',view.id===viewId));updateSidebarActive(link,viewId);updateSidebarSubnav(viewId);updateMobileViewTitle(link,viewId);syncMobileViewState(viewId);toggleMobileNav(false);if(viewId==='dashboard')loadDashboard();if(viewId==='onchain-opportunities')loadOnchainOpportunities();if(viewId==='spot-futures')loadSpotFutures();if(viewId==='equity-arbitrage')loadEquityArbitrage();if(viewId==='my-positions')loadHedgePositions();if(viewId==='dual-futures')loadDualFutures();if(viewId==='thinking')loadSimpleThinking();if(viewId==='strategies')loadStrategies();if(viewId==='alerts')loadAlerts(true);if(viewId==='chat'){acknowledgeChatNavAttention();showMobileChatPeers();loadChat(true)}if(viewId==='daily-trends')loadDailyTrends();if(viewId==='daily-thoughts')loadThoughtAnalysis();if(viewId==='daily-listings')loadDailyListings();if(viewId==='token-hedge')loadTokenHedgeProfiles();if(viewId==='funding-trend')loadFundingTrend();if(viewId==='trade-validation')loadTradeValidation();if(viewId==='runtime-rules')loadRuntimeRules();if(viewId==='account-management')loadAccountManagement();if(viewId==='security-notifications')loadSecurityAlerts(true);window.location.hash=viewId}));
 
-function applyAdminUi(){document.querySelectorAll('.admin-write-only').forEach(node=>node.classList.toggle('hidden',!authState.is_admin))}
+// Website service memory, independent of the five-second market controllers.
+const memoryIndicatorState={timer:null,controller:null,started:false};
+function memoryCapacity(bytes){return bytes>=1024**3?`${(bytes/1024**3).toFixed(2)} GiB`:`${(bytes/1024**2).toFixed(bytes<10*1024**2?1:0)} MiB`}
+function memoryIndicatorModel(data){
+  const used=data?.cgroup_bytes,limit=data?.memory_limit_bytes,high=data?.memory_high_bytes;
+  if(!Number.isSafeInteger(used)||used<0||!Number.isSafeInteger(limit)||limit<=0)return null;
+  const remaining=Math.max(0,limit-used),percent=Math.max(0,Math.min(100,remaining/limit*100));
+  const highKnown=Number.isSafeInteger(high)&&high>0&&high<=limit;
+  const severity=(used>=limit||(highKnown&&used>=high)||percent<=10)?'critical':((highKnown&&used>=high*.9)||percent<=20)?'warning':'normal';
+  return {used,limit,remaining,percent,severity,high:highKnown?high:null,
+    percentLabel:percent>0&&percent<.1?'<0.1%':`${Number(percent.toFixed(1))}%`,
+    detail:highKnown?(used>=high?'已达内存高水位':`距高水位 ${memoryCapacity(high-used)}`):(severity==='critical'?'内存余量不足':severity==='warning'?'内存余量偏低':'网站服务内存')};
+}
+function renderMemoryIndicator(data=null,message='暂不可用'){
+  const widget=byId('memoryIndicator'),ring=byId('memoryRemainingRing');if(!widget||!ring)return;
+  const model=memoryIndicatorModel(data);
+  widget.dataset.state=model?.severity||'unknown';
+  ring.style.setProperty('--memory-angle',`${model?model.percent*3.6:0}deg`);
+  byId('memoryRemainingPercent').textContent=model?.percentLabel||'—';
+  byId('memoryRemainingCapacity').textContent=model?`${memoryCapacity(model.remaining)} / ${memoryCapacity(model.limit)}`:message;
+  byId('memoryRemainingDetail').textContent=model?.detail||'等待有效内存指标';
+  if(model){
+    ring.setAttribute('aria-valuenow',String(Number(model.percent.toFixed(2))));
+    ring.setAttribute('aria-valuetext',`剩余 ${model.percentLabel}，${memoryCapacity(model.remaining)}，${model.detail}`);
+    widget.title=`网站服务已用 ${memoryCapacity(model.used)}；上限 ${memoryCapacity(model.limit)}。包含工作进程与文件缓存。${model.high?`高水位 ${memoryCapacity(model.high)}，达到后可能触发内存回收。`:''}每 15 秒读取一次。`;
+  }else{
+    ring.removeAttribute('aria-valuenow');ring.setAttribute('aria-valuetext',message);
+    widget.title='尚无有效的已用内存或有限上限；不把缺失指标当作剩余 0%。';
+  }
+}
+function stopMemoryIndicator(){
+  clearTimeout(memoryIndicatorState.timer);memoryIndicatorState.timer=null;
+  memoryIndicatorState.controller?.abort();renderMemoryIndicator(null,document.hidden?'等待更新':'暂不可用');
+}
+async function pollMemoryIndicator(){
+  if(!authState.is_admin||document.hidden||memoryIndicatorState.controller)return;
+  clearTimeout(memoryIndicatorState.timer);memoryIndicatorState.timer=null;
+  const controller=new AbortController();memoryIndicatorState.controller=controller;
+  const timeout=setTimeout(()=>controller.abort(),5000);
+  try{
+    const response=await fetch('/api/runtime-health',{signal:controller.signal,cache:'no-store',redirect:'error'});
+    if(response.status===401||response.status===403){byId('memoryIndicator').hidden=true;memoryIndicatorState.started=false;return}
+    if(!response.ok)throw new Error('memory_status_unavailable');
+    const data=await response.json();
+    if(!controller.signal.aborted&&authState.is_admin&&!document.hidden)renderMemoryIndicator(data);
+  }catch(error){if(authState.is_admin&&!document.hidden)renderMemoryIndicator()}
+  finally{
+    clearTimeout(timeout);memoryIndicatorState.controller=null;
+    if(memoryIndicatorState.started&&authState.is_admin&&!document.hidden)memoryIndicatorState.timer=setTimeout(pollMemoryIndicator,15000);
+  }
+}
+function syncMemoryIndicator(){
+  let widget=byId('memoryIndicator');
+  if(!authState.is_admin){memoryIndicatorState.started=false;stopMemoryIndicator();if(widget)widget.hidden=true;return}
+  if(!widget){
+    const header=document.querySelector('main>header .header-actions');if(!header)return;
+    widget=document.createElement('div');widget.id='memoryIndicator';widget.className='memory-indicator';
+    widget.innerHTML='<div id="memoryRemainingRing" class="memory-remaining-ring" role="progressbar" aria-label="网站服务剩余内存" aria-valuemin="0" aria-valuemax="100"><span id="memoryRemainingPercent">—</span></div><div class="memory-indicator-copy"><b>网站内存剩余</b><span id="memoryRemainingCapacity">正在读取…</span><small id="memoryRemainingDetail">等待有效内存指标</small></div>';
+    header.prepend(widget);renderMemoryIndicator(null,'正在读取…');
+    document.addEventListener('visibilitychange',()=>{if(document.hidden)stopMemoryIndicator();else if(memoryIndicatorState.started)pollMemoryIndicator()});
+    window.addEventListener('pagehide',stopMemoryIndicator);
+    window.addEventListener('pageshow',()=>{if(memoryIndicatorState.started)pollMemoryIndicator()});
+  }
+  widget.hidden=false;
+  if(!memoryIndicatorState.started){memoryIndicatorState.started=true;pollMemoryIndicator()}
+}
+// End website memory indicator.
+
+function applyAdminUi(){document.querySelectorAll('.admin-write-only').forEach(node=>node.classList.toggle('hidden',!authState.is_admin));syncMemoryIndicator()}
 function applyChatNavVisibility(){const hidden=Boolean(authState.chat_nav_hidden);document.querySelector('aside .chat-nav-entry')?.classList.toggle('hidden',hidden);filterSectionNavigation(byId('sectionSearch')?.value||'');if(hidden&&authState.user_id){startChatPolling();primeSignalAudio()}}
 async function loadAuthState(){try{const response=await fetch('/api/auth/me');if(response.status===401){location.href='/login';return}authState=await response.json();applyAdminUi();applyChatNavVisibility()}catch(error){}}
 async function ensureCurrentDeviceBinding(){if(!authState.user_id||!authState.device_lock_required||authState.device_protected)return true;try{const payload=await signedAccountDevicePayload(String(authState.username||'').toLowerCase()),response=await fetch('/api/auth/device/enroll-current',{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':authState.csrf_token},body:JSON.stringify(payload)}),data=await response.json();if(!response.ok)throw new Error(data.error||'当前设备绑定失败');authState.device_protected=true;authState.device=data.device;return true}catch(error){alert(error.message||'当前设备无法完成安全绑定，请重新登录。');location.href='/login';return false}}

@@ -101,6 +101,7 @@
     '/api/push-signal-validation':{rule_note:'合成统计，不代表真实胜率。',summary:[{category_label:'5MIN急涨',subtype_label:'点火',win_rate:50,decided:2,wins:1,losses:1,neutral:0,pending:1,insufficient_data:0}],items:[],automation:{last_success_at:stamp}},
     '/api/token-hedge/profiles':{profiles:[profile,{...profile,symbol:'SAMPLE/USDT',name:'另一个合成研究样本'}]},
     '/api/strategies':[{id:1,name:'价差监控合成样本',enabled:true,mode:'现多期空',symbol:'DEMO/USDT'},{id:2,name:'跨所监控合成样本',enabled:false,mode:'期多期空',symbol:'SAMPLE/USDT'}],
+    '/api/runtime-health':{cgroup_bytes:1260*1024**2,memory_limit_bytes:1536*1024**2,memory_high_bytes:1280*1024**2},
     '/api/runtime-rules':{is_admin:true,items:[
       {key:'spot_market_refresh',label:'现多期空刷新',category:'行情采集',description:'保持真实运行规则，只在预览检查输入与保存按钮排版。',schedule_type:'interval',value:'5',unit:'秒',editable:true,enabled:true},
       {key:'dual_market_refresh',label:'期多期空刷新',category:'行情采集',description:'行情与持仓采用独立的更新周期。',schedule_type:'interval',value:'5',unit:'秒',editable:true,enabled:true},

@@ -1,5 +1,6 @@
 """Short fault scenarios; real HTTP framing with memory sockets, no exchange IO."""
 from copy import deepcopy
+from dataclasses import replace
 from decimal import Decimal as D
 import io
 import json
@@ -221,6 +222,16 @@ class ExecutionScenarios(unittest.TestCase):
         thin=Book.parse(dict(lastUpdateId=1,bids=[['99.99','.195']],asks=[['100','100']]),t,t)
         with self.assertRaisesRegex(GuardError,'反向深度不足'):
             plan_clip(request_body(residual_policy='reduce'),rules(),rules(futures=True),thin,book(True),time.monotonic(),D('.001'),D('.0005'),spot_exit_fee=D('.001'))
+
+    def test_bnb_base_rejects_automatic_exit_before_any_order(self):
+        sr=replace(rules(),symbol='BNBUSDT',base='BNB');fr=replace(rules(futures=True),symbol='BNBUSDT',base='BNB')
+        with self.assertRaisesRegex(GuardError,'BNB 手续费代扣'):
+            plan_clip(request_body(symbol='BNB/USDT',residual_policy='reduce'),sr,fr,book(),book(True),time.monotonic(),D('.001'),D('.0005'),spot_exit_fee=D('.001'))
+
+    def test_bnb_base_can_only_preview_with_manual_residual_handling(self):
+        sr=replace(rules(),symbol='BNBUSDT',base='BNB');fr=replace(rules(futures=True),symbol='BNBUSDT',base='BNB')
+        p=plan_clip(request_body(symbol='BNB/USDT',residual_policy='hold'),sr,fr,book(),book(True),time.monotonic(),D('.001'),D('.0005'),spot_exit_fee=D('.001'))
+        self.assertIsNone(p['exit_preview'])
 
     def test_stale_reverse_book_does_not_send(self):
         c=MatchClient(); c.zero={'spot'}; c.exit_book=book(True,age=2)

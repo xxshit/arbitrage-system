@@ -229,6 +229,8 @@ def plan_clip(request, spot_rules, future_rules, spot, future, now, spot_fee, fu
         raise GuardError("限价边界扣除双腿手续费后，开差低于确认门槛")
     exit_preview = None
     if request.get("residual_policy") == "reduce":
+        if spot_rules.base == "BNB":
+            raise GuardError("BNB 手续费代扣可能同时消耗基础币；自动减仓暂不支持，请选择暂停并自行处理")
         if spot_exit_fee is None:
             raise GuardError("缺少现货卖出手续费，不能核验退出方案")
         # Check both possible single-leg exits even at the permitted worst entry

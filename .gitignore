@@ -1,5 +1,6 @@
 .env
 .chat_encryption.key
+.binance_api_encryption.key
 .web_push_vapid_private.pem
 transfer-readonly.json
 .transfer-readonly-*

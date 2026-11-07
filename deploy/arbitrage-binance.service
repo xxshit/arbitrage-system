@@ -1,0 +1,28 @@
+[Unit]
+Description=ArbiScope Binance single-clip executor (disabled trading by default)
+After=network-online.target mysql.service
+
+[Service]
+Type=simple
+User=arbhub
+Group=arbhub
+WorkingDirectory=/opt/arbitrage-hub
+EnvironmentFile=/opt/arbitrage-hub/.env
+Environment=BINANCE_EXECUTION_ENABLED=0
+Environment=BINANCE_EXECUTOR_LOCK=/run/arbitrage-binance/executor.lock
+RuntimeDirectory=arbitrage-binance
+RuntimeDirectoryMode=0700
+ExecStart=/opt/arbitrage-hub/.venv/bin/python -m binance_hedge.worker --serve
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/arbitrage-binance
+MemoryMax=192M
+TasksMax=8
+
+[Install]
+WantedBy=multi-user.target

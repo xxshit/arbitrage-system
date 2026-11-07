@@ -5048,6 +5048,10 @@ def valid_admin_csrf():
     return secrets.compare_digest(str(session.get("csrf_token") or ""), str(request.headers.get("X-CSRF-Token") or ""))
 
 
+from binance_hedge.web import register as register_binance_hedge
+register_binance_hedge(app, db, current_user)
+
+
 @app.cli.command("create-admin")
 @click.option("--username", default="owner", show_default=True)
 @click.option("--password", prompt=True, hide_input=True, confirmation_prompt=True)
@@ -8001,7 +8005,7 @@ def hedge_positions_api():
         "execution": {
             "enabled": False,
             "mode": "preview_only",
-            "reason": "尚未配置币安私有交易 API；建立按钮只生成双腿订单预览，不会提交真实订单。",
+            "reason": "下方为本站登记仓位；币安实时账户和双腿执行记录见上方独立面板。跨所路径仍仅提供预览。",
         },
         "summary": {
             "current_count": len(current_rows),

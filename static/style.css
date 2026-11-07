@@ -502,3 +502,16 @@ main>header .memory-indicator-copy b{font-size:11px;color:#355766;font-weight:60
 main>header .memory-indicator-copy>span{font-size:12px;color:#163d55;overflow-wrap:anywhere}
 main>header .memory-indicator-copy small{font-size:10px;color:var(--memory-color)}
 @media(max-width:760px){main>header .memory-indicator{justify-self:start;max-width:100%}}
+:root{--binance-accent:#a67b12}
+.binance-account-panel{margin:18px 0;padding:20px;border:1px solid #dfd5b7;border-radius:14px;background:#fffdf7}
+.binance-account-panel form{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0}
+.binance-account-panel form p{grid-column:1/-1}.binance-account-panel label{display:flex;flex-direction:column;gap:6px}
+.binance-account-panel input,.binance-taker-controls input,.binance-taker-controls select{min-width:0;width:100%;box-sizing:border-box;padding:9px;border:1px solid #d7dbe3;border-radius:7px;background:white;color:#222}
+.binance-table{overflow-x:auto}.binance-table table{width:100%;min-width:400px}.binance-table td,.binance-table th{padding:10px;text-align:left;border-bottom:1px solid #eee}
+.binance-intent{border:1px solid #e1e5eb;border-radius:10px;padding:14px;margin-top:10px;overflow-wrap:anywhere}
+.binance-intent pre{max-height:240px;overflow:auto;font-size:12px;white-space:pre-wrap}
+.binance-taker-controls{padding:16px;margin:16px 0;border:1px solid #dfd5b7;border-radius:12px;background:#fffdf7}
+.binance-taker-controls p,.binance-account-panel p{font-size:13px;line-height:1.7;color:#596477}
+.binance-taker-controls button{margin:8px 0}.binance-depth{display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:13px}
+.binance-depth dt{color:#667085}.binance-depth dd{margin:0;text-align:right;overflow-wrap:anywhere}
+@media(max-width:600px){.binance-account-panel{padding:14px}.binance-account-panel form{grid-template-columns:1fr}.binance-account-panel .panel-title{align-items:stretch;flex-direction:column;gap:10px}.binance-taker-controls .hedge-preview-fields{grid-template-columns:1fr}.binance-depth{grid-template-columns:1fr}.binance-depth dd{text-align:left;margin-bottom:8px}}

@@ -601,6 +601,7 @@ function hedgePositionCard(position,history=false){const content=`<div class="he
 function renderHedgePositionList(target,items,history=false){if(!target)return;target.innerHTML=items.length?items.map(item=>hedgePositionCard(item,history)).join(''):`<p class="position-empty">${history?'暂无历史仓位。完整平仓、取消或执行失败的组合会保留在这里。':'暂无当前持仓。接入私有 API 并实际建立对冲组合后，所有仓位都会汇总到这里。'}</p>`}
 async function loadHedgePositions(){
   const summary=byId('hedgePositionSummary');if(!summary)return false;
+  globalThis.BinanceHedge?.load();
   try{
     const data=await fetchRefreshJson('/api/hedge-positions');
     summary.innerHTML=hedgePositionSummaryMarkup(data.summary||{});
@@ -634,6 +635,7 @@ function openHedgePositionBuilder(encodedKey,strategy='spot_futures'){
 function closeHedgePositionBuilder(){byId('hedgePositionModal')?.classList.add('hidden');selectedHedgeOpportunity=null}
 function renderHedgePositionPreview(){
   const target=byId('hedgeOrderPreview');if(!target||!selectedHedgeOpportunity)return;
+  globalThis.BinanceHedge?.builder(selectedHedgeOpportunity);
   const {group,row,strategy}=selectedHedgeOpportunity,dual=strategy==='futures_futures',quote=Number(byId('hedgeQuoteAmount')?.value),leverage=Number(byId('hedgeLeverage')?.value),slippage=Math.max(0,Number(byId('hedgeMaxSlippage')?.value)||0),amounts=hedgePreviewAmounts(row,quote,leverage,dual);
   if(!amounts){target.innerHTML='<p class="position-empty">请输入有效投入金额和 1–10 倍合约杠杆，并等待有效双腿盘口。</p>';return}
   const shortExchange=dual?row.short_exchange:'Binance',funding=dual?row.funding_difference:row.funding_rate;
@@ -1079,7 +1081,7 @@ const sectionWorkspaceMeta={
   'dual-futures':{name:'期多期空套利',group:'实时机会',description:'比较同标的跨所合约的开平差、资金费和流动性。',source:'盘口与价差按运行规则；成交额20秒、OI分批、历史资费60秒。'},
   'spot-futures':{name:'现多期空套利',group:'实时机会',description:'结合现货、永续盘口与真实结算周期筛选对冲路径。',source:'盘口与价差按运行规则；成交额20秒、OI分批、历史资费60秒。'},
   'equity-arbitrage':{name:'美股套利',group:'实时机会',description:'独立比较美股及ETF相关产品的现货/合约路径，与普通币报警隔离。',source:'交易所公开分类与盘口；每15秒读取，休市和产品条款需另核验。'},
-  'my-positions':{name:'我的仓位',group:'实时机会',description:'统一查看本站记录的当前组合与历史结果。',source:'每5秒读取本站记录；未接交易所私有API，不代表实时账户仓位。'},
+  'my-positions':{name:'我的仓位',group:'实时机会',description:'统一查看本站记录的当前组合与历史结果。',source:'每5秒读取本站记录；币安账户由本人手动核验，双腿执行状态独立展示。'},
   'funding-trend':{name:'主升正资费套利榜',group:'实时机会',description:'从趋势、资费与流动性共同评估观察候选。',source:'页面约60秒读取；资费按各交易所实际周期结算。'},
   'trade-validation':{name:'趋势验证',group:'研究复盘',description:'分开查看假设、目标、回撤与真实路径复盘。',source:'页面约30秒读取；未完成和无法判定样本不冒充胜率。'},
   thinking:{name:'我的套利思维',group:'研究复盘',description:'按路径评分，查看资费明细与多周期价差数据。',source:'页面约5秒读取；研究筛选不是自动下单信号。'},

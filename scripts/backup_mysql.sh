@@ -13,6 +13,7 @@ SIX_HOUR_DIR="${BACKUP_ROOT}/six-hour"
 DAILY_DIR="${BACKUP_ROOT}/daily"
 LOCK_FILE="${BACKUP_ROOT}/.backup.lock"
 CHAT_KEY_FILE="${CHAT_ENCRYPTION_KEY_FILE:-/opt/arbitrage-hub/.chat_encryption.key}"
+BINANCE_KEY_FILE="${BINANCE_KEYRING_FILE:-/opt/arbitrage-hub/.binance_api_encryption.key}"
 SECRETS_DIR="$(dirname "${BACKUP_ROOT}")/secrets"
 
 mkdir -p "$SIX_HOUR_DIR" "$DAILY_DIR" "$SECRETS_DIR"
@@ -26,6 +27,17 @@ if [[ ! -s "$CHAT_KEY_FILE" ]]; then
 fi
 install -m 600 "$CHAT_KEY_FILE" "${SECRETS_DIR}/chat-encryption.key"
 sha256sum "${SECRETS_DIR}/chat-encryption.key" > "${SECRETS_DIR}/chat-encryption.key.sha256"
+
+# Deployments with the account module need this independent restore key too.
+# Keep versioned copies; never export them through the read-only SQL channel.
+if [[ -d /opt/arbitrage-hub/binance_hedge || -e "$BINANCE_KEY_FILE" ]]; then
+  if [[ ! -s "$BINANCE_KEY_FILE" || -L "$BINANCE_KEY_FILE" ]]; then
+    echo "Binance restore key missing; refusing an unrecoverable backup." >&2
+    exit 1
+  fi
+  BINANCE_KEY_HASH="$(sha256sum "$BINANCE_KEY_FILE" | awk '{print $1}')"
+  install -m 600 "$BINANCE_KEY_FILE" "${SECRETS_DIR}/binance-${BINANCE_KEY_HASH}.key"
+fi
 
 if command -v mariadb-dump >/dev/null 2>&1; then
   DUMP_BIN="$(command -v mariadb-dump)"
@@ -73,6 +85,9 @@ fi
 gzip -t "$TEMP_PATH"
 mv "$TEMP_PATH" "$FINAL_PATH"
 sha256sum "$FINAL_PATH" > "$CHECKSUM_PATH"
+if [[ -n "${BINANCE_KEY_HASH:-}" ]]; then
+  printf '%s\n' "$BINANCE_KEY_HASH" > "${FINAL_PATH}.binance-key.sha256"
+fi
 
 # The latest pointer gives the local pull script a stable, atomic target.
 ln -sfn "$FINAL_PATH" "${BACKUP_ROOT}/latest.sql.gz"
@@ -83,6 +98,9 @@ DAILY_PATH="${DAILY_DIR}/${DATABASE_NAME}-${DAY}.sql.gz"
 if [[ ! -e "$DAILY_PATH" ]]; then
   cp --reflink=auto "$FINAL_PATH" "$DAILY_PATH"
   sha256sum "$DAILY_PATH" > "${DAILY_PATH}.sha256"
+  if [[ -n "${BINANCE_KEY_HASH:-}" ]]; then
+    printf '%s\n' "$BINANCE_KEY_HASH" > "${DAILY_PATH}.binance-key.sha256"
+  fi
 fi
 
 # Four backups per day for 14 days, plus one daily backup for 90 days.

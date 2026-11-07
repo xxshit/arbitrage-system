@@ -29,6 +29,75 @@ class SendBlocked(ExchangeError):
         super().__init__("SEND_GUARD", uncertain=False)
 
 
+class OrderGate:
+    """Local readiness barrier, never an exchange-side atomic transaction."""
+    def __init__(self, deadline, parties=2):
+        self.deadline = deadline
+        self.barrier = threading.Barrier(parties)
+        self.lock = threading.Lock()
+        self.first_write = None
+
+    def abort(self):
+        self.barrier.abort()
+
+    def ready(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            self.abort()
+            raise SendBlocked()
+        try:
+            self.barrier.wait(timeout=remaining)
+        except threading.BrokenBarrierError:
+            raise SendBlocked() from None
+
+    def before_write(self, timing):
+        with self.lock:
+            now = time.monotonic()
+            if self.barrier.broken or now > self.deadline or (self.first_write is not None and now-self.first_write > .05):
+                raise SendBlocked()
+            if self.first_write is None:
+                self.first_write = now
+            timing.update(write_started_monotonic=now, write_started_utc_ms=int(time.time()*1000))
+
+
+class OrderConnection(http.client.HTTPSConnection):
+    """Use stdlib HTTP framing, but stage the complete POST before release.
+
+    The connection must already be established. No automatic reconnect is
+    possible in write_order; any failure after a write attempt is ambiguous.
+    Neither staged bytes nor credentials enter diagnostics.
+    """
+    _staged_parts = None
+
+    def send(self, data):
+        if self._staged_parts is None:
+            return super().send(data)
+        if not isinstance(data, (bytes, bytearray, memoryview)):
+            raise ValueError("Order body must be bounded bytes")
+        self._staged_parts.append(bytes(data))
+
+    def stage_order(self, target, body, headers):
+        self._staged_parts = []
+        try:
+            self.request("POST", target, body=body, headers=headers)
+            data = b"".join(self._staged_parts)
+            if len(data) > 8192:
+                raise ValueError("Order request too large")
+            return data
+        finally:
+            self._staged_parts = None
+
+    def write_order(self, data, gate, timing):
+        if self.sock is None:
+            raise SendBlocked()
+        self.sock.settimeout(max(.001, min(2, gate.deadline-time.monotonic())))
+        gate.before_write(timing)
+        # sendall may fail after sending a prefix. Never classify that as zero.
+        self.sock.sendall(data)
+        timing.update(write_completed_monotonic=time.monotonic(), write_completed_utc_ms=int(time.time()*1000))
+        self.sock.settimeout(2)
+
+
 READS = {
     "spot": {"/api/v3/time", "/api/v3/depth", "/api/v3/exchangeInfo", "/api/v3/account",
              "/api/v3/account/commission", "/api/v3/openOrders", "/api/v3/order", "/api/v3/myTrades",
@@ -49,7 +118,6 @@ class BinanceClient:
         self._cooldown_until = 0
         self.rate_guard = None
         self.rate_pause = None
-        self.before_order_send = None
 
     def close(self):
         for connection in self._connections.values():
@@ -57,44 +125,61 @@ class BinanceClient:
         self._connections.clear()
         self._key = self._secret = ""
 
-    def request(self, market, path, params=None, *, method="GET", signed=False):
+    def request(self, market, path, params=None, *, method="GET", signed=False, order_gate=None, timing=None):
         if market not in READS or (method == "GET" and path not in READS[market]):
             raise GuardError("接口不在允许清单内")
         is_order = method == "POST" and path == ("/api/v3/order" if market == "spot" else "/fapi/v1/order")
         if method != "GET" and (not self.allow_orders or not is_order or not signed):
             raise GuardError("真实下单未启用")
-        if self.rate_guard:
-            self.rate_guard()
-        if time.monotonic() < self._cooldown_until:
-            raise ExchangeError("RATE_LIMIT", uncertain=is_order)
-        values = dict(params or {})
-        headers = {"Accept": "application/json", "Accept-Encoding": "identity"}
-        if signed:
-            if not self._key or not self._secret or market not in self._offset:
-                raise GuardError("私有 API 尚未完成身份与时钟校验")
-            offset, synced = self._offset[market]
-            if time.monotonic() - synced > 60:
-                raise GuardError("签名时钟已过期")
-            values.update(timestamp=int(time.time() * 1000 + offset), recvWindow=2000)
-            headers["X-MBX-APIKEY"] = self._key
-        body = urlencode(values)
-        if signed:
-            body += "&signature=" + hmac.new(self._secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+        gate = (order_gate or OrderGate(time.monotonic()+2, parties=1)) if is_order else None
+        timing = timing if timing is not None else {}
         host = "api.binance.com" if market == "spot" else "fapi.binance.com"
         with self._locks[market]:
             try:
+                if self.rate_guard:
+                    self.rate_guard()
+                if time.monotonic() < self._cooldown_until:
+                    raise ExchangeError("RATE_LIMIT", uncertain=False)
                 connection = self._connections.get(market)
                 if connection is None:
-                    connection = http.client.HTTPSConnection(host, timeout=2, context=self._tls)
+                    connection = OrderConnection(host, timeout=2, context=self._tls)
                     self._connections[market] = connection
+                if is_order:
+                    if time.monotonic() >= gate.deadline:
+                        raise SendBlocked()
+                    connection.timeout = min(2, gate.deadline-time.monotonic())
+                    if connection.sock is None:
+                        connection.connect()
+                # Sign after connection preparation, before the common barrier.
+                values = dict(params or {})
+                headers = {"Accept": "application/json", "Accept-Encoding": "identity"}
+                if signed:
+                    if not self._key or not self._secret or market not in self._offset:
+                        raise GuardError("私有 API 尚未完成身份与时钟校验")
+                    offset, synced = self._offset[market]
+                    if time.monotonic() - synced > 60:
+                        raise GuardError("签名时钟已过期")
+                    values.update(timestamp=int(time.time()*1000 + offset), recvWindow=2000)
+                    headers["X-MBX-APIKEY"] = self._key
+                body = urlencode(values)
+                if signed:
+                    body += "&signature=" + hmac.new(self._secret.encode(), body.encode(), hashlib.sha256).hexdigest()
                 target = path + ("?" + body if method == "GET" and body else "")
-                if method == "POST":
+                if is_order:
                     headers["Content-Type"] = "application/x-www-form-urlencoded"
-                    if self.before_order_send:
-                        self.before_order_send(market)
-                connection.request(method, target, body=body if method == "POST" else None, headers=headers)
+                    wire = connection.stage_order(target, body, headers)
+                    if connection.sock is None:
+                        raise SendBlocked()
+                    timing["ready_monotonic"] = time.monotonic()
+                    gate.ready()
+                    connection.write_order(wire, gate, timing)
+                    del wire
+                else:
+                    connection.request(method, target, headers=headers)
                 response = connection.getresponse()
                 raw = response.read(4 * 1024 * 1024 + 1)
+                if is_order:
+                    timing["response_received_monotonic"] = time.monotonic()
                 if len(raw) > 4 * 1024 * 1024:
                     raise ValueError("oversized")
                 payload = json.loads(raw)
@@ -114,22 +199,34 @@ class BinanceClient:
                     raise ExchangeError(code, uncertain=is_order and not known_reject)
                 return payload
             except ExchangeError:
+                if gate:
+                    gate.abort()
+                    connection = self._connections.pop(market, None)
+                    if connection:
+                        connection.close()
                 raise
             except Exception:
+                if gate:
+                    gate.abort()
                 connection = self._connections.pop(market, None)
                 if connection:
                     connection.close()
-                raise ExchangeError(uncertain=is_order) from None
+                raise ExchangeError(uncertain=is_order and "write_started_monotonic" in timing) from None
+
+    def sync_clock(self, market):
+        start = time.time() * 1000
+        payload = self.request(market, "/api/v3/time" if market == "spot" else "/fapi/v1/time")
+        end = time.time() * 1000
+        if not 0 <= end - start <= 400:
+            raise GuardError("交易链路时延超过 400ms")
+        self._offset[market] = (int(payload["serverTime"]) - (start + end) / 2, time.monotonic())
 
     def sync_clocks(self):
-        def sync(market):
-            start = time.time() * 1000
-            payload = self.request(market, "/api/v3/time" if market == "spot" else "/fapi/v1/time")
-            end = time.time() * 1000
-            if not 0 <= end - start <= 400:
-                raise GuardError("交易链路时延超过 400ms")
-            self._offset[market] = (int(payload["serverTime"]) - (start + end) / 2, time.monotonic())
-        self.parallel(lambda: sync("spot"), lambda: sync("futures"))
+        self.parallel(lambda: self.sync_clock("spot"), lambda: self.sync_clock("futures"))
+
+    def ensure_clock(self, market):
+        if market not in self._offset or time.monotonic()-self._offset[market][1] > 55:
+            self.sync_clock(market)
 
     @staticmethod
     def parallel(first, second):
@@ -192,9 +289,10 @@ class BinanceClient:
             lambda: self.request("futures", "/fapi/v1/commissionRate", {"symbol": symbol}, signed=True))
         # Conservative undiscounted rate, including special and tax commissions.
         spot_fee = sum((dec(sc[k]["taker"]) + dec(sc[k]["buyer"]) for k in ("standardCommission", "specialCommission", "taxCommission")), Decimal(0))
+        spot_exit_fee = sum((dec(sc[k]["taker"]) + dec(sc[k]["seller"]) for k in ("standardCommission", "specialCommission", "taxCommission")), Decimal(0))
         future_fee = dec(fc["takerCommissionRate"])
         sb, fb = self.parallel(lambda: self.depth("spot", symbol), lambda: self.depth("futures", symbol))
-        plan = plan_clip(request, sr, fr, sb, fb, time.monotonic(), spot_fee, future_fee, anchor)
+        plan = plan_clip(request, sr, fr, sb, fb, time.monotonic(), spot_fee, future_fee, anchor, spot_exit_fee=spot_exit_fee)
         cash = next((dec(b["free"]) for b in spot["balances"] if b["asset"] == "USDT"), Decimal(0))
         available = next((dec(b["availableBalance"]) for b in future["assets"] if b["asset"] == "USDT"), Decimal(0))
         q, cap = dec(plan["quantity"]), dec(plan["buy_cap"])
@@ -213,8 +311,9 @@ class BinanceClient:
                     margin_type=config["marginType"], account_uid=str(spot["uid"]))
         return plan, sr, fr
 
-    def submit(self, market, params):
-        return self.request(market, "/api/v3/order" if market == "spot" else "/fapi/v1/order", params, method="POST", signed=True)
+    def submit(self, market, params, *, gate=None, timing=None):
+        return self.request(market, "/api/v3/order" if market == "spot" else "/fapi/v1/order", params,
+                            method="POST", signed=True, order_gate=gate, timing=timing)
 
     def query(self, market, symbol, client_id):
         return self.request(market, "/api/v3/order" if market == "spot" else "/fapi/v1/order",

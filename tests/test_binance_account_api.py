@@ -114,7 +114,7 @@ class PreflightClient(BinanceClient):
             '/api/v3/openOrders':[], '/fapi/v1/openOrders':[],
             '/fapi/v1/symbolConfig':[dict(symbol='BTCUSDT',leverage=1,marginType='CROSSED',maxNotionalValue='100000')],
             '/api/v3/exchangeInfo':dict(symbols=[deepcopy(symbol)]), '/fapi/v1/exchangeInfo':dict(symbols=[deepcopy(symbol)]),
-            '/api/v3/account/commission':dict(standardCommission=dict(taker='.001',buyer='0'),specialCommission=dict(taker='0',buyer='0'),taxCommission=dict(taker='0',buyer='0')),
+            '/api/v3/account/commission':dict(standardCommission=dict(taker='.001',buyer='0',seller='0'),specialCommission=dict(taker='0',buyer='0',seller='0'),taxCommission=dict(taker='0',buyer='0',seller='0')),
             '/fapi/v1/commissionRate':dict(takerCommissionRate='.0005')}
     def sync_clocks(self):pass
     def request(self,market,path,params=None,**kwargs):
@@ -143,6 +143,13 @@ class PreflightTests(unittest.TestCase):
     def test_special_commission_is_included(self):
         self.client.payloads['/api/v3/account/commission']['specialCommission']['taker']='.002'
         p,_,_=self.client.prepare(request_body());self.assertEqual(p['spot_fee_rate'],'0.003')
+
+    def test_sell_commission_is_independent_from_buy_commission(self):
+        self.client.payloads['/api/v3/account/commission']['taxCommission']['seller']='.002'
+        p,_,_=self.client.prepare(request_body(residual_policy='reduce'))
+        self.assertEqual(p['spot_fee_rate'],'0.001')
+        self.assertEqual(p['spot_exit_fee_rate'],'0.003')
+        self.assertEqual(p['exit_fee_bps']['spot'],'30.000')
     def test_position_limit_and_unfamiliar_position_control_reject(self):
         self.client.payloads['/api/v3/exchangeInfo']['symbols'][0]['filters'].append(dict(filterType='MAX_POSITION',maxPosition='.01'))
         with self.assertRaises(GuardError):self.client.prepare(request_body())
@@ -158,11 +165,14 @@ class WireTests(unittest.TestCase):
         self.requests=[];self.responses=[Response({'ok':True})]
         outer=self
         class Connection:
-            def __init__(self,*a,**kw):self.host=a[0]
+            def __init__(self,*a,**kw):self.host=a[0];self.sock=object()
             def request(self,method,path,body=None,headers=None):outer.requests.append((self.host,method,path,body,headers))
+            def stage_order(self,path,body,headers):self.staged=(self.host,'POST',path,body,headers);return b'synthetic'
+            def write_order(self,data,gate,timing):
+                gate.before_write(timing);outer.requests.append(self.staged);timing['write_completed_monotonic']=time.monotonic()
             def getresponse(self):return outer.responses.pop(0)
             def close(self):pass
-        self.patch=patch('binance_hedge.client.http.client.HTTPSConnection',Connection);self.patch.start()
+        self.patch=patch('binance_hedge.client.OrderConnection',Connection);self.patch.start()
         self.client=BinanceClient('K'*64,'S'*64,allow_orders=True)
         self.client._offset={m:(0,time.monotonic()) for m in ('spot','futures')}
     def tearDown(self):self.client.close();self.patch.stop()

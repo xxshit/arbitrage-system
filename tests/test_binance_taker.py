@@ -34,18 +34,18 @@ def book(future=False, age=0, size="100"):
 
 
 def request_body(**changes):
-    return dict(symbol="BTC/USDT", quote_amount="100", clip_quote="20", slippage_bps="10", min_net_bps="0", leverage="1", residual_policy="hold", **changes)
+    return dict(dict(symbol="BTC/USDT", quote_amount="100", clip_quote="20", slippage_bps="10", min_net_bps="0", leverage="1", residual_policy="hold", exit_slippage_bps="20"), **changes)
 
 
 def make_plan(req=None):
     req = req or request_body()
-    result = plan_clip(req, rules(), rules(futures=True), book(), book(True), time.monotonic(), D(".001"), D(".0005"))
+    result = plan_clip(req, rules(), rules(futures=True), book(), book(True), time.monotonic(), D(".001"), D(".0005"), spot_exit_fee=D(".001"))
     return dict(result, position_side="BOTH", leverage=1, margin_type="CROSSED", account_uid="12345")
 
 
 class PlannerTests(unittest.TestCase):
     def plan(self, req=None, sr=None, fr=None, sb=None, fb=None, anchor=None):
-        return plan_clip(req or request_body(), sr or rules(), fr or rules(futures=True), sb or book(), fb or book(True), time.monotonic(), D(".001"), D(".0005"), anchor)
+        return plan_clip(req or request_body(), sr or rules(), fr or rules(futures=True), sb or book(), fb or book(True), time.monotonic(), D(".001"), D(".0005"), anchor, spot_exit_fee=D(".001"))
 
     def test_common_step_is_lcm_not_largest(self):
         self.assertEqual(common_step(D(".002"), D(".003")), D(".006"))
@@ -105,10 +105,13 @@ class FakeClient:
         self.records={};self.calls=[];self.unknown=set();self.zero=set();self.base_fee="0";self.incomplete=False
         self.barrier=threading.Barrier(2);self.query_missing=set();self.partial={};self.fill_offset=0
     def sync_clocks(self):pass
+    def ensure_clock(self,market):pass
     def prepare(self,req,anchor=None):return make_plan(req),rules(),rules(futures=True)
     def depth(self,market,symbol):return book(market=="futures")
-    def submit(self,market,params):
-        if getattr(self,'before_order_send',None):self.before_order_send(market)
+    def submit(self,market,params,*,gate=None,timing=None):
+        if gate:
+            gate.ready();gate.before_write(timing)
+            timing['write_completed_monotonic']=time.monotonic()
         self.calls.append((market,deepcopy(params)))
         if params["newClientOrderId"].endswith(("s","f")):self.barrier.wait(timeout=1)
         quantity="0" if market in self.zero else self.partial.get(market,params["quantity"])
@@ -230,14 +233,14 @@ class StoreExecutionTests(unittest.TestCase):
         c=FakeClient();c.depth=lambda market,symbol:book(market=='futures',size='.001')
         r=self.execute(c);self.assertEqual(r['state'],'ABORTED');self.assertEqual(c.calls,[])
 
-    def test_late_socket_dispatch_cancels_late_leg(self):
+    def test_delayed_preparation_waits_for_both_legs_before_release(self):
         c=FakeClient();original=c.submit;c.barrier=threading.Barrier(1)
-        def delayed(market,params):
+        def delayed(market,params,**kwargs):
             if market=='futures':time.sleep(.08)
-            return original(market,params)
+            return original(market,params,**kwargs)
         c.submit=delayed;r=self.execute(c)
-        self.assertEqual(len(c.calls),1);self.assertEqual(r['state'],'ATTENTION')
-        self.assertTrue(r['result']['futures']['explicit_rejection'])
+        self.assertEqual(len(c.calls),2);self.assertEqual(r['state'],'HEDGED')
+        self.assertLess(r['result']['request_write_span_ms'],50)
 
     def test_invalid_maker_or_limit_violation_is_unknown(self):
         c=FakeClient();original=c.fills

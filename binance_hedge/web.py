@@ -159,7 +159,7 @@ def register(app, db, current_user, *, client_factory=BinanceClient, vault_facto
     @protect
     def preview(user_id):
         body = request.get_json(silent=True) or {}
-        allowed = {"symbol", "quote_amount", "clip_quote", "slippage_bps", "min_net_bps", "leverage", "residual_policy"}
+        allowed = {"symbol", "quote_amount", "clip_quote", "slippage_bps", "min_net_bps", "leverage", "residual_policy", "exit_slippage_bps"}
         if set(body) - allowed or body.get("residual_policy") not in {"reduce", "hold"}:
             raise GuardError("请明确确认单腿差额处置规则")
         with linked_client(user_id) as (client, row):

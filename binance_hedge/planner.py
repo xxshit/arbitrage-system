@@ -148,7 +148,46 @@ def validate_books(spot, future, now):
         raise GuardError("双腿盘口采集时差过大")
 
 
-def plan_clip(request, spot_rules, future_rules, spot, future, now, spot_fee, future_fee, anchor=None):
+def reduction_plan(request, market, rule, book, now, gap, entry_price, *, require_full=False):
+    """Price only against fresh *exit* liquidity, bounded by the fill price.
+
+    An exit price budget is separate from the opening slippage and must have
+    appeared in the user's confirmation. Fees are disclosed separately. IOC
+    still may fill partly or not at all after this snapshot.
+    """
+    if "exit_slippage_bps" not in request:
+        raise GuardError("缺少已确认的退出价差限额，请重新核验；不会沿用开仓滑点放宽减仓")
+    slip = dec(request["exit_slippage_bps"])
+    if not 0 <= slip <= 50:
+        raise GuardError("退出价差限额须在 0–50bp 内，手续费另计")
+    if not 0 <= now-book.started <= 1 or book.received-book.started > .4:
+        raise GuardError("退出盘口已过期或读取过慢，暂停减仓")
+    buy = market == "futures"
+    # gap already excludes the BUY's base-asset commission. Spot SELL fees
+    # are charged from received USDT (or BNB), not another base-asset reserve.
+    quantity = floor(abs(gap), rule.step)
+    boundary = floor(entry_price*(1+slip/10000), rule.tick) if buy else ceil(entry_price*(1-slip/10000), rule.tick)
+    levels = book.asks if buy else book.bids
+    remaining, available, price = quantity, Decimal(0), None
+    for px, size in levels:
+        if (px > boundary if buy else px < boundary):
+            break
+        price = px
+        take = min(size, remaining)
+        available += take
+        remaining -= take
+        if remaining == 0:
+            break
+    if price is None or available == 0 or (require_full and remaining > 0):
+        raise GuardError("退出价差限额内的反向深度不足，暂停发送")
+    rule.check(quantity, price)
+    return dict(quantity=text(quantity), price=text(price), price_boundary=text(boundary),
+                visible_quantity=text(available), expected_residual=text(abs(gap)-quantity),
+                depth_update_id=book.update_id, book_started=book.started,
+                reference_fill_price=text(entry_price), exit_slippage_bps=text(slip))
+
+
+def plan_clip(request, spot_rules, future_rules, spot, future, now, spot_fee, future_fee, anchor=None, *, spot_exit_fee=None):
     symbol = symbol_pair(request.get("symbol"))
     if spot_rules.symbol != symbol or future_rules.symbol != symbol or spot_rules.base != future_rules.base:
         raise GuardError("币种单位不一致；倍率合约和别名配对暂不自动下单")
@@ -160,6 +199,8 @@ def plan_clip(request, spot_rules, future_rules, spot, future, now, spot_fee, fu
         raise GuardError("滑点限 0–50bp；最低扣费开差范围无效")
     if not 0 <= spot_fee <= Decimal(".02") or not 0 <= future_fee <= Decimal(".02"):
         raise GuardError("手续费超出支持范围")
+    if spot_exit_fee is not None and not 0 <= spot_exit_fee <= Decimal(".02"):
+        raise GuardError("现货卖出手续费超出支持范围")
     validate_books(spot, future, now)
     buy_cap = floor(spot.asks[0][0] * (1 + slip / 10000), spot_rules.tick)
     sell_cap = ceil(future.bids[0][0] * (1 - slip / 10000), future_rules.tick)
@@ -186,12 +227,33 @@ def plan_clip(request, spot_rules, future_rules, spot, future, now, spot_fee, fu
     worst_net = (sell_cap * (1 - future_fee) / (buy_cap * (1 + spot_fee)) - 1) * 10000
     if worst_net < min_edge:
         raise GuardError("限价边界扣除双腿手续费后，开差低于确认门槛")
+    exit_preview = None
+    if request.get("residual_policy") == "reduce":
+        if spot_exit_fee is None:
+            raise GuardError("缺少现货卖出手续费，不能核验退出方案")
+        # Check both possible single-leg exits even at the permitted worst entry
+        # prices. A sub-minimum exit is refused before opening, never rounded up.
+        if anchor and request.get("exit_slippage_bps") != anchor.get("exit_slippage_bps"):
+            raise GuardError("退出价差限额与原确认不一致")
+        if anchor and (anchor.get("spot_exit_fee_rate") is None or spot_exit_fee > dec(anchor["spot_exit_fee_rate"]) or future_fee > dec(anchor["futures_fee_rate"])):
+            raise GuardError("减仓手续费高于确认值或缺少依据，请重新核验")
+        exit_preview = {
+            # BNB-paid entry fees can leave the entire gross quantity to sell;
+            # base-paid fees can leave a smaller, sub-minimum sale. Check both.
+            "spot": reduction_plan(request, "spot", spot_rules, spot, now, quantity, buy_cap, require_full=True),
+            "futures": reduction_plan(request, "futures", future_rules, future, now, quantity, sell_cap, require_full=True),
+        }
+        reduction_plan(request, "spot", spot_rules, spot, now, quantity*(1-spot_fee), buy_cap, require_full=True)
     return dict(symbol=symbol, display_symbol=request["symbol"], base=spot_rules.base, time_in_force="FOK",
                 quantity=text(quantity), common_step=text(step), buy_cap=text(buy_cap), sell_cap=text(sell_cap),
                 spot_vwap=text(buy_vwap), futures_vwap=text(sell_vwap), spot_levels=buy_levels, futures_levels=sell_levels,
                 spot_quote=text(quantity * buy_vwap), futures_quote=text(quantity * sell_vwap),
                 worst_net_bps=text(worst_net), spot_fee_rate=text(spot_fee), futures_fee_rate=text(future_fee),
+                spot_exit_fee_rate=text(spot_exit_fee) if spot_exit_fee is not None else None,
                 max_single_leg_quote=text(quantity * clip_price), depth_participation="0.10",
                 spot_update_id=spot.update_id, futures_update_id=future.update_id,
                 book_skew_ms=round(abs(spot.received-future.received)*1000, 3),
-                max_dispatch_skew_ms=50, max_book_age_ms=1000, atomic=False)
+                max_dispatch_skew_ms=50, max_book_age_ms=1000, atomic=False,
+                exit_slippage_bps=request.get("exit_slippage_bps") if exit_preview else None,
+                exit_preview=exit_preview,
+                exit_fee_bps={"spot": text(spot_exit_fee*10000) if spot_exit_fee is not None else None, "futures": text(future_fee*10000)})

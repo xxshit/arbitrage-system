@@ -37,7 +37,8 @@ window.BinanceHedge=(()=>{
       <p>确认单批 ${esc(p.quantity)} ${esc(p.base)} · 现货上限 ${esc(p.buy_cap)} / 开空下限 ${esc(p.sell_cap)}</p>
       ${r.net_spot_qty!==undefined?`<p>实际现货净额 ${esc(r.net_spot_qty)} / 空单 ${esc(r.short_qty)} · 未配对 ${esc(r.residual_qty)} ${esc(p.base)}</p>`:''}
       <p>${esc(r.reason||'每次确认仅执行显示的一批，不自动继续余量。')}</p>
-      ${r.dispatch_skew_ms!==undefined?`<small>本机发送时差 ${esc(r.dispatch_skew_ms)}ms · 交易所成交时间差 ${esc(r.exchange_fill_skew_ms)}ms</small>`:''}
+      ${r.dispatch_skew_ms!==undefined?`<small>本机写入开始时差 ${esc(r.dispatch_skew_ms)}ms · 两请求写完跨度 ${esc(r.request_write_span_ms)}ms · 交易所成交时间差 ${esc(r.exchange_fill_skew_ms)}ms</small>`:''}
+      ${Object.keys(r.reconciliation_errors||{}).length?`<p>独立核验未完成：${esc(Object.keys(r.reconciliation_errors).map(m=>({spot:'现货',futures:'合约',reduction_fill:'减仓'}[m]||m)).join('、'))}。其余已核实结果保留，禁止按未知数量补单或减仓。</p>`:''}
       ${['UNKNOWN','ATTENTION'].includes(i.state)?`<button type="button" data-binance-reconcile="${esc(i.id)}">按原订单号重新对账</button>`:''}
       ${i.state==='ATTENTION'?`<button type="button" data-binance-ack="${esc(i.id)}">我已核对并接管剩余风险</button>`:''}
       <details><summary>订单与手续费证据</summary><pre>${esc(JSON.stringify({spot:r.spot,futures:r.futures,reduction:r.reduction_fill},null,2))}</pre></details></article>`}).join('')||'<p>尚未提交双腿订单。</p>'}`;
@@ -71,6 +72,7 @@ window.BinanceHedge=(()=>{
       const controls=document.createElement('div');controls.id='binanceTakerControls';controls.className='binance-taker-controls';
       controls.innerHTML=`<h3>双腿吃单 · 限价 FOK</h3><div class="hedge-preview-fields"><label>单批最大金额（USDT）<input id="binanceClip" type="number" min="5" max="1000" value="20"></label>
         <label>扣费后最低开差（bp）<input id="binanceMinEdge" type="number" min="-100" max="1000" value="0"></label>
+        <label>减仓退出价差上限（bp，手续费另计）<input id="binanceExitSlippage" type="number" min="0" max="50" value="20"></label>
         <label>单腿差额处置<select id="binanceResidual"><option value="reduce">限价减掉本次多余敞口</option><option value="hold">暂停并由我处理</option></select></label></div>
         <p>上方为总预算估算，实际只执行下方核验的一批。现货与合约按同一基础币数量并发发送。单腿 FOK 全成或取消，两市场不能原子成交。手续费可能形成差额，未核清时阻止新单。</p>
         <button id="binanceDepthCheck" type="button">核验双腿真实盘口与账户</button><div id="binanceDepthResult" role="status"></div>`;
@@ -83,10 +85,12 @@ window.BinanceHedge=(()=>{
   async function checkDepth(){
     if(!context||placing)return;reset();const serial=generation,button=el('binanceDepthCheck');button.disabled=true;
     const body={symbol:context.group.symbol,quote_amount:el('hedgeQuoteAmount').value,leverage:el('hedgeLeverage').value,
-      slippage_bps:String(Number(el('hedgeMaxSlippage').value)*100),clip_quote:el('binanceClip').value,min_net_bps:el('binanceMinEdge').value,residual_policy:el('binanceResidual').value};
+      slippage_bps:String(Number(el('hedgeMaxSlippage').value)*100),clip_quote:el('binanceClip').value,min_net_bps:el('binanceMinEdge').value,residual_policy:el('binanceResidual').value,
+      exit_slippage_bps:el('binanceExitSlippage').value};
     el('binanceDepthResult').textContent='正在并行读取两边盘口、精度、余额和现有仓位…';
     try{const data=await api('/preview','POST',body);if(serial!==generation)return;preview=data.intent;const p=preview.plan;
       el('binanceDepthResult').innerHTML=`<dl class="binance-depth"><dt>本次单批基础币数量</dt><dd>${esc(p.quantity)} ${esc(p.base)}</dd><dt>现货买入最高价</dt><dd>${esc(p.buy_cap)}</dd><dt>合约开空最低价</dt><dd>${esc(p.sell_cap)}</dd><dt>深度均价（现货 / 合约）</dt><dd>${esc(p.spot_vwap)} / ${esc(p.futures_vwap)}</dd><dt>最坏边界扣费开差</dt><dd>${esc(p.worst_net_bps)} bp</dd><dt>按确认价格估算单腿名义敞口</dt><dd>${esc(p.max_single_leg_quote)} USDT</dd><dt>限价内深度使用上限</dt><dd>10%</dd><dt>确认时效</dt><dd>15 秒；发单前重新核验</dd></dl><p>不能保证同一毫秒成交；成交不配对或时间超限会暂停新单。${data.execution_enabled?'请确认下面这一批。':'真实执行器尚未启用，本次仅完成实盘口核验。'}</p>`;
+      if(p.exit_preview)el('binanceDepthResult').innerHTML+=`<p>仅当一腿已确认多余时，最多尝试一次限价减仓：相对该腿实际成交均价，退出价差最多 ${esc(p.exit_slippage_bps)} bp；减仓手续费另计，现货约 ${esc(p.exit_fee_bps.spot)} bp / 合约约 ${esc(p.exit_fee_bps.futures)} bp。反向盘口变化可能导致零成交或剩余差额，这不是最大亏损保证。</p>`;
       const submit=el('hedgeSubmitButton');submit.disabled=!data.execution_enabled;submit.textContent='确认这一批双腿 FOK';
       submit.onclick=confirmOrder;
       setTimeout(()=>{if(serial===generation){preview=null;submit.disabled=true;submit.textContent='确认已过期，请重新核验'}},Math.max(0,preview.expires_at*1000-Date.now()));
@@ -95,7 +99,7 @@ window.BinanceHedge=(()=>{
   async function confirmOrder(){
     if(!preview||placing||Date.now()>=preview.expires_at*1000)return;
     const item=preview,p=item.plan;
-    if(!confirm(`确认真实下单这一批：${p.quantity} ${p.base}\n现货买入上限 ${p.buy_cap}；合约开空下限 ${p.sell_cap}\n一腿失败时按确认价格估算名义敞口约 ${p.max_single_leg_quote} USDT。两市场不能原子成交。\n差额处置：${el('binanceResidual').selectedOptions[0].textContent}\n确认后重复点击不会补发，剩余预算不会自动继续。`))return;
+    if(!confirm(`确认真实下单这一批：${p.quantity} ${p.base}\n现货买入上限 ${p.buy_cap}；合约开空下限 ${p.sell_cap}\n一腿失败时按确认价格估算名义敞口约 ${p.max_single_leg_quote} USDT。两市场不能原子成交。\n差额处置：${el('binanceResidual').selectedOptions[0].textContent}${p.exit_preview?`；退出价差最多 ${p.exit_slippage_bps} bp，减仓手续费另计（现货约 ${p.exit_fee_bps.spot} bp / 合约约 ${p.exit_fee_bps.futures} bp），不能保证退出` : ''}\n确认后重复点击不会补发，剩余预算不会自动继续。`))return;
     placing=true;el('hedgeSubmitButton').disabled=true;el('binanceDepthCheck').disabled=true;
     try{const data=await api(`/intents/${item.id}/confirm`,'POST',{confirm:'确认双腿限价FOK和单腿风险',intent_id:item.id});el('binanceDepthResult').textContent=`${stateNames[data.intent.state]||data.intent.state}。请在“我的仓位”查看双腿成交与差额。`;preview=null;await load(true)}
     catch(error){el('binanceDepthResult').textContent=error.message+' 请到“我的仓位”核对原意图，勿重新建单。';preview=null}

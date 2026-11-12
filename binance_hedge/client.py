@@ -193,9 +193,13 @@ class BinanceClient:
                         self.rate_pause(delay)
                 if response.status != 200:
                     code = payload.get("code", response.status) if isinstance(payload, dict) else response.status
-                    # Only explicit validation / insufficient-balance rejections
-                    # prove absence. Duplicate ID and transport errors do not.
-                    known_reject = response.status == 400 and code in {-1013, -1100, -1102, -1111, -1116, -1121, -2019, -2027, -4164}
+                    # -5021 proves zero fill only for a Futures LIMIT FOK
+                    # submission. Do not apply it to Spot, IOC or a 503 reply.
+                    fok_reject = (is_order and market == "futures" and type(code) is int and code == -5021
+                                  and values.get("type") == "LIMIT" and values.get("timeInForce") == "FOK")
+                    # Duplicate IDs, missing orders and transport errors do not
+                    # prove absence; recovery must keep querying the same ID.
+                    known_reject = response.status == 400 and (fok_reject or code in {-1013, -1100, -1102, -1111, -1116, -1121, -2019, -2027, -4164})
                     raise ExchangeError(code, uncertain=is_order and not known_reject)
                 return payload
             except ExchangeError:

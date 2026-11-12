@@ -250,7 +250,8 @@ class Executor:
             entry = result[market]
             average = dec(entry["quote"])/dec(entry["executed_qty"])
             depth = self.client.depth(market, plan["symbol"])
-            proposal = reduction_plan(request, market, rule, depth, time.monotonic(), gap, average)
+            proposal = reduction_plan(request, market, rule, depth, time.monotonic(), gap, average,
+                                      position_side=plan["position_side"])
         except GuardError as exc:
             result["reason"] = str(exc)
             result["reduction_blocked_reason"] = str(exc)
@@ -263,7 +264,7 @@ class Executor:
         params = dict(symbol=plan["symbol"], type="LIMIT", timeInForce="IOC", quantity=proposal["quantity"], price=proposal["price"],
                       side="SELL" if market == "spot" else "BUY", newClientOrderId="ah"+intent["id"]+"r",
                       **({"newOrderRespType": "FULL"} if market == "spot" else {"newOrderRespType": "RESULT", "positionSide": plan["position_side"]}))
-        if market == "futures" and plan["position_side"] == "BOTH":
+        if proposal["reduce_only"]:
             params["reduceOnly"] = "true"
         result["reduction"] = {"market": market, "params": params, "depth_check": proposal}
         self.store.state(intent["id"], "REDUCING", result)

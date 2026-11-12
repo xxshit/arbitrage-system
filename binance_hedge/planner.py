@@ -61,6 +61,7 @@ class Rules:
     max_price: Decimal
     min_notional: Decimal
     max_notional: Decimal
+    is_futures: bool = False
 
     @classmethod
     def parse(cls, row, futures=False):
@@ -81,19 +82,21 @@ class Rules:
                           dec(filters.get("NOTIONAL", {}).get("minNotional", "0")))
             result = cls(row["symbol"], row["baseAsset"], dec(price["tickSize"]), dec(lot["stepSize"]),
                          dec(lot["minQty"]), dec(lot["maxQty"]), dec(price["minPrice"]), dec(price["maxPrice"]),
-                         minimum, dec(filters.get("NOTIONAL", {}).get("maxNotional", "0")))
+                         minimum, dec(filters.get("NOTIONAL", {}).get("maxNotional", "0")), is_futures=futures)
         except KeyError:
             raise GuardError("交易所过滤规则不完整") from None
         if min(result.tick, result.step, result.min_qty, result.max_qty) <= 0:
             raise GuardError("交易所精度规则无效")
         return result
 
-    def check(self, quantity, price):
+    def check(self, quantity, price, *, reduce_only=False):
+        if reduce_only and not self.is_futures:
+            raise GuardError("现货不支持合约 reduce-only 金额例外")
         if quantity < self.min_qty or quantity > self.max_qty or quantity % self.step:
             raise GuardError("数量不符合交易所步长或范围")
         if price <= 0 or price % self.tick or (self.min_price and price < self.min_price) or (self.max_price and price > self.max_price):
             raise GuardError("价格不符合交易所步长或范围")
-        if quantity * price < self.min_notional or (self.max_notional and quantity * price > self.max_notional):
+        if (not reduce_only and quantity * price < self.min_notional) or (self.max_notional and quantity * price > self.max_notional):
             raise GuardError("单批金额不符合交易所最小 / 最大名义金额")
 
 
@@ -148,13 +151,21 @@ def validate_books(spot, future, now):
         raise GuardError("双腿盘口采集时差过大")
 
 
-def reduction_plan(request, market, rule, book, now, gap, entry_price, *, require_full=False):
+def reduction_plan(request, market, rule, book, now, gap, entry_price, *, require_full=False, position_side=None):
     """Price only against fresh *exit* liquidity, bounded by the fill price.
 
     An exit price budget is separate from the opening slippage and must have
     appeared in the user's confirmation. Fees are disclosed separately. IOC
     still may fill partly or not at all after this snapshot.
     """
+    if market not in ("spot", "futures") or rule.is_futures != (market == "futures"):
+        raise GuardError("减仓市场与交易所过滤规则不一致")
+    if market == "futures" and position_side not in (None, "BOTH", "SHORT"):
+        raise GuardError("合约减仓持仓方向无效")
+    # Only a confirmed one-way reduceOnly order has the documented minimum-
+    # notional exception. Hedge mode forbids that wire parameter; previews
+    # without a confirmed mode conservatively retain the ordinary minimum.
+    reduce_only = market == "futures" and position_side == "BOTH"
     if "exit_slippage_bps" not in request:
         raise GuardError("缺少已确认的退出价差限额，请重新核验；不会沿用开仓滑点放宽减仓")
     slip = dec(request["exit_slippage_bps"])
@@ -180,11 +191,11 @@ def reduction_plan(request, market, rule, book, now, gap, entry_price, *, requir
             break
     if price is None or available == 0 or (require_full and remaining > 0):
         raise GuardError("退出价差限额内的反向深度不足，暂停发送")
-    rule.check(quantity, price)
+    rule.check(quantity, price, reduce_only=reduce_only)
     return dict(quantity=text(quantity), price=text(price), price_boundary=text(boundary),
                 visible_quantity=text(available), expected_residual=text(abs(gap)-quantity),
                 depth_update_id=book.update_id, book_started=book.started,
-                reference_fill_price=text(entry_price), exit_slippage_bps=text(slip))
+                reference_fill_price=text(entry_price), exit_slippage_bps=text(slip), reduce_only=reduce_only)
 
 
 def plan_clip(request, spot_rules, future_rules, spot, future, now, spot_fee, future_fee, anchor=None, *, spot_exit_fee=None):

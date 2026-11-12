@@ -126,6 +126,20 @@ class Store:
             if changed.rowcount != 1:
                 raise GuardError("账户请求正在处理或过于频繁，请稍后再试")
 
+    def latest_preview(self):
+        with self.engine.connect() as con:
+            row = con.execute(select(intents).join(accounts, accounts.c.user_id == intents.c.user_id).where(
+                intents.c.state == "PREVIEW", intents.c.expires_at > time.time(), accounts.c.active_intent.is_(None),
+                accounts.c.version == intents.c.account_version).order_by(intents.c.created_at.desc()).limit(1)).mappings().first()
+        return self.unpack(row) if row else None
+
+    def prepared(self, ident, boot, *, ready, reason=""):
+        # Do not overwrite a confirmation arriving while warm-up completes.
+        result = dict(prepared_boot=boot, prepared_at=time.time(), prepared=ready, reason=reason)
+        with self.engine.begin() as con:
+            con.execute(update(intents).where(intents.c.id == ident, intents.c.state == "PREVIEW").values(
+                result_json=dump(result), updated_at=time.time()))
+
     @staticmethod
     def unpack(row):
         if not row:
@@ -158,8 +172,15 @@ class Store:
                 raise GuardError("账户已有未核清订单或密钥已变更")
             if time.time() > intent["expires_at"]:
                 raise GuardError("确认已超过 15 秒，请重新读取盘口")
+            prepared = json.loads(intent["result_json"])
+            worker = con.execute(select(workers).where(workers.c.id == 1)).mappings().first()
+            if (prepared.get("prepared") is not True or not worker or prepared.get("prepared_boot") != worker["boot"]
+                or not 0 <= time.time()-prepared.get("prepared_at", 0) <= 10
+                or not 0 <= time.time()-worker["seen_at"] < 15):
+                raise GuardError("盘口和成交订阅尚未预热完成或已过期，请重新核验")
+            prepared["confirmed_at"] = time.time()
             con.execute(update(accounts).where(accounts.c.user_id == user_id).values(active_intent=ident))
-            con.execute(update(intents).where(intents.c.id == ident).values(state="QUEUED", updated_at=time.time()))
+            con.execute(update(intents).where(intents.c.id == ident).values(state="QUEUED", result_json=dump(prepared), updated_at=time.time()))
 
     def request_reconcile(self, user_id, ident):
         with self.engine.begin() as con:

@@ -91,13 +91,28 @@ window.BinanceHedge=(()=>{
     try{const data=await api('/preview','POST',body);if(serial!==generation)return;preview=data.intent;const p=preview.plan;
       el('binanceDepthResult').innerHTML=`<dl class="binance-depth"><dt>本次单批基础币数量</dt><dd>${esc(p.quantity)} ${esc(p.base)}</dd><dt>现货买入最高价</dt><dd>${esc(p.buy_cap)}</dd><dt>合约开空最低价</dt><dd>${esc(p.sell_cap)}</dd><dt>深度均价（现货 / 合约）</dt><dd>${esc(p.spot_vwap)} / ${esc(p.futures_vwap)}</dd><dt>最坏边界扣费开差</dt><dd>${esc(p.worst_net_bps)} bp</dd><dt>按确认价格估算单腿名义敞口</dt><dd>${esc(p.max_single_leg_quote)} USDT</dd><dt>限价内深度使用上限</dt><dd>10%</dd><dt>确认时效</dt><dd>15 秒；发单前重新核验</dd></dl><p>不能保证同一毫秒成交；成交不配对或时间超限会暂停新单。${data.execution_enabled?'请确认下面这一批。':'真实执行器尚未启用，本次仅完成实盘口核验。'}</p>`;
       if(p.exit_preview)el('binanceDepthResult').innerHTML+=`<p>仅当一腿已确认多余时，最多尝试一次限价减仓：相对该腿实际成交均价，退出价差最多 ${esc(p.exit_slippage_bps)} bp；减仓手续费另计，现货约 ${esc(p.exit_fee_bps.spot)} bp / 合约约 ${esc(p.exit_fee_bps.futures)} bp。反向盘口变化可能导致零成交或剩余差额，这不是最大亏损保证。</p>`;
-      const submit=el('hedgeSubmitButton');submit.disabled=!data.execution_enabled;submit.textContent='确认这一批双腿 FOK';
+      const submit=el('hedgeSubmitButton');submit.disabled=true;submit.textContent=data.execution_enabled?'等待持续盘口与成交订阅就绪':'真实执行尚未开启';
       submit.onclick=confirmOrder;
+      if(data.execution_enabled)await checkPrepared(serial, data);
       setTimeout(()=>{if(serial===generation){preview=null;submit.disabled=true;submit.textContent='确认已过期，请重新核验'}},Math.max(0,preview.expires_at*1000-Date.now()));
     }catch(error){if(serial===generation)el('binanceDepthResult').textContent=error.message}finally{button.disabled=false}
   }
+  async function checkPrepared(serial, data){
+    if(serial!==generation||!preview||placing)return;
+    const item=data.intent,submit=el('hedgeSubmitButton');
+    if(item.id!==preview.id||item.state&&item.state!=='PREVIEW')return;
+    preview=item;
+    const until=Math.min(item.expires_at*1000,(item.result?.prepared_at||0)*1000+10000);
+    const ready=data.execution_enabled&&item.result?.prepared===true&&Date.now()<until;
+    submit.disabled=!ready;
+    submit.textContent=ready?'确认这一批双腿 FOK':(item.result?.reason||'等待持续盘口与成交订阅就绪');
+    if(ready)setTimeout(()=>{if(serial===generation){submit.disabled=true;submit.textContent='预热已过期，请重新核验'}},Math.max(0,until-Date.now()));
+    else if(data.execution_enabled&&Date.now()<item.expires_at*1000&&!item.result?.reason){
+      setTimeout(async()=>{if(serial!==generation||!preview||placing)return;try{await checkPrepared(serial,await api(`/intents/${item.id}`))}catch(e){if(serial===generation){submit.disabled=true;submit.textContent='订阅状态未确认，请重新核验'}}},500);
+    }
+  }
   async function confirmOrder(){
-    if(!preview||placing||Date.now()>=preview.expires_at*1000)return;
+    if(!preview||placing||preview.result?.prepared!==true||Date.now()>=(preview.result.prepared_at+10)*1000||Date.now()>=preview.expires_at*1000)return;
     const item=preview,p=item.plan;
     if(!confirm(`确认真实下单这一批：${p.quantity} ${p.base}\n现货买入上限 ${p.buy_cap}；合约开空下限 ${p.sell_cap}\n一腿失败时按确认价格估算名义敞口约 ${p.max_single_leg_quote} USDT。两市场不能原子成交。\n差额处置：${el('binanceResidual').selectedOptions[0].textContent}${p.exit_preview?`；退出价差最多 ${p.exit_slippage_bps} bp，减仓手续费另计（现货约 ${p.exit_fee_bps.spot} bp / 合约约 ${p.exit_fee_bps.futures} bp），不能保证退出` : ''}\n确认后重复点击不会补发，剩余预算不会自动继续。`))return;
     placing=true;el('hedgeSubmitButton').disabled=true;el('binanceDepthCheck').disabled=true;

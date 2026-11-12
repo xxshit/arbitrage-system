@@ -16,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from .client import BinanceClient
 from .planner import GuardError, dec
 from .store import Store, Vault
+from .wakeup import notify
 
 
 def configured_vault():
@@ -30,7 +31,7 @@ def configured_vault():
 def public_intent(item):
     # No UID, key ciphertext or account version is exposed to the browser.
     plan = {k: v for k, v in item["plan"].items() if k != "account_uid"}
-    result = dict(item["result"])
+    result = {k: v for k, v in item["result"].items() if k != "prepared_boot"}
     if "plan" in result:
         result["plan"] = {k: v for k, v in result["plan"].items() if k != "account_uid"}
     return dict(id=item["id"], state=item["state"], plan=plan, result=result,
@@ -167,6 +168,7 @@ def register(app, db, current_user, *, client_factory=BinanceClient, vault_facto
                 raise GuardError("上一组订单尚未核清，请先处理")
             plan, _, _ = client.prepare(body)
             item = store().preview(user_id, row["version"], body, plan)
+        notify()
         return jsonify(intent=public_intent(item), execution_enabled=execution_ready())
 
     @bp.post("/intents/<ident>/confirm")
@@ -178,12 +180,13 @@ def register(app, db, current_user, *, client_factory=BinanceClient, vault_facto
         if body.get("confirm") != "确认双腿限价FOK和单腿风险" or body.get("intent_id") != ident:
             raise GuardError("请核对实际数量、限价、单批风险和处置规则后确认")
         store().enqueue(user_id, ident)
+        notify()
         return jsonify(intent=public_intent(store().get(user_id, ident))), 202
 
     @bp.get("/intents/<ident>")
     @protect
     def intent(user_id, ident):
-        return jsonify(intent=public_intent(store().get(user_id, ident)))
+        return jsonify(intent=public_intent(store().get(user_id, ident)), execution_enabled=execution_ready())
 
     @bp.post("/intents/<ident>/reconcile")
     @protect
@@ -191,6 +194,7 @@ def register(app, db, current_user, *, client_factory=BinanceClient, vault_facto
         if not store().ready():
             raise GuardError("独立核验器未就绪，保留原订单等待恢复")
         store().request_reconcile(user_id, ident)
+        notify()
         return jsonify(intent=public_intent(store().get(user_id, ident))), 202
 
     @bp.post("/intents/<ident>/acknowledge")

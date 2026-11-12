@@ -21,7 +21,7 @@ function fixture(fetcher){
   api.builder(opportunity);nodes.get('binanceClip').value='20';nodes.get('binanceMinEdge').value='0';nodes.get('binanceExitSlippage').value='20';nodes.get('binanceResidual').value='hold';
   return {nodes,api,opportunity};
 }
-const response=enabled=>({ok:true,json:async()=>({execution_enabled:enabled,intent:{id:'synthetic',expires_at:Date.now()/1000+15,plan:{quantity:'.001',base:'BTC',buy_cap:'80000',sell_cap:'80100',spot_vwap:'80000',futures_vwap:'80100',worst_net_bps:'1',max_single_leg_quote:'80.1'}}})});
+const response=enabled=>({ok:true,json:async()=>({execution_enabled:enabled,intent:{id:'synthetic',result:{prepared:true,prepared_at:Date.now()/1000},expires_at:Date.now()/1000+15,plan:{quantity:'.001',base:'BTC',buy_cap:'80000',sell_cap:'80100',spot_vwap:'80000',futures_vwap:'80100',worst_net_bps:'1',max_single_leg_quote:'80.1'}}})});
 
 test('account and fill rendering escapes upstream strings',()=>{
   const {api}=fixture(()=>{throw Error('unexpected network')});
@@ -33,6 +33,13 @@ test('account and fill rendering escapes upstream strings',()=>{
 test('disabled execution cannot enable confirmation after a successful preview',async()=>{
   const {nodes}=fixture(async()=>response(false));await nodes.get('binanceDepthCheck').events.click();
   assert.equal(nodes.get('hedgeSubmitButton').disabled,true);
+});
+test('enabled worker still requires fresh stream preparation for this exact preview',async()=>{
+  for(const result of [{},{prepared:false,reason:'订阅失败'},{prepared:true,prepared_at:Date.now()/1000-11}]){
+    const {nodes}=fixture(async()=>{const data=await response(true).json();data.intent.result=result;return {ok:true,json:async()=>data}});
+    await nodes.get('binanceDepthCheck').events.click();
+    assert.equal(nodes.get('hedgeSubmitButton').disabled,true);
+  }
 });
 test('changing inputs invalidates a pending preview response',async()=>{
   let resolve;const pending=new Promise(r=>resolve=r);const {nodes}=fixture(()=>pending);

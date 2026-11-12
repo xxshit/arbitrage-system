@@ -137,7 +137,9 @@ class StoreExecutionTests(unittest.TestCase):
     def tearDown(self):self.engine.dispose();self.tmp.cleanup()
     def intent(self,policy="hold"):
         req=request_body();req["residual_policy"]=policy
-        item=self.store.preview(1,self.store.account(1)["version"],req,make_plan(req));self.store.enqueue(1,item["id"])
+        item=self.store.preview(1,self.store.account(1)["version"],req,make_plan(req))
+        self.store.beat('synthetic');self.store.prepared(item['id'],'synthetic',ready=True)
+        self.store.enqueue(1,item["id"])
         return self.store.claim()
     def execute(self,client,policy="hold"):
         item=self.intent(policy);Executor(self.store,client).execute(item,"12345")

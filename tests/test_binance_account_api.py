@@ -72,6 +72,7 @@ class AccountApiTests(unittest.TestCase):
         self.assertEqual(r.status_code,409);self.assertEqual(self.store.get(1,ident)['state'],'PREVIEW')
     def test_explicit_confirmation_and_healthy_worker_required(self):
         self.connect();item=self.preview().json['intent'];self.store.beat('fixture')
+        self.store.prepared(item['id'],'fixture',ready=True)
         with patch.dict(os.environ,{'BINANCE_EXECUTION_ENABLED':'1'}):
             path=f"/api/binance/intents/{item['id']}/confirm"
             self.assertEqual(self.client.post(path,json={},headers=self.headers).status_code,409)
@@ -164,8 +165,11 @@ class WireTests(unittest.TestCase):
     def setUp(self):
         self.requests=[];self.responses=[Response({'ok':True})]
         outer=self
+        class FakeSocket:
+            def settimeout(self,timeout):pass
+            def shutdown(self,how):pass
         class Connection:
-            def __init__(self,*a,**kw):self.host=a[0];self.sock=object()
+            def __init__(self,*a,**kw):self.host=a[0];self.sock=FakeSocket()
             def request(self,method,path,body=None,headers=None):outer.requests.append((self.host,method,path,body,headers))
             def stage_order(self,path,body,headers):self.staged=(self.host,'POST',path,body,headers);return b'synthetic'
             def write_order(self,data,gate,timing):

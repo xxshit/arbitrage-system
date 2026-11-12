@@ -10,8 +10,12 @@ import time
 
 from .client import ExchangeError, OrderGate
 from .planner import GuardError, dec, text, plan_clip, reduction_plan
+from .budget import BudgetExpired, budget, remaining, submit
 
 TERMINAL = {"FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}
+SEND_BUDGET_SECONDS = 2
+RECONCILE_BUDGET_SECONDS = 8
+RECOVERY_BUDGET_SECONDS = 5
 
 
 def order_params(plan, market, ident):
@@ -37,14 +41,28 @@ def sanitized_order(raw, params):
 def final_fill(client, market, params, saved=None):
     if saved and saved.get("explicit_rejection"):
         return saved
+    streams = getattr(client, "streams", None)
+    evidence = streams.evidence(market, params) if streams else None
+    if evidence:
+        result = verify_fills(market, params, *evidence)
+        result["evidence_source"] = "user_stream"
+        return result
     raw = client.query(market, params["symbol"], params["newClientOrderId"])
+    fills = client.fills(market, params["symbol"], str(raw["orderId"])) if dec(raw["executedQty"]) else []
+    result = verify_fills(market, params, raw, fills)
+    result["evidence_source"] = "rest"
+    return result
+
+
+def verify_fills(market, params, raw, fills):
     result = sanitized_order(raw, params)
     if result["status"] not in TERMINAL:
         raise GuardError("FOK 订单尚未确认终态，暂停后续操作")
     executed = dec(result["executed_qty"])
+    if len(fills) > 1000 or (not executed and fills):
+        raise GuardError("成交明细与终态数量不一致或超过容量")
     fees, quantity, quote, seen, fill_times = {}, Decimal(0), Decimal(0), set(), []
     if executed:
-        fills = client.fills(market, params["symbol"], result["order_id"])
         for fill in fills:
             if str(fill.get("orderId")) != result["order_id"] or fill.get("symbol") != params["symbol"] or fill["id"] in seen:
                 raise GuardError("成交明细身份重复或不匹配")
@@ -99,21 +117,57 @@ class Executor:
                 return {"status": "REJECTED", "executed_qty": "0", "fees": {}, "explicit_rejection": True,
                         "code": exc.code, "first_fill_time_ms": None, "last_fill_time_ms": None}
             return {"status": "UNKNOWN", "code": exc.code}
+        except BudgetExpired:
+            gate.abort()
+            if "write_started_monotonic" not in timing:
+                return {"status": "REJECTED", "executed_qty": "0", "fees": {}, "explicit_rejection": True,
+                        "code": "DEADLINE", "first_fill_time_ms": None, "last_fill_time_ms": None}
+            return {"status": "UNKNOWN", "code": "DEADLINE"}
         except Exception:
             # Includes validation of a response after an actual write.
             gate.abort()
             return {"status": "UNKNOWN", "code": "UNCONFIRMED"}
 
-    def resolve(self, market, params, saved):
+    def resolve(self, market, params, saved, end=None):
         try:
-            if not (saved and saved.get("explicit_rejection")):
-                self.client.ensure_clock(market)
-            return final_fill(self.client, market, params, saved), None
+            with budget(end or time.monotonic()+5):
+                if not (saved and saved.get("explicit_rejection")):
+                    self.client.ensure_clock(market)
+                try:
+                    return final_fill(self.client, market, params, saved), None
+                except Exception:
+                    # An event may arrive while REST is unavailable. Its full
+                    # per-trade evidence must pass exactly the same validator.
+                    streams = getattr(self.client, "streams", None)
+                    evidence = streams.evidence(market, params) if streams else None
+                    if not evidence:
+                        raise
+                    remaining()
+                    fill = verify_fills(market, params, *evidence)
+                    fill["evidence_source"] = "user_stream"
+                    return fill, None
         except Exception as exc:
             reason = str(exc) if isinstance(exc, GuardError) else "该腿成交核验未完成，保留原订单号"
             return saved or {"status": "UNKNOWN"}, reason
 
     def execute(self, intent, account_uid):
+        confirmed = intent.get("result", {}).get("confirmed_at", time.time())
+        ttl = min(SEND_BUDGET_SECONDS, intent["expires_at"]-time.time(), confirmed+SEND_BUDGET_SECONDS-time.time())
+        if ttl <= 0:
+            self.store.state(intent["id"], "ABORTED", {"reason": "确认排队或准备超过两秒；未发送订单"}, release=True)
+            return
+        send_end = time.monotonic()+ttl
+        with budget(send_end):
+            prepared = self.prepare_execution(intent, account_uid)
+        if prepared is None:
+            return
+        fresh, sr, fr, params, result, sb, fb = prepared
+        end = time.monotonic()+RECONCILE_BUDGET_SECONDS
+        result["reconcile_deadline_epoch"] = time.time()+RECONCILE_BUDGET_SECONDS
+        result["reconcile_budget_seconds"] = RECONCILE_BUDGET_SECONDS
+        self.dispatch(intent, fresh, sr, fr, params, result, sb, fb, send_end, end)
+
+    def prepare_execution(self, intent, account_uid):
         ident, request, anchor = intent["id"], intent["request"], intent["plan"]
         result = {}
         try:
@@ -134,36 +188,61 @@ class Executor:
                               spot_exit_fee=dec(fresh["spot_exit_fee_rate"]) if fresh.get("spot_exit_fee_rate") is not None else None)
             if check["quantity"] != fresh["quantity"] or time.time() > intent["expires_at"]:
                 raise GuardError("落单前深度变化或确认过期，未发送订单")
+            remaining()
+            streams = getattr(self.client, "streams", None)
+            if streams:
+                for m, p in params.items():
+                    streams.arm(m, p)
         except GuardError as exc:
             result["reason"] = str(exc)
             self.store.state(ident, "ABORTED", result, release=True)
             return
+        return fresh, sr, fr, params, result, sb, fb
 
-        gate = OrderGate(min(sb.started+1, fb.started+1, time.monotonic()+intent["expires_at"]-time.time()))
+    def dispatch(self, intent, fresh, sr, fr, params, result, sb, fb, send_end, end):
+        ident = intent["id"]
+        streams = getattr(self.client, "streams", None)
+        def live_check():
+            for market in ("spot", "futures"):
+                streams.book(market, fresh["symbol"])
+        max_age = .4 if streams else 1
+        gate = OrderGate(min(send_end, sb.started+max_age, fb.started+max_age,
+                            time.monotonic()+intent["expires_at"]-time.time()), check=live_check if streams else None)
         timings = {m: {} for m in params}
         # A completed submission starts its own reconciliation immediately, even
         # while the other submission is still waiting for an HTTP response.
         # Only this coordinator writes the shared result/store, never a network
         # thread. Every per-leg result is durable before the next one is awaited.
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="binance-execution") as pool:
-            pending = {pool.submit(self.place, m, p, gate, timings[m]): ("submit", m) for m, p in params.items()}
+        pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="binance-execution")
+        pending = {}
+        try:
+            with budget(end):
+                pending = {submit(pool, self.place, m, p, gate, timings[m]): ("submit", m) for m, p in params.items()}
             while pending:
-                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                done, _ = wait(pending, timeout=max(0, end-time.monotonic()), return_when=FIRST_COMPLETED)
+                if not done:
+                    gate.abort()
+                    for _, market in pending.values():
+                        result.setdefault(market, {"status": "UNKNOWN"})
+                        result["reconciliation_errors"][market] = "核验超过总期限；禁止重发"
+                    break
                 for job in done:
                     phase, market = pending.pop(job)
                     if phase == "submit":
                         result[market] = job.result()
                         result["dispatch"][market] = dict(timings[market])
                         self.store.state(ident, "DISPATCHING", result)
-                        pending[pool.submit(self.resolve, market, params[market], result[market])] = ("resolve", market)
+                        pending[pool.submit(self.resolve, market, params[market], result[market], end)] = ("resolve", market)
                     else:
                         fill, error = job.result()
                         result[market] = fill
                         if error:
                             result["reconciliation_errors"][market] = error
                         self.store.state(ident, "RECONCILING", result)
+        finally:
+            pool.shutdown(wait=not pending, cancel_futures=True)
         self.timing(result)
-        self.finish(intent, result, rules=(sr, fr), allow_reduction=True)
+        self.finish(intent, result, rules=(sr, fr), allow_reduction=True, end=end)
 
     @staticmethod
     def timing(result):
@@ -185,10 +264,19 @@ class Executor:
             r = result["reduction"]
             jobs["reduction_fill"] = (r["market"], r["params"])
         result["reconciliation_errors"] = {}
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="binance-reconcile") as pool:
-            pending = {pool.submit(self.resolve, m, p, result.get(key)): key for key, (m, p) in jobs.items()}
+        end = time.monotonic()+RECOVERY_BUDGET_SECONDS
+        result["reconcile_deadline_epoch"] = time.time()+RECOVERY_BUDGET_SECONDS
+        result["reconcile_budget_seconds"] = RECOVERY_BUDGET_SECONDS
+        pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="binance-reconcile")
+        pending = {}
+        try:
+            pending = {pool.submit(self.resolve, m, p, result.get(key), end): key for key, (m, p) in jobs.items()}
             while pending:
-                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                done, _ = wait(pending, timeout=max(0, end-time.monotonic()), return_when=FIRST_COMPLETED)
+                if not done:
+                    for key in pending.values():
+                        result["reconciliation_errors"][key] = "核验超过总期限；禁止重发"
+                    break
                 for job in done:
                     key = pending.pop(job)
                     fill, error = job.result()
@@ -196,10 +284,12 @@ class Executor:
                     if error:
                         result["reconciliation_errors"][key] = error
                     self.store.state(ident, "RECONCILING", result)
+        finally:
+            pool.shutdown(wait=not pending, cancel_futures=True)
         self.timing(result)
-        self.finish(intent, result, rules=rules, allow_reduction=allow_reduction)
+        self.finish(intent, result, rules=rules, allow_reduction=allow_reduction, end=end)
 
-    def finish(self, intent, result, *, rules=None, allow_reduction=False):
+    def finish(self, intent, result, *, rules=None, allow_reduction=False, end=None):
         ident, plan = intent["id"], result.get("plan", intent["plan"])
         try:
             if result.get("reconciliation_errors"):
@@ -222,7 +312,12 @@ class Executor:
                 self.store.state(ident, "ATTENTION", result)
                 return
             if gap and allow_reduction and rules and not result.get("reduction") and intent["request"].get("residual_policy") == "reduce":
-                self.reduce(intent, result, gap, rules)
+                if end is not None and time.monotonic() >= end:
+                    result["reason"] = "已确认差额，但本次处置总期限已过；未发送减仓"
+                    self.store.state(ident, "ATTENTION", result)
+                    return
+                with budget(end or time.monotonic()+5):
+                    self.reduce(intent, result, gap, rules, end=end)
                 return
             if gap:
                 state, release = "ATTENTION", False
@@ -241,7 +336,7 @@ class Executor:
             result["reason"] = str(exc)
             self.store.state(ident, "UNKNOWN", result)
 
-    def reduce(self, intent, result, gap, rules):
+    def reduce(self, intent, result, gap, rules, *, end=None):
         plan, request = result["plan"], intent["request"]
         market, rule = ("spot", rules[0]) if gap > 0 else ("futures", rules[1])
         try:
@@ -266,14 +361,24 @@ class Executor:
                       **({"newOrderRespType": "FULL"} if market == "spot" else {"newOrderRespType": "RESULT", "positionSide": plan["position_side"]}))
         if proposal["reduce_only"]:
             params["reduceOnly"] = "true"
+        streams = getattr(self.client, "streams", None)
+        if streams:
+            try:
+                streams.arm(market, params)
+            except GuardError:
+                result["reason"] = "退出订阅已失效；未发送减仓单，保留已核实差额"
+                self.store.state(intent["id"], "ATTENTION", result)
+                return
         result["reduction"] = {"market": market, "params": params, "depth_check": proposal}
         self.store.state(intent["id"], "REDUCING", result)
         timing = {}
-        saved = self.place(market, params, OrderGate(depth.started+1, parties=1), timing)
+        gate = OrderGate(min(depth.started+(.4 if streams else 1), end or float("inf")), parties=1,
+                         check=(lambda: streams.book(market, plan["symbol"])) if streams else None)
+        saved = self.place(market, params, gate, timing)
         result["reduction_dispatch"] = timing
         result["reduction_fill"] = saved
         self.store.state(intent["id"], "REDUCING", result)
-        fill, error = self.resolve(market, params, saved)
+        fill, error = self.resolve(market, params, saved, end)
         result["reduction_fill"] = fill
         if error:
             result["reconciliation_errors"]["reduction_fill"] = error

@@ -1,0 +1,87 @@
+{
+  "logging_config": [
+    "access_log /var/log/nginx/access.log;",
+    "server_name arbi-k7m4p2.47-238-145-158.sslip.io;",
+    "server_name arbi-k7m4p2.47-238-145-158.sslip.io;",
+    "proxy_pass http://127.0.0.1:15831;",
+    "proxy_pass http://127.0.0.1:15831;",
+    "proxy_pass http://127.0.0.1:15831;",
+    "server_name _;",
+    "server_name disabled.invalid; # managed by Certbot",
+    "server_name disabled.invalid;",
+    "server_name jhgame008.com www.jhgame008.com;",
+    "proxy_pass http://127.0.0.1:2300;",
+    "proxy_pass http://127.0.0.1:2000;",
+    "server_name jhgame589.com www.jhgame589.com;",
+    "proxy_pass http://127.0.0.1:2300;",
+    "proxy_pass http://127.0.0.1:2000;",
+    "server_name jhgame008.com www.jhgame008.com;",
+    "server_name jhgame589.com www.jhgame589.com;",
+    "proxy_pass https://47.242.7.99/upload;",
+    "proxy_pass https://47.242.7.99/;",
+    "proxy_pass http://172.19.193.52:2301;",
+    "proxy_pass http://172.19.193.52:2301;"
+  ],
+  "log_files": [
+    {
+      "name": "access.log.10.gz",
+      "bytes": 3042
+    },
+    {
+      "name": "access.log.9.gz",
+      "bytes": 54848
+    },
+    {
+      "name": "access.log.12.gz",
+      "bytes": 38086
+    },
+    {
+      "name": "access.log.14.gz",
+      "bytes": 119096
+    },
+    {
+      "name": "access.log.11.gz",
+      "bytes": 18445
+    },
+    {
+      "name": "access.log.7.gz",
+      "bytes": 58686
+    },
+    {
+      "name": "access.log.4.gz",
+      "bytes": 248378
+    },
+    {
+      "name": "access.log",
+      "bytes": 17581
+    },
+    {
+      "name": "access.log.3.gz",
+      "bytes": 220024
+    },
+    {
+      "name": "access.log.13.gz",
+      "bytes": 115358
+    },
+    {
+      "name": "access.log.5.gz",
+      "bytes": 279167
+    },
+    {
+      "name": "access.log.1",
+      "bytes": 5075
+    },
+    {
+      "name": "access.log.2.gz",
+      "bytes": 72922
+    },
+    {
+      "name": "access.log.6.gz",
+      "bytes": 173899
+    },
+    {
+      "name": "access.log.8.gz",
+      "bytes": 61631
+    }
+  ]
+}

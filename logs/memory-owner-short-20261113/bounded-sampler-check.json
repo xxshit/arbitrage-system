@@ -1,0 +1,57 @@
+{
+  "status": "pass",
+  "delayed_final_output": {
+    "elapsed_seconds": 0.3804977920081001,
+    "sampler_exit": 0,
+    "abort": null,
+    "pipe_counts": {
+      "stdout_bytes": 97,
+      "stderr_bytes": 14,
+      "errors": 0
+    },
+    "aggregate": {
+      "counts": {
+        "lines": 1,
+        "target_thread_samples": 7,
+        "unknown_frames": 7
+      },
+      "frames": [
+        {
+          "tid": 123,
+          "file": "app.py",
+          "function": "background_spread_history",
+          "line": 15484,
+          "count": 7
+        }
+      ]
+    }
+  },
+  "deadline_before_final_output": {
+    "elapsed_seconds": 0.11112354199576657,
+    "sampler_exit": -15,
+    "abort": "bounded_wall_clock_end",
+    "pipe_counts": {
+      "stdout_bytes": 0,
+      "stderr_bytes": 0,
+      "errors": 0
+    },
+    "aggregate": {
+      "counts": {},
+      "frames": []
+    }
+  },
+  "guard_failure": {
+    "elapsed_seconds": 0.10954679199494421,
+    "sampler_exit": -15,
+    "abort": "identity_resource_or_quote_gate",
+    "pipe_counts": {
+      "stdout_bytes": 0,
+      "stderr_bytes": 0,
+      "errors": 0
+    },
+    "aggregate": {
+      "counts": {},
+      "frames": []
+    }
+  }
+}

@@ -1,0 +1,263 @@
+{
+  "elapsed_seconds": 0.31229391699889675,
+  "python": "3.12.14",
+  "platform": "Darwin",
+  "websockets": "17.1",
+  "local_zlib": "1.2.12",
+  "production_python": "3.12.3",
+  "production_zlib": "1.3",
+  "decoder_source_sha256": "81419dd354a8b9fb3a658cfeb5e7d9d699ed419db0416ec2f318087076347ef4",
+  "parser_source_sha256": "ad1603aee41a71a3aee1fb3f272ccb2f750f57ddf4264cf5de8abd118353fd0e",
+  "cases": [
+    {
+      "kind": "small",
+      "fragmented": false,
+      "no_context_takeover": true,
+      "max_body_bytes": 87,
+      "max_wire_frame_bytes": 70,
+      "fixture_sha256": "0d3e8f5d5ce5c1129ec4b97f9fc67fe99597beb5256e5e88f855b0dda042a7ea",
+      "expected_full_values_sha256": "7c3d7040adf5f6b09fe8afe4eb1ed181d89ec598065b629865352be7b954fb46",
+      "comparisons": [
+        {
+          "messages": 600,
+          "cap_bytes": 4096,
+          "peak_traced_bytes": 49354,
+          "current_traced_bytes": 4742,
+          "max_decoded_dicts_alive_inside_parse": null,
+          "max_decoded_dicts_alive_after_parse": null,
+          "final_state_symbols": 0,
+          "all_bytes_and_public_values_equal": true
+        },
+        {
+          "messages": 600,
+          "cap_bytes": 1048576,
+          "peak_traced_bytes": 74162,
+          "current_traced_bytes": 878,
+          "max_decoded_dicts_alive_inside_parse": null,
+          "max_decoded_dicts_alive_after_parse": null,
+          "final_state_symbols": 0,
+          "all_bytes_and_public_values_equal": true
+        }
+      ],
+      "lifetime": {
+        "messages": 600,
+        "cap_bytes": 1048576,
+        "peak_traced_bytes": null,
+        "current_traced_bytes": null,
+        "max_decoded_dicts_alive_inside_parse": 1,
+        "max_decoded_dicts_alive_after_parse": 0,
+        "final_state_symbols": 0,
+        "all_bytes_and_public_values_equal": true
+      }
+    },
+    {
+      "kind": "small",
+      "fragmented": false,
+      "no_context_takeover": false,
+      "max_body_bytes": 87,
+      "max_wire_frame_bytes": 62,
+      "fixture_sha256": "0d3e8f5d5ce5c1129ec4b97f9fc67fe99597beb5256e5e88f855b0dda042a7ea",
+      "expected_full_values_sha256": "7c3d7040adf5f6b09fe8afe4eb1ed181d89ec598065b629865352be7b954fb46",
+      "comparisons": [
+        {
+          "messages": 600,
+          "cap_bytes": 4096,
+          "peak_traced_bytes": 37985,
+          "current_traced_bytes": 33646,
+          "max_decoded_dicts_alive_inside_parse": null,
+          "max_decoded_dicts_alive_after_parse": null,
+          "final_state_symbols": 0,
+          "all_bytes_and_public_values_equal": true
+        },
+        {
+          "messages": 600,
+          "cap_bytes": 1048576,
+          "peak_traced_bytes": 66657,
+          "current_traced_bytes": 33646,
+          "max_decoded_dicts_alive_inside_parse": null,
+          "max_decoded_dicts_alive_after_parse": null,
+          "final_state_symbols": 0,
+          "all_bytes_and_public_values_equal": true
+        }
+      ],
+      "lifetime": {
+        "messages": 600,
+        "cap_bytes": 1048576,
+        "peak_traced_bytes": null,
+        "current_traced_bytes": null,
+        "max_decoded_dicts_alive_inside_parse": 1,
+        "max_decoded_dicts_alive_after_parse": 0,
+        "final_state_symbols": 0,
+        "all_bytes_and_public_values_equal": true
+      }
+    },
+    {
+      "kind": "small",
+      "fragmented": true,
+      "no_context_takeover": false,
+      "max_body_bytes": 87,
+      "max_wire_frame_bytes": 39,
+      "fixture_sha256": "0d3e8f5d5ce5c1129ec4b97f9fc67fe99597beb5256e5e88f855b0dda042a7ea",
+      "expected_full_values_sha256": "7c3d7040adf5f6b09fe8afe4eb1ed181d89ec598065b629865352be7b954fb46",
+      "comparisons": [
+        {
+          "messages": 600,
+          "cap_bytes": 4096,
+          "peak_traced_bytes": 38037,
+          "current_traced_bytes": 33799,
+          "max_decoded_dicts_alive_inside_parse": null,
+          "max_decoded_dicts_alive_after_parse": null,
+          "final_state_symbols": 0,
+          "all_bytes_and_public_values_equal": true
+        },
+        {
+          "messages": 600,
+          "cap_bytes": 1048576,
+          "peak_traced_bytes": 66752,
+          "current_traced_bytes": 33799,
+          "max_decoded_dicts_alive_inside_parse": null,
+          "max_decoded_dicts_alive_after_parse": null,
+          "final_state_symbols": 0,
+          "all_bytes_and_public_values_equal": true
+        }
+      ],
+      "lifetime": {
+        "messages": 600,
+        "cap_bytes": 1048576,
+        "peak_traced_bytes": null,
+        "current_traced_bytes": null,
+        "max_decoded_dicts_alive_inside_parse": 1,
+        "max_decoded_dicts_alive_after_parse": 0,
+        "final_state_symbols": 0,
+        "all_bytes_and_public_values_equal": true
+      }
+    },
+    {
+      "kind": "bybit_deltas",
+      "fragmented": false,
+      "no_context_takeover": false,
+      "max_body_bytes": 176,
+      "max_wire_frame_bytes": 122,
+      "fixture_sha256": "71f29e61e53a24aabb87852578566242128ea8ef1ece25e5140ec654ce216fc3",
+      "expected_full_values_sha256": "5e5af8bf17f989718a6060b2ec34672219380176bd5fc70910fcbd4e85dc09f4",
+      "comparisons": [
+        {
+          "messages": 600,
+          "cap_bytes": 4096,
+          "peak_traced_bytes": 60218,
+          "current_traced_bytes": 55837,
+          "max_decoded_dicts_alive_inside_parse": null,
+          "max_decoded_dicts_alive_after_parse": null,
+          "final_state_symbols": 32,
+          "all_bytes_and_public_values_equal": true
+        },
+        {
+          "messages": 600,
+          "cap_bytes": 1048576,
+          "peak_traced_bytes": 88890,
+          "current_traced_bytes": 55837,
+          "max_decoded_dicts_alive_inside_parse": null,
+          "max_decoded_dicts_alive_after_parse": null,
+          "final_state_symbols": 32,
+          "all_bytes_and_public_values_equal": true
+        }
+      ],
+      "lifetime": {
+        "messages": 600,
+        "cap_bytes": 1048576,
+        "peak_traced_bytes": null,
+        "current_traced_bytes": null,
+        "max_decoded_dicts_alive_inside_parse": 2,
+        "max_decoded_dicts_alive_after_parse": 0,
+        "final_state_symbols": 32,
+        "all_bytes_and_public_values_equal": true
+      }
+    },
+    {
+      "kind": "large_ignored_fields",
+      "fragmented": false,
+      "no_context_takeover": true,
+      "max_body_bytes": 32899,
+      "max_wire_frame_bytes": 22201,
+      "fixture_sha256": "73770fbeb32c2440e6617e14cdb94d377e5fc1f87bfec32e4fbfdc5dcac01d55",
+      "expected_full_values_sha256": "f36a4c7b9a05e7e556f26a7d6bb7e3c0486dbce7d94fe9d103fa9d7f5e86cce0",
+      "comparisons": [
+        {
+          "messages": 32,
+          "cap_bytes": 65536,
+          "peak_traced_bytes": 172508,
+          "current_traced_bytes": 33662,
+          "max_decoded_dicts_alive_inside_parse": null,
+          "max_decoded_dicts_alive_after_parse": null,
+          "final_state_symbols": 0,
+          "all_bytes_and_public_values_equal": true
+        },
+        {
+          "messages": 32,
+          "cap_bytes": 1048576,
+          "peak_traced_bytes": 205276,
+          "current_traced_bytes": 33662,
+          "max_decoded_dicts_alive_inside_parse": null,
+          "max_decoded_dicts_alive_after_parse": null,
+          "final_state_symbols": 0,
+          "all_bytes_and_public_values_equal": true
+        }
+      ],
+      "lifetime": {
+        "messages": 32,
+        "cap_bytes": 1048576,
+        "peak_traced_bytes": null,
+        "current_traced_bytes": null,
+        "max_decoded_dicts_alive_inside_parse": 3,
+        "max_decoded_dicts_alive_after_parse": 0,
+        "final_state_symbols": 0,
+        "all_bytes_and_public_values_equal": true
+      }
+    },
+    {
+      "kind": "large_ignored_fields",
+      "fragmented": true,
+      "no_context_takeover": false,
+      "max_body_bytes": 32899,
+      "max_wire_frame_bytes": 11162,
+      "fixture_sha256": "73770fbeb32c2440e6617e14cdb94d377e5fc1f87bfec32e4fbfdc5dcac01d55",
+      "expected_full_values_sha256": "f36a4c7b9a05e7e556f26a7d6bb7e3c0486dbce7d94fe9d103fa9d7f5e86cce0",
+      "comparisons": [
+        {
+          "messages": 32,
+          "cap_bytes": 65536,
+          "peak_traced_bytes": 167281,
+          "current_traced_bytes": 99395,
+          "max_decoded_dicts_alive_inside_parse": null,
+          "max_decoded_dicts_alive_after_parse": null,
+          "final_state_symbols": 0,
+          "all_bytes_and_public_values_equal": true
+        },
+        {
+          "messages": 32,
+          "cap_bytes": 1048576,
+          "peak_traced_bytes": 167281,
+          "current_traced_bytes": 99395,
+          "max_decoded_dicts_alive_inside_parse": null,
+          "max_decoded_dicts_alive_after_parse": null,
+          "final_state_symbols": 0,
+          "all_bytes_and_public_values_equal": true
+        }
+      ],
+      "lifetime": {
+        "messages": 32,
+        "cap_bytes": 1048576,
+        "peak_traced_bytes": null,
+        "current_traced_bytes": null,
+        "max_decoded_dicts_alive_inside_parse": 3,
+        "max_decoded_dicts_alive_after_parse": 0,
+        "final_state_symbols": 0,
+        "all_bytes_and_public_values_equal": true
+      }
+    }
+  ],
+  "oversize_rejected": true,
+  "forced_gc_calls": 0,
+  "network_or_database_calls": 0,
+  "boundary": "Local Python allocation/lifetime control only. Exact WS decoder source/version, but different OS/Python patch/zlib; not a Linux RSS or production root-cause verdict."
+}

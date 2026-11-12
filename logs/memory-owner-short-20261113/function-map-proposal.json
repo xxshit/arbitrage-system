@@ -1,0 +1,65 @@
+{
+  "prepared_at_utc": "2026-11-12T17:47:09.049724+00:00",
+  "status": "AUTHORIZATION_CONSUMED_FAILED_NO_FUNCTION_OUTPUT",
+  "purpose": "Map the current high-fault native threads to Python functions before choosing a short causal comparison. This is not retained-allocation tracing.",
+  "duration_seconds": 30,
+  "rate_hz": 5,
+  "nonblocking": true,
+  "all_threads_visited": true,
+  "stored_frames_only_for_threads": [
+    "2383615",
+    "2383614",
+    "2383649",
+    "2383616",
+    "2383656",
+    "2383651",
+    "2383710",
+    "2383666"
+  ],
+  "worker": {
+    "master": 2383599,
+    "worker": 2383603,
+    "invocation": "25e853ed5afe41bbabb2a7a1d6f380a6",
+    "start_ticks": 727482204
+  },
+  "remote_directory_if_approved": "/tmp/arbiscope-owner-map-20261113",
+  "binary": "/tmp/arbiscope-function-sample.c4slh8rc/py-spy",
+  "binary_sha256": "a41205d4925beafd108e1ace85e66c0a1a7adbfcbebcd4441f07848b608886c0",
+  "only_upload": {
+    "frame-owner-once.py": {
+      "bytes": 7492,
+      "sha256": "b130c9ab991c0b47035bd09e933f77849677b83a2c051c43e24e4130d70accb7"
+    },
+    "frame-aggregate.py": {
+      "bytes": 3520,
+      "sha256": "dfa1ec40192312f91c645704db440a5ff7051842a6eab178f68a6ae9b4df639a"
+    },
+    "frame-manifest.json": {
+      "bytes": 45694,
+      "sha256": "c2f9829bc01f71101257baa05bc18b119cf28dd986607550348117631253621d"
+    }
+  },
+  "excludes": [
+    "application source contents",
+    "environment files",
+    "credentials",
+    "business data",
+    "continuation"
+  ],
+  "constraints": [
+    "No locals, parameters, heap contents, native stacks or raw-stack files.",
+    "Only allowlisted function/line/TID counts retained; unknown input discarded.",
+    "No restart, GC, trim, tuning, trade changes, deployment or long test.",
+    "Before and during: identity and quote lag/resource gates; terminate own sampler on degradation.",
+    "One new lock, no automatic retry. Prior Nov5 function sample authorization already consumed."
+  ],
+  "parser_check": {
+    "checks": 8,
+    "status": "pass",
+    "raw_input_saved": false
+  },
+  "execution_started": true,
+  "authorization": "允许这次 30 秒函数采样",
+  "result": "frame-owner.json",
+  "automatic_retry": false
+}

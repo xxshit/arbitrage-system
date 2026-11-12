@@ -1,0 +1,369 @@
+{
+  "reviewed_at_utc": "2026-11-12T17:57:10.968070+00:00",
+  "status": "PRODUCTION_GROWTH_CONFIRMED_BACKGROUND_FOCUS_OWNER_FUNCTION_UNRESOLVED",
+  "production_capture": "2026-11-12T17:30:38.359523+00:00",
+  "worker_identity": {
+    "master": 2383599,
+    "worker": 2383603,
+    "invocation": "25e853ed5afe41bbabb2a7a1d6f380a6",
+    "start_ticks": 727482204
+  },
+  "ten_source_sha_match_pinned_production": true,
+  "quarter_hour_rss": [
+    {
+      "start_utc": "2026-11-12T16:15:00+00:00",
+      "samples": 15,
+      "rss_bytes": {
+        "max": 521347072,
+        "median": 507105280,
+        "min": 485257216
+      },
+      "allocator_used_bytes": {
+        "max": 136953328,
+        "median": 129492800,
+        "min": 128139648
+      },
+      "allocator_free_bytes": {
+        "max": 140430656,
+        "median": 124979632,
+        "min": 105426560
+      }
+    },
+    {
+      "start_utc": "2026-11-12T16:30:00+00:00",
+      "samples": 15,
+      "rss_bytes": {
+        "max": 577507328,
+        "median": 554172416,
+        "min": 525307904
+      },
+      "allocator_used_bytes": {
+        "max": 134470528,
+        "median": 130906224,
+        "min": 129118720
+      },
+      "allocator_free_bytes": {
+        "max": 194613504,
+        "median": 171977088,
+        "min": 142987872
+      }
+    },
+    {
+      "start_utc": "2026-11-12T16:45:00+00:00",
+      "samples": 15,
+      "rss_bytes": {
+        "max": 604475392,
+        "median": 591212544,
+        "min": 578707456
+      },
+      "allocator_used_bytes": {
+        "max": 136462448,
+        "median": 132415248,
+        "min": 130619200
+      },
+      "allocator_free_bytes": {
+        "max": 220474656,
+        "median": 207654720,
+        "min": 196921008
+      }
+    },
+    {
+      "start_utc": "2026-11-12T17:00:00+00:00",
+      "samples": 15,
+      "rss_bytes": {
+        "max": 642826240,
+        "median": 631406592,
+        "min": 598179840
+      },
+      "allocator_used_bytes": {
+        "max": 138904064,
+        "median": 132169648,
+        "min": 131069936
+      },
+      "allocator_free_bytes": {
+        "max": 256215344,
+        "median": 241496208,
+        "min": 211553232
+      }
+    },
+    {
+      "start_utc": "2026-11-12T17:15:00+00:00",
+      "samples": 15,
+      "rss_bytes": {
+        "max": 666517504,
+        "median": 653717504,
+        "min": 636448768
+      },
+      "allocator_used_bytes": {
+        "max": 137518192,
+        "median": 132933024,
+        "min": 132139584
+      },
+      "allocator_free_bytes": {
+        "max": 277314144,
+        "median": 266749024,
+        "min": 244511632
+      }
+    }
+  ],
+  "request_exclusion": {
+    "window_start_utc": "2026-11-12T16:01:27.747782+00:00",
+    "window_end_utc": "2026-11-12T17:35:28.616816+00:00",
+    "http_requests": 98,
+    "api_requests": 6,
+    "api_2xx": 0,
+    "alert_requests": 1,
+    "alerts_2xx": 0,
+    "unparsed_lines": 1,
+    "conclusion": "Repeated successful alert-summary/response-gzip HTTP traffic is not evidenced by the Nginx logs during this growth window. Prioritize always-on background work.",
+    "limits": [
+      "Access records reflect request completion.",
+      "Direct loopback requests and one unparsed record are not covered.",
+      "No raw request path, query, address, user agent or account content retained."
+    ]
+  },
+  "kernel_short_comparison": {
+    "seconds": 60.038,
+    "rss_delta_kib": 1988,
+    "main_heap_rss_delta_kib": 0,
+    "other_anon_rss_delta_kib": 1988,
+    "new_threads": 0,
+    "exited_threads": 0,
+    "minor_faults_total": 1687,
+    "top_thread": {
+      "tid": 2383615,
+      "start_ticks": 727482286,
+      "minor_faults": 1198,
+      "major_faults": 0,
+      "user_ticks": 647,
+      "system_ticks": 31
+    },
+    "limits": [
+      "Page faults are page-touch counters, not retained allocation ownership.",
+      "A stable main heap during one minute does not exclude longer-term main-heap growth.",
+      "Anonymous mapping shapes do not identify Python objects."
+    ]
+  },
+  "function_sample": {
+    "authorization": "允许这次 30 秒函数采样",
+    "consumed": true,
+    "valid": false,
+    "sampler_exit": -15,
+    "wrapper_exit": 0,
+    "elapsed_seconds": 30.319013465195894,
+    "raw_stdout_bytes": 84,
+    "valid_frames": 0,
+    "reason": "The hard deadline terminated py-spy before its buffered end-of-run statistics were emitted. Wrapper exit 0 is not sampler success.",
+    "automatic_retry": false,
+    "v2": "Prepared 20 seconds collection inside a 30-second outer deadline; new explicit approval requested, no execution yet."
+  },
+  "ws_short_control": {
+    "cases": 6,
+    "decode_parse_calls": 7392,
+    "full_bytes_and_values_exact": true,
+    "max_tracked_original_dicts_after_parse": 0,
+    "oversize_rejected": true,
+    "same_production_decoder_source_and_websockets_version": true,
+    "boundary": "Local Python allocation/lifetime control only. Exact WS decoder source/version, but different OS/Python patch/zlib; not a Linux RSS or production root-cause verdict."
+  },
+  "protected": {
+    "market_refresh_rules": [
+      {
+        "enabled": "1",
+        "rule_key": "dual_market_refresh",
+        "value": "5"
+      },
+      {
+        "enabled": "1",
+        "rule_key": "spot_market_refresh",
+        "value": "5"
+      }
+    ],
+    "progress_before": [
+      {
+        "kind": "spot",
+        "latest_at": "2026-11-12 17:30:16"
+      },
+      {
+        "kind": "dual",
+        "latest_at": "2026-11-12 17:30:13"
+      },
+      {
+        "kind": "alarm",
+        "latest_at": "2026-11-12 17:30:18"
+      }
+    ],
+    "progress_after": [
+      {
+        "kind": "spot",
+        "latest_at": "2026-11-12 17:30:36"
+      },
+      {
+        "kind": "dual",
+        "latest_at": "2026-11-12 17:30:33"
+      },
+      {
+        "kind": "alarm",
+        "latest_at": "2026-11-12 17:30:38"
+      }
+    ],
+    "mysql_game_identity": {
+      "lewan-game": {
+        "ActiveState": "active",
+        "InvocationID": "9713cdbc61094381bc0d3c8bc27eca11",
+        "MainPID": "398878",
+        "NRestarts": "0"
+      },
+      "mysql": {
+        "ActiveState": "active",
+        "InvocationID": "43b595043d5e45ce824f9332a34556c3",
+        "MainPID": "398829",
+        "NRestarts": "0"
+      }
+    },
+    "no_runtime_edits": true,
+    "no_long_test": true,
+    "no_restart_gc_trim_limit_change": true,
+    "no_new_trade_or_automation": true,
+    "no_remote_git_push": true,
+    "continuation_local_only": true
+  },
+  "evidence": {
+    "frame-aggregate.py": {
+      "bytes": 3520,
+      "sha256": "dfa1ec40192312f91c645704db440a5ff7051842a6eab178f68a6ae9b4df639a"
+    },
+    "public-shape.json": {
+      "bytes": 233,
+      "sha256": "88f2c4b3657e12d30c90c2cd68e80145e13c8e34693f6ecfa8d328f4c5ed7194"
+    },
+    "kernel-owner.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "frame-parser-check.json": {
+      "bytes": 66,
+      "sha256": "1deb391005f41ef2b5b88fc9da16a903dc27c89b26949a82eeab9a1b89179123"
+    },
+    "thread-name.json": {
+      "bytes": 512,
+      "sha256": "d78f76da75fbbf4eba50b01648b734c84b077227ac3b5984acd8c8a7cea0840b"
+    },
+    "decoder-source.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "thread-name.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "bounded-sampler.py": {
+      "bytes": 2831,
+      "sha256": "5bcbc0ab99508d49c7aa4e1e06998428c5950c7ed9e896f32205dbc4fcc7d6e2"
+    },
+    "access-log-discovery.json": {
+      "bytes": 2004,
+      "sha256": "10249b4879c8ab859476456f5bdab1c5709e2581d2f17e1a46547ffdbe8c4b9d"
+    },
+    "access-health-readonly.py": {
+      "bytes": 4028,
+      "sha256": "63913dffde0a1cba0ef38676081e7980fad1fedcfdcbbf206fccf22ac2d15510"
+    },
+    "frame-manifest.json": {
+      "bytes": 45694,
+      "sha256": "c2f9829bc01f71101257baa05bc18b119cf28dd986607550348117631253621d"
+    },
+    "bounded-sampler-check.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "observation-20261112-173038.json": {
+      "bytes": 10638,
+      "sha256": "6b905c36f255ede2091c361d170754ae5233cfe5eac4e37e678bcff8f73ec7d2"
+    },
+    "frame-owner-once.py": {
+      "bytes": 7492,
+      "sha256": "b130c9ab991c0b47035bd09e933f77849677b83a2c051c43e24e4130d70accb7"
+    },
+    "frame-owner-v2-once.py": {
+      "bytes": 5824,
+      "sha256": "794498a0c36317bfaff99229abb61f11e537befcbebd690bebf68a2ad954d7fa"
+    },
+    "frame-dispatch.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "observation-20261112-173038.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "function-map-proposal.json": {
+      "bytes": 2197,
+      "sha256": "c36a183fc198d285444cf86ab3a81f5a50c1758c4f5f5f030396363861b1e595"
+    },
+    "observation-20261112-173002.stderr": {
+      "bytes": 70,
+      "sha256": "03f9b2d4f934cabbee4005a9f8b8150676587605e0a0607c389ebbfd9693f0e0"
+    },
+    "function-map-v2-proposal.json": {
+      "bytes": 1672,
+      "sha256": "c67c25b21dd0b0f949774648d1a993d557cffe006cfaa3254ce7232bd8c93961"
+    },
+    "kernel-owner-readonly.py": {
+      "bytes": 5500,
+      "sha256": "99c83c843ea6c62fb410714e340b714259a071714ed6d71a0eea4d45986d4020"
+    },
+    "check-bounded-sampler.py": {
+      "bytes": 2058,
+      "sha256": "92a17bb1dcbd4be61365945d95ac4eecc6456179249ff51ffdc5aacfea6ae8c0"
+    },
+    "public-shape.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "access-health.json": {
+      "bytes": 16123,
+      "sha256": "6ff27c72202e265ec3bbadd2362d0dd75321bdaaa0dcbb4b81e093bbaa439804"
+    },
+    "bounded-sampler-check.json": {
+      "bytes": 1180,
+      "sha256": "c1c88666e84ee8fae28cdc5cf55349c334acc48db121de591bcf3709dfbbda83"
+    },
+    "access-health.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "production-ws-decoder.json": {
+      "bytes": 3218,
+      "sha256": "13aa0ed91145ef15b3f8f0a2992ca6fe878213ff03beba8cede60caf05e27357"
+    },
+    "observe-readonly.py": {
+      "bytes": 6557,
+      "sha256": "58fcf30f036f6842e4825937b1a1fe6bf4f8d7b4295a4a3b1164cf3fa3baace2"
+    },
+    "ws-short-control.py": {
+      "bytes": 7721,
+      "sha256": "1d595298bff10e6f23186c42534ce92c03f2202965a97d173279ac17b1bf10d3"
+    },
+    "ws-short-control.json": {
+      "bytes": 9384,
+      "sha256": "79bb75710b5438716edcaa54dea220b2b26ce60ee8c19efe9c948728f1d325a5"
+    },
+    "frame-owner.json": {
+      "bytes": 2829,
+      "sha256": "c848b1cb8e881c3a96e0a194d01414f622c1519e39fe959a45f0199458209134"
+    },
+    "ws-short-control.stderr": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "frame-dispatch.stdout": {
+      "bytes": 2071,
+      "sha256": "fde8303241888095ff9fd81c4d58de1f9b020b45d0749a71c3a9e12b96f7314b"
+    },
+    "kernel-owner.json": {
+      "bytes": 18020,
+      "sha256": "13efe6dd3902826ea3f58e07bb3de78f01ee2837b454e0720ae69f9511fa68b7"
+    }
+  }
+}

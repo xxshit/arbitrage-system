@@ -1,0 +1,36 @@
+{
+  "prepared_at_utc": "2026-11-12T17:56:08.891363+00:00",
+  "status": "LOCAL_ONLY_REQUIRES_NEW_EXPLICIT_APPROVAL",
+  "remote_directory_if_approved": "/tmp/arbiscope-owner-map-v2-20261113",
+  "duration_collect_seconds": 20,
+  "hard_deadline_seconds": 30,
+  "rate_hz": 5,
+  "nonblocking": true,
+  "idle_threads_included": true,
+  "only_selected_allowlisted_thread_frames_saved": true,
+  "previous_failure": "First sampler reached hard deadline before its end-of-run buffered export; empty function result, no automatic retry.",
+  "change": "Reserve 10 seconds inside original 30-second hard cap for sampler startup and output drain; deadline termination explicitly classified as failure.",
+  "local_subprocess_controls": "Three short controls passed: delayed final output, deadline before final output, guard rejection. Raw sensitive sentinel not output. These validate wrapper lifecycle, not production profiler performance.",
+  "files": {
+    "frame-owner-v2-once.py": {
+      "bytes": 5824,
+      "sha256": "794498a0c36317bfaff99229abb61f11e537befcbebd690bebf68a2ad954d7fa"
+    },
+    "frame-aggregate.py": {
+      "bytes": 3520,
+      "sha256": "dfa1ec40192312f91c645704db440a5ff7051842a6eab178f68a6ae9b4df639a"
+    },
+    "frame-manifest.json": {
+      "bytes": 45694,
+      "sha256": "c2f9829bc01f71101257baa05bc18b119cf28dd986607550348117631253621d"
+    },
+    "bounded-sampler.py": {
+      "bytes": 2831,
+      "sha256": "5bcbc0ab99508d49c7aa4e1e06998428c5950c7ed9e896f32205dbc4fcc7d6e2"
+    }
+  },
+  "no_app_source_or_data_uploaded": true,
+  "no_locals_raw_stack_file_heap_reads_restart_or_long_test": true,
+  "authorization": null,
+  "execution_started": false
+}

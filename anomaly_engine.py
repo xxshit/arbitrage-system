@@ -55,17 +55,23 @@ def pulse_is_actionable(pulse):
     return False
 
 
-def alert_round_ids(events, pulses):
+def alert_round_ids(events, pulses, *, newest_first=False, include=None):
     """Correlate counts only; never combine path-local prices or quarantine.
 
     Restarts in one episode count once. New episodes starting within 30s of a
     coin round's FIRST onset join it; later arrivals don't slide the window.
+    The history reader already orders by (created_at, id) descending; callers
+    with that guarantee can use its reverse iterator without another full sort.
+    include only limits the returned map. Every episode still participates in
+    correlation, including ones that are not visible in the current response.
     """
     result, episodes, recent = {}, {}, {}
-    for item in sorted(events, key=lambda item: (item.created_at, item.id)):
+    ordered = reversed(events) if newest_first else sorted(events, key=lambda item: (item.created_at, item.id))
+    for item in ordered:
         pulse = pulses.get(item.id)
         if not pulse:
-            result[item.id] = f"legacy:{item.id}"
+            if include is None or include(item, pulse):
+                result[item.id] = f"legacy:{item.id}"
             continue
         episode_key = (item.symbol, item.strategy, item.long_exchange, item.short_exchange,
                        pulse.get("metric"), pulse.get("episode") or pulse["id"])
@@ -79,7 +85,8 @@ def alert_round_ids(events, pulses):
                 round_id = f"pulse:{item.id}"
                 recent[item.symbol] = (stamp, round_id)
             episodes[episode_key] = round_id
-        result[item.id] = round_id
+        if include is None or include(item, pulse):
+            result[item.id] = round_id
     return result
 
 

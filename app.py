@@ -45,6 +45,7 @@ from anomaly_streams import AlertStreamHub, Route
 from anomaly_engine import alert_round_ids, pulse_is_actionable
 from alert_history_index import AlertHistoryIndex, HistoryEvent
 from alert_read_payload import Screenings, PackedPulse, PulseSpool
+from alert_summary import AlertSummary
 from trend_reference import TrendReferenceCache, fetch_reference, reference_failure_reason
 from alert_reminders import admit_pulse, current_notice, reminder_count, reminder_state_id
 from alert_screening import DEFAULT_NOTIONAL, okx_contract_unit, pulse_has_watch_peak, screen_pulse
@@ -14104,18 +14105,22 @@ def alerts():
         payload = {"view": "active", "history_loading": history_loading, "checked_at_epoch": time.time(),
                    "realtime": ALERT_STREAM_HUB.status(), "funding": funding_alert_payload(screening_now)}
         db.session.remove()
-        payload["active_events"] = [event_payload(item, alert_round_ids(grouped_events[key], pulses))
+        payload["active_events"] = [event_payload(item, alert_round_ids(grouped_events[key], pulses, newest_first=True,
+                                       include=lambda event, pulse: event.id == item.id))
                                     for key, item in active_events.items()]
         return jsonify(payload)
 
     if view == "detail":
         items = grouped_events.get(symbol, ())
-        round_ids = alert_round_ids(items, pulses)
         filtered = [item for item in items if (not selected_strategy or alert_context(item)["strategy"] == selected_strategy) and (selected_path is None or path_key(item) == selected_path)]
         total = len(filtered)
         pages = max(1, math.ceil(total / page_size))
         page = min(page, pages)
-        return jsonify({"symbol": symbol, "strategy": selected_strategy or None, "path_id": path_id(selected_path) if selected_path is not None else None, "items": [event_payload(item, round_ids) for item in filtered[(page - 1) * page_size:page * page_size]], "total": total, "page": page, "pages": pages, "page_size": page_size, "window_hours": 24, "checked_at_epoch": time.time()})
+        visible = filtered[(page - 1) * page_size:page * page_size]
+        visible_ids = {item.id for item in visible}
+        round_ids = alert_round_ids(items, pulses, newest_first=True,
+                                    include=lambda item, pulse: item.id in visible_ids)
+        return jsonify({"symbol": symbol, "strategy": selected_strategy or None, "path_id": path_id(selected_path) if selected_path is not None else None, "items": [event_payload(item, round_ids) for item in visible], "total": total, "page": page, "pages": pages, "page_size": page_size, "window_hours": 24, "checked_at_epoch": time.time()})
 
     transfer_exchanges = {}
     for symbol, items in grouped_events.items():
@@ -14129,30 +14134,38 @@ def alerts():
 
     def alert_group_payload(symbol, items, round_ids):
         timeline = [event_payload(item, round_ids) for item in items[:20]] if view == "legacy" else []
-        latest = event_payload(items[0], round_ids)
-        spread_items = [item for item in items if item.open_spread is not None]
-        basis_items = [item for item in items if item.basis is not None]
-        max_spread_item = max(spread_items, key=lambda item: abs(item.open_spread or 0), default=None)
-        max_basis_item = max(basis_items, key=lambda item: abs(item.basis or 0), default=None)
-        ranges = alert_value_ranges(items, pulses)
+        summary, path_summaries = AlertSummary(count_alerts=False), {}
+        for item in items:
+            key = path_id(path_key(item))
+            path_summary = path_summaries.get(key)
+            if path_summary is None:
+                path_summary = path_summaries[key] = AlertSummary()
+            pulse = pulses.get(item.id)
+            rank = priority(item)
+            basis, has_basis = alert_binance_basis(item), alert_has_binance_basis_source(item)
+            summary.add(item, pulse, round_ids.get(item.id), screening_now, rank, basis, has_basis)
+            path_summary.add(item, pulse, round_ids.get(item.id), screening_now, rank, basis, has_basis)
+        latest = event_payload(summary.latest, round_ids)
+        max_spread_item, max_basis_item = summary.max_spread, summary.max_basis
+        ranges = summary.value_ranges()
         def absolute_peak(field, fallback):
             bounds = ranges[field]
             values = [value for value in (bounds["min"], bounds["max"]) if value is not None]
             return max(values, key=abs) if values else fallback
-        path_items = {}
-        for item in items:
-            path_items.setdefault(path_id(path_key(item)), []).append(item)
         paths = []
-        for key, samples in path_items.items():
-            context = alert_context(samples[0])
-            paths.append({"id": key, **context, "attention": attention[max(samples, key=priority).id], "alert_count": count_reminders(samples, round_ids), "observation_count": len(samples), "latest": event_payload(samples[0], round_ids), "value_ranges": alert_value_ranges(samples, pulses), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
+        for key, path_summary in path_summaries.items():
+            context = alert_context(path_summary.latest)
+            paths.append({"id": key, **context, "attention": attention[path_summary.best.id], "alert_count": path_summary.alert_count, "observation_count": path_summary.count, "latest": event_payload(path_summary.latest, round_ids), "value_ranges": path_summary.value_ranges(), "basis_exchange": "Binance" if (context["strategy"] == "spot_futures" and context["short_exchange"] == "Binance") or (context["strategy"] == "futures_futures" and "Binance" in (context["long_exchange"], context["short_exchange"])) else None})
+            # Count the symbol only after releasing the path-local sets. Legacy
+            # rounds can span paths; summing path counts would double-count them.
+            path_summary.legacy_rounds.clear()
         return {
             "symbol": symbol,
-            "attention": attention[max(items, key=priority).id],
+            "attention": attention[summary.best.id],
             "latest": latest,
-            "first_at": format_shanghai_time(items[-1].created_at, "%m-%d %H:%M:%S"),
+            "first_at": format_shanghai_time(summary.first.created_at, "%m-%d %H:%M:%S"),
             "alert_count": count_reminders(items, round_ids),
-            "observation_count": len(items),
+            "observation_count": summary.count,
             "move_peaks": {
                 "open_spread": absolute_peak("open_spread", max_spread_item.open_spread if max_spread_item else None),
                 "open_spread_at": format_shanghai_time(max_spread_item.created_at, "%m-%d %H:%M:%S") if max_spread_item else None,
@@ -14174,8 +14187,20 @@ def alerts():
     groups, active_payloads = [], []
     for group_symbol, items in grouped_events.items():
         # Episode and 30-second round correlation are both scoped to a symbol.
-        # Consume this symbol's map before building the next one.
-        round_ids = alert_round_ids(items, pulses)
+        # Only visible rows need a serialized round ID. Modern reminder counts
+        # use ticket timestamps directly; legacy counts still need all IDs.
+        visible_ids = {item.id for item in items[:20 if view == "legacy" else 1]}
+        seen_paths = set()
+        for item in items:
+            key = path_id(path_key(item))
+            if key not in seen_paths:
+                seen_paths.add(key)
+                visible_ids.add(item.id)
+        if group_symbol in active_events:
+            visible_ids.add(active_events[group_symbol].id)
+        round_ids = alert_round_ids(items, pulses, newest_first=True,
+                                    include=lambda item, pulse: item.id in visible_ids or pulse is None or not pulse.has_reminder)
+        del visible_ids, seen_paths
         groups.append(alert_group_payload(group_symbol, items, round_ids))
         if group_symbol in active_events:
             active_payloads.append(event_payload(active_events[group_symbol], round_ids))

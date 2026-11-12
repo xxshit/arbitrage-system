@@ -5,6 +5,9 @@ Charts retain 5s/minute extrema. Book evidence is one actual paired snapshot per
 Shares the existing 15-day shards/checkpoints and 1GiB free-space guard.
 """
 from array import array
+from contextlib import ExitStack, closing
+from heapq import merge
+from itertools import groupby
 import math
 import threading
 
@@ -84,6 +87,96 @@ def percentile(values, fraction):
     return values[math.ceil((len(values)-1)*fraction)] if values else None
 
 
+def _profile_rows(connection, midnight, start, now):
+    for symbol, exchange, metric, payload in connection.execute(
+        "SELECT symbol,exchange,metric,payload FROM history WHERE metric IN ('open','close') "
+        "AND hour_at>=? AND hour_at<=? ORDER BY symbol,exchange,metric,hour_at", (start, now)
+    ):
+        yield symbol, exchange, midnight, metric, payload
+
+
+def _consume_profile_hour(acc, payload, start, now, first_bucket):
+    # The decoded graph dies on return, before decoding the next hour. Keeping
+    # it in the outer loop would overlap the old graph with the next decode.
+    minutes = decode_chunk(payload)
+    for minute in sorted(minutes, key=int):
+        for segment in minutes[minute]:
+            for t, value in segment:
+                if start < t <= now:
+                    acc["values"][int(t)//300-first_bucket] = value
+                    acc["low"] = min(acc["low"], value)
+                    acc["high"] = max(acc["high"], value)
+                    acc["first"] = min(acc["first"], t)
+                    acc["last"] = max(acc["last"], t)
+
+
+def _profile(rows, now):
+    """Finish one path, then release its two numeric arrays before the next."""
+    start = now-86400
+    first_bucket = int(start)//300
+    state = {}
+    for _, _, _, metric, payload in rows:
+        acc = state.get(metric)
+        if acc is None:
+            acc = state[metric] = dict(values=array("d", [math.nan])*289,
+                                      low=math.inf, high=-math.inf, first=now, last=0)
+        _consume_profile_hour(acc, payload, start, now, first_bucket)
+    opening, closing = state.get("open"), state.get("close")
+    if not opening or not opening["last"]:
+        return None
+    values = sorted(v for v in opening["values"] if math.isfinite(v))
+    closes = sorted(v for v in closing["values"] if math.isfinite(v)) if closing else []
+    def ready(acc, data):
+        return bool(acc and len(data) >= 12 and acc["last"]-acc["first"] >= 3600
+                    and now-acc["last"] <= 300
+                    and len(data) >= .5*((acc["last"]-acc["first"])/300))
+    return dict(computed_at=now, ready=ready(opening, values), close_ready=ready(closing, closes),
+                first_at=opening["first"], last_at=opening["last"], bins=len(values),
+                median=percentile(values, .5), low=opening["low"], high=opening["high"],
+                range=opening["high"]-opening["low"],
+                max_abs=max(abs(opening["low"]), abs(opening["high"])),
+                exit_q75=percentile(closes, .75))
+
+
+def _hour_range(payload, start=-math.inf, end=math.inf):
+    low = high = low_at = high_at = first = last = None
+    minutes = set()
+    for segments in decode_chunk(payload).values():
+        for segment in segments:
+            for point in segment:
+                if len(point) != 2 or not number(point[0]) or not number(point[1]):
+                    continue
+                at, value = point
+                if not start < at <= end:
+                    continue
+                if low is None or value < low:
+                    low, low_at = value, at
+                if high is None or value > high:
+                    high, high_at = value, at
+                first = at if first is None else min(first, at)
+                last = at if last is None else max(last, at)
+                minutes.add(int(at)//60)
+    return (low, high, low_at, high_at, first, last, len(minutes)) if low is not None else None
+
+
+def _day_ranges(connection):
+    ranges = {}
+    for symbol, exchange, hour, payload in connection.execute(
+            "SELECT symbol,exchange,hour_at,payload FROM history WHERE metric='open'"):
+        key = symbol, exchange
+        if key not in ranges and len(ranges) >= 4000:
+            continue
+        data = ranges.get(key)
+        if data is None:
+            data = ranges[key] = array("d", [math.nan])*168
+        values = _hour_range(payload)
+        if values is not None:
+            offset = (int(hour)//3600 % 24)*7
+            for index, value in enumerate(values):
+                data[offset+index] = value
+    return ranges
+
+
 class ProfileCache:
     def __init__(self):
         self.lock = threading.Lock()
@@ -101,66 +194,40 @@ class ProfileCache:
     def refresh(self, store, now):
         windows = self.window_ranges(store, now)
         start = now-86400
-        first_bucket = int(start)//300
-        accumulators = {}
-        for midnight in range(int(start)//86400*86400, int(now)//86400*86400+1, 86400):
-            day = store.day(midnight)
-            if not (store.directory/(day+".sqlite3")).exists():
-                continue
-            connection = store.connect(day)
-            try:
-                for symbol, exchange, metric, payload in connection.execute(
-                    # The WITHOUT ROWID primary key already orders hours WITHIN
-                    # each path/metric. Global hour ordering sorts every BLOB in
-                    # a temporary B-tree and is unnecessary for these accumulators.
-                    "SELECT symbol,exchange,metric,payload FROM history WHERE metric IN ('open','close') AND hour_at>=? AND hour_at<=? ORDER BY symbol,exchange,metric,hour_at",
-                    (int(start)//3600*3600, int(now)//3600*3600),
-                ):
-                    key = (symbol, exchange)
-                    if key not in accumulators and len(accumulators) >= 4000:
-                        continue
-                    state = accumulators.setdefault(key, {})
-                    acc = state.get(metric)
-                    if acc is None:
-                        # Initialize once per path/metric, not once per hour.
-                        acc = state[metric] = dict(values=array("d", [math.nan])*289,
-                                                  low=math.inf, high=-math.inf,
-                                                  first=now, last=0)
-                    minutes = decode_chunk(payload)
-                    for minute in sorted(minutes, key=int):
-                        for segment in minutes[minute]:
-                            for t, value in segment:
-                                if not start < t <= now:
-                                    continue
-                                acc["values"][int(t)//300-first_bucket] = value
-                                acc["low"] = min(acc["low"], value)
-                                acc["high"] = max(acc["high"], value)
-                                acc["first"] = min(acc["first"], t)
-                                acc["last"] = max(acc["last"], t)
-            finally:
-                connection.close()
         output = {}
-        for key, state in accumulators.items():
-            opening, closing = state.get("open"), state.get("close")
-            if not opening or not opening["last"]:
-                continue
-            values = sorted(v for v in opening["values"] if math.isfinite(v))
-            closes = sorted(v for v in closing["values"] if math.isfinite(v)) if closing else []
-            def ready(acc, data):
-                return bool(acc and len(data) >= 12 and acc["last"]-acc["first"] >= 3600
-                            and now-acc["last"] <= 300
-                            and len(data) >= .5*((acc["last"]-acc["first"])/300))
-            output[key] = dict(computed_at=now, ready=ready(opening, values),
-                               close_ready=ready(closing, closes),
-                               first_at=opening["first"], last_at=opening["last"],
-                               bins=len(values), median=percentile(values, .5),
-                               low=opening["low"], high=opening["high"],
-                               range=opening["high"]-opening["low"],
-                               max_abs=max(abs(opening["low"]), abs(opening["high"])),
-                               exit_q75=percentile(closes, .75))
+        with ExitStack() as connections:
+            streams = []
+            bounds = int(start)//3600*3600, int(now)//3600*3600
+            for midnight in range(int(start)//86400*86400, int(now)//86400*86400+1, 86400):
+                day = store.day(midnight)
+                if not (store.directory/(day+".sqlite3")).exists():
+                    continue
+                connection = connections.enter_context(closing(store.connect(day)))
+                connection.execute("BEGIN")
+                # Preserve the original day-first 4000-path admission and output
+                # order. Both this key query and the row stream use one snapshot.
+                if len(output) < 4000:
+                    for key in connection.execute(
+                        "SELECT DISTINCT symbol,exchange FROM history WHERE metric IN ('open','close') "
+                        "AND hour_at>=? AND hour_at<=? ORDER BY symbol,exchange LIMIT 4000", bounds
+                    ):
+                        if key not in output:
+                            output[key] = None
+                            if len(output) == 4000:
+                                break
+                streams.append(_profile_rows(connection, midnight, *bounds))
+            # At most two daily cursors and one path's accumulators are live.
+            rows = merge(*streams, key=lambda row: row[:4])
+            for key, samples in groupby(rows, key=lambda row: row[:2]):
+                if key in output:
+                    output[key] = _profile(samples, now)
+        for key in [key for key, value in output.items() if value is None]:
+            del output[key]
         for key, ranges in windows.items():
-            output.setdefault(key, dict(computed_at=now, ready=False, close_ready=False))
-            output[key]["windows"] = ranges
+            profile = output.get(key)
+            if profile is None:
+                profile = output[key] = dict(computed_at=now, ready=False, close_ready=False)
+            profile["windows"] = ranges
         with self.lock:
             self.data, self.at = output, now
         return len(output)
@@ -185,27 +252,9 @@ class ProfileCache:
                     ranges = cached[1]
                 else:
                     connection = store.connect(day)
-                    ranges = {}
-                    for symbol, exchange, hour, payload in connection.execute(
-                            # Each hour writes a distinct numeric-array slot;
-                            # no ordering (and no sorting of BLOBs) is needed.
-                            "SELECT symbol,exchange,hour_at,payload FROM history WHERE metric='open'"):
-                        key = symbol, exchange
-                        if key not in ranges and len(ranges) >= 4000:
-                            continue
-                        data = ranges.get(key)
-                        if data is None:
-                            data = ranges[key] = array("d", [math.nan])*168
-                        offset = (int(hour)//3600 % 24)*7
-                        values = [p for segments in decode_chunk(payload).values() for segment in segments for p in segment
-                                  if len(p) == 2 and number(p[0]) and number(p[1])]
-                        if not values:
-                            continue
-                        low, high = min(values, key=lambda p:p[1]), max(values, key=lambda p:p[1])
-                        data[offset:offset+7] = array("d", [low[1], high[1], low[0], high[0],
-                            min(p[0] for p in values), max(p[0] for p in values),
-                            len({int(p[0])//60 for p in values})])
+                    ranges = _day_ranges(connection)
                     self.days[day] = signature, ranges
+                    cached = None  # No stale day arrays survive the replacement.
                     while sum(len(entry[1]) for entry in self.days.values()) > 24000:
                         self.days.pop(min(self.days))
                 for name, seconds in WINDOWS.items():
@@ -221,13 +270,9 @@ class ProfileCache:
                             connection = store.connect(day)
                         for symbol, exchange, payload in connection.execute(
                                 "SELECT symbol,exchange,payload FROM history WHERE metric='open' AND hour_at=?", (boundary,)):
-                            points = [p for segs in decode_chunk(payload).values() for seg in segs for p in seg
-                                      if len(p) == 2 and number(p[0]) and number(p[1]) and start < p[0] <= now]
-                            if points:
-                                low, high = min(points, key=lambda p:p[1]), max(points, key=lambda p:p[1])
-                                boundary_values[(symbol, exchange)] = [low[1],high[1],low[0],high[0],
-                                    min(p[0] for p in points),max(p[0] for p in points),
-                                    len({int(p[0])//60 for p in points})]
+                            values = _hour_range(payload, start, now)
+                            if values is not None:
+                                boundary_values[(symbol, exchange)] = values
                     for key, data in ranges.items():
                         if key not in output and len(output) >= 4000:
                             continue
@@ -235,11 +280,22 @@ class ProfileCache:
                             hour_at = midnight+hour*3600
                             if hour_at+3600 <= start or hour_at > now:
                                 continue
-                            values = boundary_values.get(key) if hour_at == boundary else data[hour*7:hour*7+7]
-                            if values is None or not math.isfinite(values[0]) or values[4] > now:
-                                continue
-                            low, high, low_at, high_at, first, last, bins = values
-                            path_ranges = output.setdefault(key, {})
+                            if hour_at == boundary:
+                                values = boundary_values.get(key)
+                                if values is None:
+                                    continue
+                                low, high, low_at, high_at, first, last, bins = values
+                            else:
+                                offset = hour*7
+                                low = data[offset]
+                                first = data[offset+4]
+                                if not math.isfinite(low) or first > now:
+                                    continue
+                                high, low_at, high_at = data[offset+1], data[offset+2], data[offset+3]
+                                last, bins = data[offset+5], data[offset+6]
+                            path_ranges = output.get(key)
+                            if path_ranges is None:
+                                path_ranges = output[key] = {}
                             acc = path_ranges.get(name)
                             if acc is None:
                                 acc = path_ranges[name] = dict(

@@ -1,0 +1,358 @@
+{
+  "reviewed_at_utc": "2026-11-12T19:10:26.353470+00:00",
+  "status": "PRODUCTION_THREAD_IDENTIFIED_AND_METADATA_ARENA_GROWTH_REPRODUCED; NARROW_CANDIDATE_SHORT_TESTED; NOT_DEPLOYED; TOTAL_PRODUCTION_ROOT_NOT_CLOSED",
+  "sampling": {
+    "report": {
+      "path": "logs/memory-owner-short-20261113/growth-owner-frame-report.json",
+      "bytes": 2080,
+      "sha256": "ebfec1b82b6a6eeb06ec322e52e2a4f612603281eaa761e1276bc57415cde35e"
+    },
+    "permission": "ONE_EXPLICIT_NEW_THREAD_GRANT_CONSUMED_SUCCESS_NO_RETRY",
+    "tid": 2383650,
+    "elapsed_seconds": 18.53350627515465,
+    "frames": [
+      {
+        "tid": 2383650,
+        "file": "app.py",
+        "function": "fetch_equity_metadata",
+        "line": 3887,
+        "count": 3
+      },
+      {
+        "tid": 2383650,
+        "file": "app.py",
+        "function": "get_json",
+        "line": 1637,
+        "count": 2
+      },
+      {
+        "tid": 2383650,
+        "file": "app.py",
+        "function": "get_json",
+        "line": 1638,
+        "count": 1
+      },
+      {
+        "tid": 2383650,
+        "file": "market_transport.py",
+        "function": "decode_json",
+        "line": 55,
+        "count": 1
+      }
+    ],
+    "target_samples": 93,
+    "unknown_frames_discarded": 402,
+    "no_growth_during_function_sample": true,
+    "boundary": "Function mapping is separate from the earlier 130-second exact page timeline, not a simultaneous allocation trace."
+  },
+  "production_correlation": {
+    "timeline": {
+      "path": "logs/memory-owner-short-20261113/owner-timeline-20261112-182233.json",
+      "bytes": 234061,
+      "sha256": "096501ad8cc360f421881f70a9e03d92d1610f5b9ec79c78da17426d87154e9a"
+    },
+    "analysis": {
+      "path": "logs/memory-owner-short-20261113/owner-timeline-analysis.json",
+      "bytes": 1797,
+      "sha256": "38caf819280b9d10c4ea25fde25b1fa6f3a67a3eb10365da5908a701646b0d44"
+    },
+    "rss_anonymous_growth_bytes": 3952640,
+    "pages": 965,
+    "growth_thread": 2383650,
+    "meaning": "Both positive RSS/anonymous seconds aligned solely with this TID minor faults. Later same-process sample mapped it to fetch_equity_metadata -> get_json -> decode_json. This establishes a relevant execution path, not complete allocation ownership or all historical growth."
+  },
+  "mechanism": {
+    "source_chain": [
+      "app.fetch_equity_metadata",
+      "app.get_json",
+      "market_transport.decode_json",
+      "app.collect_equity_metadata",
+      "MARKET_PAYLOAD_CACHE"
+    ],
+    "objects": "Full public-directory list/dict trees, inflated byte chunks/joined bytes, UTF-8-decoded Unicode text. Persistent network threads allocate decoded generations; the market thread replaces/releases them.",
+    "causal_control": "Holding three worker threads, source/fixtures/TTL work counts constant, transfer compressed wire bytes and decode on the cache owner. Large allocator free/resident growth is materially lower with near-constant live Python object counts.",
+    "not_proven": "Not an unbounded Python reference leak; synthetic isolated growth is bounded within this run. The full website may have additional drivers and the candidate has not run in production.",
+    "negative_control": "Releasing redundant decompression buffers alone ended at 163454976 B RSS, still similar to original worker decode; not selected as a stand-alone fix."
+  },
+  "primary_control": {
+    "baseline": {
+      "path": "logs/memory-owner-short-20261113/metadata-handoff-result.json",
+      "bytes": 21435,
+      "sha256": "a4abe324e9ce7bd1e91fb712d5a0433b2973b1fb606a00c654360588f5a5c27f"
+    },
+    "candidate": {
+      "path": "logs/memory-owner-short-20261113/metadata-final-result.json",
+      "bytes": 11525,
+      "sha256": "d1493348e99eeb66bb1a94c260cfb6002ab1a804a743d7ad6c7aebfb75909bdf"
+    },
+    "runs_are_short_seconds_not_soak": true,
+    "synthetic_ttl_ticks": 240,
+    "source_counts": {
+      "equity_gate_pairs": 60,
+      "equity_gate_coins": 12,
+      "equity_bitget_instruments": 60,
+      "equity_bitget_stocks": 6,
+      "equity_bybit_instruments": 240
+    },
+    "baseline_measured_pid": 2386867,
+    "candidate_measured_pid": 2387106,
+    "baseline_elapsed_seconds": 2.3521518921479583,
+    "candidate_elapsed_seconds": 2.430076611228287,
+    "baseline_rss_before_shutdown": 159899648,
+    "candidate_rss_before_shutdown": 90095616,
+    "rss_reduction_bytes": 69804032,
+    "baseline_allocator_used_free": [
+      9749808,
+      103242448
+    ],
+    "candidate_allocator_used_free": [
+      9573776,
+      28469872
+    ],
+    "candidate_p95_publish_ms": 42.07658488303423,
+    "candidate_max_publish_ms": 58.13547316938639,
+    "last_samples": {
+      "worker-decode": [
+        [
+          119,
+          152489984
+        ],
+        [
+          149,
+          153550848
+        ],
+        [
+          179,
+          158740480
+        ],
+        [
+          209,
+          165027840
+        ],
+        [
+          239,
+          159899648
+        ]
+      ],
+      "final-owner": [
+        [
+          119,
+          90075136
+        ],
+        [
+          149,
+          92155904
+        ],
+        [
+          179,
+          92209152
+        ],
+        [
+          209,
+          86667264
+        ],
+        [
+          239,
+          90095616
+        ]
+      ]
+    },
+    "validation": "Complete values in separate post-measurement validator PID; no timing/memory oracle in measured work. No TLS, live network, DB or full website workload during replay. End RSS is BEFORE stopping workers.",
+    "auxiliary_first_replay": "metadata-replay-result.json had whole-app AST parsing inside measured children and inflated startup allocator state; retained as auxiliary only. Primary controls moved full AST preparation outside children."
+  },
+  "lifetime": {
+    "report": {
+      "path": "logs/memory-owner-short-20261113/metadata-final-result.json",
+      "bytes": 11525,
+      "sha256": "d1493348e99eeb66bb1a94c260cfb6002ab1a804a743d7ad6c7aebfb75909bdf"
+    },
+    "created_payload_roots": 39,
+    "max_live_after_publication": 5,
+    "live_after_cache_clear": 0,
+    "method": "Separate instrumented arm with weak-referenceable root containers, no forced collection/trim, natural reference release; not used for uninstrumented RSS comparison."
+  },
+  "candidate_scope": {
+    "status": "LOCAL_ONLY_NOT_DEPLOYED",
+    "baseline_app_sha256": "1c4fc4f972dcd5748dac9596b7fc981a793f69169030845825e0a23526595eae",
+    "candidate_app_sha256": "3e3c818f8f3d38410eef87e325535017d5456e959a04bc09421da5b4908b9696",
+    "changed_definitions": [
+      "fetch_equity_metadata",
+      "collect_equity_metadata"
+    ],
+    "other_definitions_unchanged": true,
+    "includes_private_consumer_traceback_cleanup": true,
+    "market_refresh_seconds": 5,
+    "metadata_refresh_seconds": 15,
+    "metadata_pool_workers": 3
+  },
+  "regression": {
+    "unique_tests": 37,
+    "root_source_tests": 18,
+    "root_guarded_equity_workspace": 19,
+    "scoped_candidate_rechecks": [
+      10,
+      19
+    ],
+    "baseline_behavior_tests": "2 expected assertion failures, no errors; original code decodes on worker and cannot consume wire-only pending results.",
+    "all_success_stderr_bytes": 0,
+    "guarded_loader": "AST bootstrap skip, synthetic SQLite, no dotenv, no Internet or background workers; not ordinary import app.",
+    "preserved_failure": "metadata-workspace-regression.stderr: missing absolute sys.path after guarded loader chdir; no test executed. Corrected v2 and scoped runs passed.",
+    "staged_whitespace": "Passed with CR-at-EOL treated as raw SSH line endings. Default check flags only 2 CRLF lines in original metadata-final-observation.stderr; raw failure evidence preserved unchanged."
+  },
+  "last_production_status": {
+    "report": {
+      "path": "logs/memory-owner-short-20261113/metadata-final-status.json",
+      "bytes": 1859,
+      "sha256": "c061664e26e5d06ed4b0d63bb3482be5c2508bd98f2bd40bab1933093a8be7e1"
+    },
+    "captured_at_utc": "2026-11-12T19:08:31.778105+00:00",
+    "worker": 2383603,
+    "rss_bytes": 797302784,
+    "services": {
+      "arbitrage-private": {
+        "MainPID": "2383599",
+        "NRestarts": "0",
+        "ActiveState": "active",
+        "InvocationID": "25e853ed5afe41bbabb2a7a1d6f380a6"
+      },
+      "mysql": {
+        "MainPID": "398829",
+        "NRestarts": "0",
+        "ActiveState": "active",
+        "InvocationID": "43b595043d5e45ce824f9332a34556c3"
+      },
+      "lewan-game": {
+        "MainPID": "398878",
+        "NRestarts": "0",
+        "ActiveState": "active",
+        "InvocationID": "9713cdbc61094381bc0d3c8bc27eca11"
+      }
+    },
+    "quote_timestamps": [
+      [
+        "spot",
+        "2026-11-12 19:08:17",
+        "14"
+      ],
+      [
+        "dual",
+        "2026-11-12 19:08:30",
+        "1"
+      ],
+      [
+        "alarm",
+        "2026-11-12 19:08:32",
+        "-1"
+      ]
+    ],
+    "rules": [
+      [
+        "dual_market_refresh",
+        "1",
+        "5"
+      ],
+      [
+        "spot_market_refresh",
+        "1",
+        "5"
+      ]
+    ],
+    "transactions": [
+      [
+        "0",
+        "0"
+      ]
+    ],
+    "connections": [
+      [
+        "Sleep",
+        "5",
+        "1"
+      ]
+    ],
+    "limits": "Small status check, not a new continuous RSS or journal acceptance. Full observer SSH was reset with no report; stderr preserved. Last successful complete journal review remains 18:26:54 UTC."
+  },
+  "runtime_changed": false,
+  "production_restart": false,
+  "long_tests_started": false,
+  "continuation_uploaded": false,
+  "git_pushed": false,
+  "next": "Review/live-load gate must use the narrow production-based candidate, never the whole local app or old release. Do not rerun old soak/deploy/sampler scripts. Production memory failure remains open; retain five-second quotes and existing data safeguards.",
+  "artifacts": [
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-shape-result.json",
+      "bytes": 2904,
+      "sha256": "376f80a1f4801387457130d56eef7250f9d6a5e020efe339226d954d1ebf8649"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-replay-result.json",
+      "bytes": 17911,
+      "sha256": "b3c3056cc6f43584db3cb1b178649254281b06763a3cb6ee4c158045ae6cc82a"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-objects-result.json",
+      "bytes": 2168,
+      "sha256": "f9312474c1d25bb33c37438eec07cfeeefef205e730a209bada90c64a7f21883"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-release-result.json",
+      "bytes": 14453,
+      "sha256": "fe5527cdd59f91fc0fa5409f3d60ebf5074fadca5c29bf67c49ca2d208b50f43"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-candidate-scope.json",
+      "bytes": 509,
+      "sha256": "185b8b9cd4a62c8ab7cd7c302fdb5f621096166b1d36a3aa6bb48ace38f4bd11"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-baseline-regression.stdout",
+      "bytes": 2773,
+      "sha256": "195fb4d06d1db0aea41648876f625b5e611d9d0a0e173ad28e732302f98895b0"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-regression.stdout",
+      "bytes": 3505,
+      "sha256": "eb14d1d59482d66c7fdbbcf6a4d4023b76ab722f0b242d54da7d63204c238ebb"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-scoped-regression.stdout",
+      "bytes": 2041,
+      "sha256": "07e9e0f25932c4cee3abea2adb39159fd0e1ab18009b92e18a623cea017916dc"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-workspace-regression.stderr",
+      "bytes": 460,
+      "sha256": "563abc3415f947c50c220c7f7df14031f8abf39315c9449f161cab2d8db23a1b"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-workspace-regression-v2.stdout",
+      "bytes": 3809,
+      "sha256": "2315d8fc3efd30c88b0a6e9915b853a5ccea8ed8cfed18b1c739d18991a260b9"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-scoped-workspace.stdout",
+      "bytes": 3809,
+      "sha256": "a1cc461a3bb2e8e24064cb224df14876406dd4a85d59a6e686bf9132388f9b01"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-final-observation.stderr",
+      "bytes": 107,
+      "sha256": "b272175c65618a2f6c74cb1c2686f2b0daeb4c15ff049a47a31bd91e5050d821"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/growth-owner-authorization.json",
+      "bytes": 447,
+      "sha256": "3341d246f49a2c56b0b7feea1e07691b6e7a3f2f1256a8d6a235f438c664a1c6"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-final-status.stdout",
+      "bytes": 1473,
+      "sha256": "277d18378ba51f5edada87ed76d5341a0452ac78e6dfa515d34ba29791a00956"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/metadata-final-status.stderr",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ]
+}

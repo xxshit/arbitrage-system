@@ -1,0 +1,123 @@
+{
+  "root": "/tmp/arbiscope-metadata-shape.37ybvwmu",
+  "guards": [
+    {
+      "at_utc": "2026-11-12T18:53:53.616713+00:00",
+      "psi": 0.0,
+      "available_bytes": 11869245440,
+      "quote_ages": [
+        11,
+        3
+      ],
+      "ok": true
+    },
+    {
+      "at_utc": "2026-11-12T18:53:56.622105+00:00",
+      "psi": 0.0,
+      "available_bytes": 11889278976,
+      "quote_ages": [
+        14,
+        6
+      ],
+      "ok": true
+    }
+  ],
+  "script_sha256": "5257dff0244aca96a6741a0c1efdf60719bee1bdd2b859fde96c32840dc9e05c",
+  "status": "finished",
+  "abort": null,
+  "exit_code": 0,
+  "elapsed_seconds": 3.00506944488734,
+  "stderr_bytes": 0,
+  "result": {
+    "started_at_utc": "2026-11-12T18:53:53.849963+00:00",
+    "source_sha256": {
+      "app.py": "1c4fc4f972dcd5748dac9596b7fc981a793f69169030845825e0a23526595eae",
+      "market_transport.py": "968f2b2c2daba7704a35ced5d631d9cb0496c2a4f6341418622ee52e74c30d21",
+      "equity_spot.py": "d5f82b4918a65b2f751caac4ecb2354fb6dbfcce450055b910fcaa9086e69edc"
+    },
+    "directories": [
+      {
+        "key": "equity_gate_pairs",
+        "ttl_seconds": 60,
+        "read_request_bytes": 16777217,
+        "wire_bytes": 89930,
+        "wire_sha256": "f9101318e394866ce80ad835b9d946385ad3252a9f47d4988519a132bae4bf33",
+        "content_length": null,
+        "encoding": "gzip",
+        "transfer_encoding": "chunked",
+        "status": 200,
+        "ok": true,
+        "decoded_bytes": 1103891,
+        "rows": 2156,
+        "payload_kind": "list",
+        "elapsed_seconds": 0.40334709268063307
+      },
+      {
+        "key": "equity_gate_coins",
+        "ttl_seconds": 300,
+        "read_request_bytes": 16777217,
+        "wire_bytes": 290914,
+        "wire_sha256": "7669abdfc3d38816fcc26f5f13ce534abe908860131f302bb8486efee05c99db",
+        "content_length": null,
+        "encoding": "gzip",
+        "transfer_encoding": "chunked",
+        "status": 200,
+        "ok": true,
+        "decoded_bytes": 2154215,
+        "rows": 5721,
+        "payload_kind": "list",
+        "elapsed_seconds": 0.5510204210877419
+      },
+      {
+        "key": "equity_bitget_instruments",
+        "ttl_seconds": 60,
+        "read_request_bytes": 16777217,
+        "wire_bytes": 171756,
+        "wire_sha256": "bfb4c9b97c0c6b65ac9eed194998800a7741731b277d79ff66729bd7c487890a",
+        "content_length": null,
+        "encoding": "gzip",
+        "transfer_encoding": "chunked",
+        "status": 200,
+        "ok": true,
+        "decoded_bytes": 2127825,
+        "rows": 3669,
+        "payload_kind": "dict",
+        "elapsed_seconds": 0.22505854163318872
+      },
+      {
+        "key": "equity_bitget_stocks",
+        "ttl_seconds": 600,
+        "read_request_bytes": 16777217,
+        "wire_bytes": 57862,
+        "wire_sha256": "c527a7ef00ca0b2deeabe504889c7118ad6fe36548b47bbc0898c58dc97ef281",
+        "content_length": null,
+        "encoding": "gzip",
+        "transfer_encoding": "chunked",
+        "status": 200,
+        "ok": true,
+        "decoded_bytes": 468506,
+        "rows": 3098,
+        "payload_kind": "dict",
+        "elapsed_seconds": 0.11153021454811096
+      },
+      {
+        "key": "equity_bybit_instruments",
+        "ttl_seconds": 15,
+        "read_request_bytes": 16777217,
+        "wire_bytes": 34999,
+        "wire_sha256": "f5dfea99ef1e36dbe8fab123b76e231163ed6f85e8220c64bf70a62689620812",
+        "content_length": null,
+        "encoding": "gzip",
+        "transfer_encoding": "chunked",
+        "status": 200,
+        "ok": true,
+        "decoded_bytes": 282584,
+        "rows": 521,
+        "payload_kind": "dict",
+        "elapsed_seconds": 0.06779075227677822
+      }
+    ],
+    "ended_at_utc": "2026-11-12T18:53:55.208845+00:00",
+    "source_unchanged": true
+  }
+}

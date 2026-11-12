@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "<stdin>", line 5, in <module>
+  File "/Users/a11/Documents/Codex/2026-08-05/bang/arbitrage-system/tests/summary_synthetic_app.py", line 51, in load
+    exec(compile(tree, str(source), 'exec'), module.__dict__)
+  File "/Users/a11/Documents/Codex/2026-08-05/bang/arbitrage-system/app.py", line 44, in <module>
+    from anomaly_streams import AlertStreamHub, Route
+ModuleNotFoundError: No module named 'anomaly_streams'

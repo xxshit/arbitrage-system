@@ -3948,9 +3948,24 @@ def load_equity_spot_snapshot():
 
 
 def fetch_equity_metadata(url):
-    # Large identity directories must never hold up the five-second price loop.
-    payload = get_json(url, timeout=3)
-    return payload, time.monotonic()
+    # Network waits stay off the five-second price loop. Transfer bounded wire
+    # bytes, not decoded directory trees: their cache owner also decodes and
+    # replaces them, so large temporary buffers reuse the same allocator arena.
+    request = Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ArbiScope/1.0",
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+    })
+    try:
+        with urlopen(request, timeout=3, context=MARKET_HTTP.context) as response:
+            body = response.read(16 * 1024 * 1024 + 1)
+            if len(body) > 16 * 1024 * 1024:
+                raise ValueError("public_payload_too_large")
+            encoding = response.headers.get("Content-Encoding", "")
+    except HTTPError as exc:
+        exc.close()
+        raise
+    return (body, encoding), time.monotonic()
 
 
 def collect_equity_metadata():
@@ -3961,7 +3976,8 @@ def collect_equity_metadata():
             continue
         del EQUITY_METADATA_PENDING[key]
         try:
-            payload, observed = future.result()
+            document, observed = future.result()
+            payload = decode_json(document[0], document[1])[0]
             MARKET_PAYLOAD_CACHE[EQUITY_SPOT_URLS[key]] = dict(payload=payload, fetched_at=observed)
             EQUITY_METADATA_ERRORS.pop(key, None)
         except Exception as exc:

@@ -118,16 +118,21 @@ class FutureConsumerTests(unittest.TestCase):
         def fetch(url):
             if url == 'bad':
                 raise TimeoutError('synthetic peer unavailable')
-            return Payload(value='metadata'), 999.
+            return (b'{"value":"metadata"}', ''), 999.
         good = self.pool.submit(fetch, 'good')
         bad = self.pool.submit(fetch, 'bad')
-        reference = weakref.ref(good.result()[0])
+        references = []
+        def decode(body, encoding):
+            self.assertEqual((body, encoding), (b'{"value":"metadata"}', ''))
+            payload = Payload(value='metadata')
+            references.append(weakref.ref(payload))
+            return payload, len(body)
         self.env.update(EQUITY_METADATA_PENDING={'good': good, 'equity_bybit_instruments': bad},
                         EQUITY_SPOT_URLS={'good': 'good', 'equity_bybit_instruments': 'bad'},
                         EQUITY_SPOT_TTLS={'good': 3600, 'equity_bybit_instruments': 3600},
                         MARKET_PAYLOAD_CACHE={}, EQUITY_METADATA_ERRORS={},
                         EQUITY_METADATA_RETRY_AT={}, EQUITY_METADATA_POOL=self.pool,
-                        fetch_equity_metadata=fetch)
+                        fetch_equity_metadata=fetch, decode_json=decode)
         results, errors = self.env['collect_equity_metadata']()
         self.assertEqual(results, {'good': {'value': 'metadata'}})
         self.assertEqual(errors, {'equity_bybit_instruments': 'TimeoutError'})
@@ -135,7 +140,8 @@ class FutureConsumerTests(unittest.TestCase):
         self.assertEqual(self.env['EQUITY_METADATA_PENDING'], {})
         self.env['MARKET_PAYLOAD_CACHE'].clear()
         del results, good, bad
-        self.assertIsNone(reference())
+        self.assertEqual(len(references), 1)
+        self.assertIsNone(references[0]())
 
     def test_real_pool_failure_releases_open_interest_input(self):
         def fail(*args, **kwargs):

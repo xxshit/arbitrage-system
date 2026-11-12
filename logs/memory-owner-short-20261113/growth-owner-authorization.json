@@ -1,0 +1,7 @@
+{
+  "recorded_at_utc": "2026-11-12T18:49:43.756948+00:00",
+  "user_answer": "允许这次针对新线程的采样",
+  "scope": "One nonblocking 20-second 5 Hz sample, total hard deadline 30 seconds. Only TID 2383650 function/line counts; no raw stacks, locals, accounts or SQL. No restart or retry.",
+  "proposal_sha256": "75177819097aed816fafa123caa03c5aa176055a95b2ef76cb73496018540b1a",
+  "remote_dir": "/tmp/arbiscope-growth-owner-20261113"
+}

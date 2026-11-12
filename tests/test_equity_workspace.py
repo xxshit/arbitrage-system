@@ -252,7 +252,7 @@ class EquityWorkspaceTests(unittest.TestCase):
             self.assertEqual(len(created), 5)
             module.collect_equity_metadata()  # never waits on unfinished futures, never duplicates
             self.assertEqual(len(created), 5)
-            created[0].set_result(({'retCode':0}, 99))
+            created[0].set_result(((b'{"retCode":0}', ''), 99))
             result, errors = module.collect_equity_metadata()
             self.assertIn('equity_bybit_instruments', result)
             self.assertNotIn('equity_bybit_instruments', errors)

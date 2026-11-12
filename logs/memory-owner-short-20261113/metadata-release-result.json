@@ -1,0 +1,577 @@
+{
+  "started_at_utc": "2026-11-12T19:00:49.902182+00:00",
+  "source_sha256": {
+    "app.py": "1c4fc4f972dcd5748dac9596b7fc981a793f69169030845825e0a23526595eae",
+    "market_transport.py": "968f2b2c2daba7704a35ced5d631d9cb0496c2a4f6341418622ee52e74c30d21",
+    "equity_spot.py": "d5f82b4918a65b2f751caac4ecb2354fb6dbfcce450055b910fcaa9086e69edc"
+  },
+  "arms": [
+    {
+      "arm": "worker-buffer-release",
+      "pid": 2387024,
+      "thread_ids": [
+        2387025,
+        2387026,
+        2387027
+      ],
+      "elapsed_seconds": 2.3815083066001534,
+      "ticks": 240,
+      "ttl_clock": "synthetic 15-second increments, NOT elapsed time",
+      "calls": {
+        "equity_gate_pairs": 60,
+        "equity_gate_coins": 12,
+        "equity_bitget_instruments": 60,
+        "equity_bitget_stocks": 6,
+        "equity_bybit_instruments": 240
+      },
+      "baseline": {
+        "rss_bytes": 25522176,
+        "anonymous_bytes": 14213120,
+        "malloc_used": 4873248,
+        "malloc_free": 730080,
+        "malloc_arena": 5603328,
+        "malloc_mapped": 610304,
+        "python_blocks": 69408,
+        "gc_counts": [
+          125,
+          9,
+          2
+        ]
+      },
+      "samples": [
+        {
+          "tick": 0,
+          "rss_bytes": 50868224,
+          "anonymous_bytes": 39493632,
+          "malloc_used": 9603824,
+          "malloc_free": 5252368,
+          "malloc_arena": 14856192,
+          "malloc_mapped": 610304,
+          "python_blocks": 311701,
+          "gc_counts": [
+            2,
+            2,
+            3
+          ]
+        },
+        {
+          "tick": 1,
+          "rss_bytes": 51892224,
+          "anonymous_bytes": 40517632,
+          "malloc_used": 9604336,
+          "malloc_free": 5251856,
+          "malloc_arena": 14856192,
+          "malloc_mapped": 610304,
+          "python_blocks": 311852,
+          "gc_counts": [
+            2,
+            3,
+            3
+          ]
+        },
+        {
+          "tick": 3,
+          "rss_bytes": 52260864,
+          "anonymous_bytes": 40886272,
+          "malloc_used": 9605648,
+          "malloc_free": 5250544,
+          "malloc_arena": 14856192,
+          "malloc_mapped": 610304,
+          "python_blocks": 311869,
+          "gc_counts": [
+            2,
+            5,
+            3
+          ]
+        },
+        {
+          "tick": 7,
+          "rss_bytes": 67280896,
+          "anonymous_bytes": 55906304,
+          "malloc_used": 9619008,
+          "malloc_free": 19417536,
+          "malloc_arena": 29036544,
+          "malloc_mapped": 610304,
+          "python_blocks": 311941,
+          "gc_counts": [
+            2,
+            11,
+            3
+          ]
+        },
+        {
+          "tick": 15,
+          "rss_bytes": 78852096,
+          "anonymous_bytes": 67477504,
+          "malloc_used": 9640976,
+          "malloc_free": 30290928,
+          "malloc_arena": 39931904,
+          "malloc_mapped": 610304,
+          "python_blocks": 311960,
+          "gc_counts": [
+            2,
+            11,
+            4
+          ]
+        },
+        {
+          "tick": 29,
+          "rss_bytes": 95776768,
+          "anonymous_bytes": 84402176,
+          "malloc_used": 9692592,
+          "malloc_free": 43059792,
+          "malloc_arena": 52752384,
+          "malloc_mapped": 610304,
+          "python_blocks": 311985,
+          "gc_counts": [
+            2,
+            10,
+            6
+          ]
+        },
+        {
+          "tick": 59,
+          "rss_bytes": 121823232,
+          "anonymous_bytes": 110448640,
+          "malloc_used": 9740416,
+          "malloc_free": 62189440,
+          "malloc_arena": 71929856,
+          "malloc_mapped": 610304,
+          "python_blocks": 312026,
+          "gc_counts": [
+            2,
+            8,
+            10
+          ]
+        },
+        {
+          "tick": 89,
+          "rss_bytes": 147472384,
+          "anonymous_bytes": 136097792,
+          "malloc_used": 9755120,
+          "malloc_free": 85763600,
+          "malloc_arena": 95518720,
+          "malloc_mapped": 610304,
+          "python_blocks": 311922,
+          "gc_counts": [
+            2,
+            8,
+            3
+          ]
+        },
+        {
+          "tick": 119,
+          "rss_bytes": 150798336,
+          "anonymous_bytes": 139423744,
+          "malloc_used": 9765104,
+          "malloc_free": 94211856,
+          "malloc_arena": 103976960,
+          "malloc_mapped": 610304,
+          "python_blocks": 311966,
+          "gc_counts": [
+            2,
+            5,
+            7
+          ]
+        },
+        {
+          "tick": 149,
+          "rss_bytes": 161374208,
+          "anonymous_bytes": 149999616,
+          "malloc_used": 9773520,
+          "malloc_free": 100666928,
+          "malloc_arena": 110440448,
+          "malloc_mapped": 610304,
+          "python_blocks": 312001,
+          "gc_counts": [
+            3,
+            5,
+            0
+          ]
+        },
+        {
+          "tick": 179,
+          "rss_bytes": 163418112,
+          "anonymous_bytes": 152043520,
+          "malloc_used": 9778560,
+          "malloc_free": 100661888,
+          "malloc_arena": 110440448,
+          "malloc_mapped": 610304,
+          "python_blocks": 312047,
+          "gc_counts": [
+            2,
+            3,
+            4
+          ]
+        },
+        {
+          "tick": 209,
+          "rss_bytes": 163454976,
+          "anonymous_bytes": 152080384,
+          "malloc_used": 9783056,
+          "malloc_free": 100657392,
+          "malloc_arena": 110440448,
+          "malloc_mapped": 610304,
+          "python_blocks": 312087,
+          "gc_counts": [
+            2,
+            4,
+            8
+          ]
+        },
+        {
+          "tick": 239,
+          "rss_bytes": 163454976,
+          "anonymous_bytes": 152080384,
+          "malloc_used": 9785936,
+          "malloc_free": 100654512,
+          "malloc_arena": 110440448,
+          "malloc_mapped": 610304,
+          "python_blocks": 312125,
+          "gc_counts": [
+            3,
+            0,
+            1
+          ]
+        }
+      ],
+      "after_work": {
+        "rss_bytes": 163454976,
+        "anonymous_bytes": 152080384,
+        "malloc_used": 9785936,
+        "malloc_free": 100654512,
+        "malloc_arena": 110440448,
+        "malloc_mapped": 610304,
+        "python_blocks": 312136,
+        "gc_counts": [
+          6,
+          0,
+          1
+        ]
+      },
+      "after_shutdown": {
+        "rss_bytes": 111435776,
+        "anonymous_bytes": 99930112,
+        "malloc_used": 9594304,
+        "malloc_free": 48708160,
+        "malloc_arena": 58302464,
+        "malloc_mapped": 610304,
+        "python_blocks": 312121,
+        "gc_counts": [
+          2,
+          0,
+          1
+        ]
+      },
+      "after_release": {
+        "rss_bytes": 90394624,
+        "anonymous_bytes": 78692352,
+        "malloc_used": 4898528,
+        "malloc_free": 38392096,
+        "malloc_arena": 43290624,
+        "malloc_mapped": 610304,
+        "python_blocks": 69997,
+        "gc_counts": [
+          3,
+          0,
+          1
+        ]
+      },
+      "validation": {
+        "ok": true,
+        "pid": 2387028,
+        "directories": 5
+      },
+      "publish_max_ms": 4.234944470226765,
+      "publish_p95_ms": 2.4719135835766792,
+      "tracked_payloads": 0,
+      "max_live_payloads": 0,
+      "live_after_cache_clear": 0,
+      "source_unchanged": true
+    },
+    {
+      "arm": "main-buffer-release",
+      "pid": 2387029,
+      "thread_ids": [
+        2387030,
+        2387031,
+        2387032
+      ],
+      "elapsed_seconds": 2.3231633100658655,
+      "ticks": 240,
+      "ttl_clock": "synthetic 15-second increments, NOT elapsed time",
+      "calls": {
+        "equity_gate_pairs": 60,
+        "equity_gate_coins": 12,
+        "equity_bitget_instruments": 60,
+        "equity_bitget_stocks": 6,
+        "equity_bybit_instruments": 240
+      },
+      "baseline": {
+        "rss_bytes": 25653248,
+        "anonymous_bytes": 14323712,
+        "malloc_used": 4875680,
+        "malloc_free": 727648,
+        "malloc_arena": 5603328,
+        "malloc_mapped": 610304,
+        "python_blocks": 70534,
+        "gc_counts": [
+          57,
+          10,
+          2
+        ]
+      },
+      "samples": [
+        {
+          "tick": 0,
+          "rss_bytes": 52514816,
+          "anonymous_bytes": 41119744,
+          "malloc_used": 9588432,
+          "malloc_free": 7024944,
+          "malloc_arena": 16613376,
+          "malloc_mapped": 610304,
+          "python_blocks": 312752,
+          "gc_counts": [
+            2,
+            3,
+            3
+          ]
+        },
+        {
+          "tick": 1,
+          "rss_bytes": 53538816,
+          "anonymous_bytes": 42143744,
+          "malloc_used": 9588688,
+          "malloc_free": 7024688,
+          "malloc_arena": 16613376,
+          "malloc_mapped": 610304,
+          "python_blocks": 312916,
+          "gc_counts": [
+            2,
+            4,
+            3
+          ]
+        },
+        {
+          "tick": 3,
+          "rss_bytes": 54026240,
+          "anonymous_bytes": 42631168,
+          "malloc_used": 9590672,
+          "malloc_free": 7022704,
+          "malloc_arena": 16613376,
+          "malloc_mapped": 610304,
+          "python_blocks": 312933,
+          "gc_counts": [
+            2,
+            6,
+            3
+          ]
+        },
+        {
+          "tick": 7,
+          "rss_bytes": 63090688,
+          "anonymous_bytes": 51695616,
+          "malloc_used": 9608352,
+          "malloc_free": 13603680,
+          "malloc_arena": 23212032,
+          "malloc_mapped": 610304,
+          "python_blocks": 313045,
+          "gc_counts": [
+            2,
+            0,
+            4
+          ]
+        },
+        {
+          "tick": 15,
+          "rss_bytes": 73347072,
+          "anonymous_bytes": 61952000,
+          "malloc_used": 9619360,
+          "malloc_free": 22784096,
+          "malloc_arena": 32403456,
+          "malloc_mapped": 610304,
+          "python_blocks": 313064,
+          "gc_counts": [
+            2,
+            0,
+            5
+          ]
+        },
+        {
+          "tick": 29,
+          "rss_bytes": 86167552,
+          "anonymous_bytes": 74772480,
+          "malloc_used": 9635296,
+          "malloc_free": 31705632,
+          "malloc_arena": 41340928,
+          "malloc_mapped": 610304,
+          "python_blocks": 313091,
+          "gc_counts": [
+            2,
+            11,
+            6
+          ]
+        },
+        {
+          "tick": 59,
+          "rss_bytes": 90361856,
+          "anonymous_bytes": 78966784,
+          "malloc_used": 9644992,
+          "malloc_free": 31695936,
+          "malloc_arena": 41340928,
+          "malloc_mapped": 610304,
+          "python_blocks": 313132,
+          "gc_counts": [
+            2,
+            9,
+            10
+          ]
+        },
+        {
+          "tick": 89,
+          "rss_bytes": 86532096,
+          "anonymous_bytes": 75137024,
+          "malloc_used": 9648512,
+          "malloc_free": 25728640,
+          "malloc_arena": 35377152,
+          "malloc_mapped": 610304,
+          "python_blocks": 313033,
+          "gc_counts": [
+            2,
+            9,
+            3
+          ]
+        },
+        {
+          "tick": 119,
+          "rss_bytes": 86540288,
+          "anonymous_bytes": 75145216,
+          "malloc_used": 9650112,
+          "malloc_free": 25727040,
+          "malloc_arena": 35377152,
+          "malloc_mapped": 610304,
+          "python_blocks": 313076,
+          "gc_counts": [
+            2,
+            6,
+            7
+          ]
+        },
+        {
+          "tick": 149,
+          "rss_bytes": 89661440,
+          "anonymous_bytes": 78266368,
+          "malloc_used": 9654544,
+          "malloc_free": 27848432,
+          "malloc_arena": 37502976,
+          "malloc_mapped": 610304,
+          "python_blocks": 313108,
+          "gc_counts": [
+            3,
+            6,
+            0
+          ]
+        },
+        {
+          "tick": 179,
+          "rss_bytes": 89661440,
+          "anonymous_bytes": 78266368,
+          "malloc_used": 9659456,
+          "malloc_free": 27843520,
+          "malloc_arena": 37502976,
+          "malloc_mapped": 610304,
+          "python_blocks": 313157,
+          "gc_counts": [
+            2,
+            4,
+            4
+          ]
+        },
+        {
+          "tick": 209,
+          "rss_bytes": 89661440,
+          "anonymous_bytes": 78266368,
+          "malloc_used": 9663360,
+          "malloc_free": 27839616,
+          "malloc_arena": 37502976,
+          "malloc_mapped": 610304,
+          "python_blocks": 313198,
+          "gc_counts": [
+            2,
+            5,
+            8
+          ]
+        },
+        {
+          "tick": 239,
+          "rss_bytes": 89661440,
+          "anonymous_bytes": 78266368,
+          "malloc_used": 9664032,
+          "malloc_free": 27838944,
+          "malloc_arena": 37502976,
+          "malloc_mapped": 610304,
+          "python_blocks": 313231,
+          "gc_counts": [
+            3,
+            1,
+            1
+          ]
+        }
+      ],
+      "after_work": {
+        "rss_bytes": 89661440,
+        "anonymous_bytes": 78266368,
+        "malloc_used": 9664032,
+        "malloc_free": 27838944,
+        "malloc_arena": 37502976,
+        "malloc_mapped": 610304,
+        "python_blocks": 313242,
+        "gc_counts": [
+          6,
+          1,
+          1
+        ]
+      },
+      "after_shutdown": {
+        "rss_bytes": 89780224,
+        "anonymous_bytes": 78254080,
+        "malloc_used": 9636384,
+        "malloc_free": 27866592,
+        "malloc_arena": 37502976,
+        "malloc_mapped": 610304,
+        "python_blocks": 313228,
+        "gc_counts": [
+          2,
+          1,
+          1
+        ]
+      },
+      "after_release": {
+        "rss_bytes": 87896064,
+        "anonymous_bytes": 76173312,
+        "malloc_used": 4940576,
+        "malloc_free": 32562400,
+        "malloc_arena": 37502976,
+        "malloc_mapped": 610304,
+        "python_blocks": 71104,
+        "gc_counts": [
+          3,
+          1,
+          1
+        ]
+      },
+      "validation": {
+        "ok": true,
+        "pid": 2387034,
+        "directories": 5
+      },
+      "publish_max_ms": 55.55343069136143,
+      "publish_p95_ms": 41.000090539455414,
+      "tracked_payloads": 0,
+      "max_live_payloads": 0,
+      "live_after_cache_clear": 0,
+      "source_unchanged": true
+    }
+  ],
+  "ended_at_utc": "2026-11-12T19:00:54.726862+00:00"
+}

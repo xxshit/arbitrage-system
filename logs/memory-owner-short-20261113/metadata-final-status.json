@@ -1,0 +1,83 @@
+{
+  "captured_at_utc": "2026-11-12T19:08:31.778105+00:00",
+  "services": {
+    "arbitrage-private": {
+      "MainPID": "2383599",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "InvocationID": "25e853ed5afe41bbabb2a7a1d6f380a6"
+    },
+    "mysql": {
+      "MainPID": "398829",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "InvocationID": "43b595043d5e45ce824f9332a34556c3"
+    },
+    "lewan-game": {
+      "MainPID": "398878",
+      "NRestarts": "0",
+      "ActiveState": "active",
+      "InvocationID": "9713cdbc61094381bc0d3c8bc27eca11"
+    }
+  },
+  "worker_pids": [
+    "2383603"
+  ],
+  "worker_start_ticks": 727482204,
+  "memory": {
+    "Rss_bytes": 797302784,
+    "Private_Dirty_bytes": 773582848,
+    "Anonymous_bytes": 777506816,
+    "Swap_bytes": 0
+  },
+  "source_sha256": {
+    "app.py": "1c4fc4f972dcd5748dac9596b7fc981a793f69169030845825e0a23526595eae",
+    "market_transport.py": "968f2b2c2daba7704a35ced5d631d9cb0496c2a4f6341418622ee52e74c30d21",
+    "snapshot_persistence.py": "fea4ad427fcdfa3b190e66dd1171e2775f3b78ef572a505f230a6173ab8fa2d2",
+    "equity_spot.py": "d5f82b4918a65b2f751caac4ecb2354fb6dbfcce450055b910fcaa9086e69edc"
+  },
+  "host_memory_pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=285880465275\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=263684612455",
+  "disk_free_bytes": 9906978816,
+  "quote_ages": [
+    [
+      "spot",
+      "2026-11-12 19:08:17",
+      "14"
+    ],
+    [
+      "dual",
+      "2026-11-12 19:08:30",
+      "1"
+    ],
+    [
+      "alarm",
+      "2026-11-12 19:08:32",
+      "-1"
+    ]
+  ],
+  "rules": [
+    [
+      "dual_market_refresh",
+      "1",
+      "5"
+    ],
+    [
+      "spot_market_refresh",
+      "1",
+      "5"
+    ]
+  ],
+  "transactions": [
+    [
+      "0",
+      "0"
+    ]
+  ],
+  "connections": [
+    [
+      "Sleep",
+      "5",
+      "1"
+    ]
+  ]
+}

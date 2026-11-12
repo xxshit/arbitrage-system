@@ -1,0 +1,38 @@
+test_network_worker_transfers_wire_without_decoding (tests.test_equity_metadata_ownership.EquityMetadataOwnershipTests.test_network_worker_transfers_wire_without_decoding) ... FAIL
+test_full_values_decode_only_on_cache_owner_with_original_observation_time (tests.test_equity_metadata_ownership.EquityMetadataOwnershipTests.test_full_values_decode_only_on_cache_owner_with_original_observation_time) ... FAIL
+
+======================================================================
+FAIL: test_network_worker_transfers_wire_without_decoding (tests.test_equity_metadata_ownership.EquityMetadataOwnershipTests.test_network_worker_transfers_wire_without_decoding)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/a11/Documents/Codex/2026-08-05/bang/arbitrage-system/tests/test_equity_metadata_ownership.py", line 64, in test_network_worker_transfers_wire_without_decoding
+    self.assertEqual(future.result(timeout=2),((body,'gzip'),100.))
+AssertionError: Tuples differ: ({'retCode': 0, 'result': {'list': [{'valu[27 chars]00.0) != ((b'\x1f\x8b\x08\x00O\r\xf6j\x02\xff\xabV*[188 chars]00.0)
+
+First differing element 0:
+{'retCode': 0, 'result': {'list': [{'valu[19 chars]5}]}}
+(b'\x1f\x8b\x08\x00O\r\xf6j\x02\xff\xabV*[180 chars]zip')
+
+- ({'result': {'list': [{'value': 1.23456789012345}]}, 'retCode': 0}, 100.0)
++ ((b'\x1f\x8b\x08\x00O\r\xf6j\x02\xff\xabV*J-q\xceOIU\xb22\xd0\x01\xb2\x8bKs'
++   b'J\x94\xac\xaa\x95r2\x8b\x81tt\xb5RYbN)P\xd2P\xcf\xc8\xd8\xc4'
++   b'\xd4\xcc\xdc\xc2\xd2\xc0\x10\xc4\xaa\x8d\xad\xad\x05\x00A\x84\xba\x05<\x00'
++   b'\x00\x00',
++   'gzip'),
++  100.0)
+
+======================================================================
+FAIL: test_full_values_decode_only_on_cache_owner_with_original_observation_time (tests.test_equity_metadata_ownership.EquityMetadataOwnershipTests.test_full_values_decode_only_on_cache_owner_with_original_observation_time)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/a11/Documents/Codex/2026-08-05/bang/arbitrage-system/tests/test_equity_metadata_ownership.py", line 80, in test_full_values_decode_only_on_cache_owner_with_original_observation_time
+    self.assertEqual(result,{KEY:value});self.assertEqual(errors,{})
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: {'equ[19 chars]ts': (b"\x1f\x8b\x08\x00O\r\xf6j\x02\xff\xabV*[295 chars]ip')} != {'equ[19 chars]ts': {'retCode': 0, 'result': {'list': [{'name[85 chars]}]}}}
+Diff is 1100 characters long. Set self.maxDiff to None to see it.
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.370s
+
+FAILED (failures=2)
+{"expected_baseline_failures": 2, "failures": 2, "errors": 0}

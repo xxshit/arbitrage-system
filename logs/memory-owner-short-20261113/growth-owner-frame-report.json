@@ -1,0 +1,87 @@
+{
+  "elapsed_seconds": 18.53350627515465,
+  "sampler_exit": 0,
+  "abort": null,
+  "pipe_counts": {
+    "stdout_bytes": 160357,
+    "stderr_bytes": 0,
+    "errors": 0
+  },
+  "aggregate": {
+    "counts": {
+      "lines": 326,
+      "invalid": 4,
+      "other_thread_samples": 10974,
+      "target_thread_samples": 93,
+      "unknown_frames": 402
+    },
+    "frames": [
+      {
+        "tid": 2383650,
+        "file": "app.py",
+        "function": "fetch_equity_metadata",
+        "line": 3887,
+        "count": 3
+      },
+      {
+        "tid": 2383650,
+        "file": "app.py",
+        "function": "get_json",
+        "line": 1637,
+        "count": 2
+      },
+      {
+        "tid": 2383650,
+        "file": "app.py",
+        "function": "get_json",
+        "line": 1638,
+        "count": 1
+      },
+      {
+        "tid": 2383650,
+        "file": "market_transport.py",
+        "function": "decode_json",
+        "line": 55,
+        "count": 1
+      }
+    ]
+  },
+  "started_at_utc": "2026-11-12T18:49:44.779359+00:00",
+  "ended_at_utc": "2026-11-12T18:50:03.312916+00:00",
+  "counters_before": {
+    "at_utc": "2026-11-12T18:49:44.779344+00:00",
+    "rss_bytes": 772898816,
+    "anonymous_bytes": 753135616,
+    "threads": {
+      "2383650": {
+        "minor_faults": 47354,
+        "major_faults": 0,
+        "cpu_ticks": 329
+      }
+    }
+  },
+  "counters_after": {
+    "at_utc": "2026-11-12T18:50:03.313081+00:00",
+    "rss_bytes": 772898816,
+    "anonymous_bytes": 753135616,
+    "threads": {
+      "2383650": {
+        "minor_faults": 47354,
+        "major_faults": 0,
+        "cpu_ticks": 332
+      }
+    }
+  },
+  "identity": {
+    "master": 2383599,
+    "worker": 2383603,
+    "invocation": "25e853ed5afe41bbabb2a7a1d6f380a6",
+    "start_ticks": 727482204
+  },
+  "quote_age_before": 9,
+  "quote_age_after": 8,
+  "boundary": "New approval only: 20 seconds collecting, 30 second hard deadline including startup/output. No repeat. Function counts are not retained-allocation attribution.",
+  "valid_function_mapping": true,
+  "wrapper_exit": 0,
+  "wrapper_stderr_bytes": 0
+}

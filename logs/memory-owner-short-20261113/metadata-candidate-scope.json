@@ -1,0 +1,14 @@
+{
+  "status": "LOCAL_ONLY_NOT_DEPLOYED",
+  "baseline_app_sha256": "1c4fc4f972dcd5748dac9596b7fc981a793f69169030845825e0a23526595eae",
+  "candidate_app_sha256": "3e3c818f8f3d38410eef87e325535017d5456e959a04bc09421da5b4908b9696",
+  "changed_definitions": [
+    "fetch_equity_metadata",
+    "collect_equity_metadata"
+  ],
+  "other_definitions_unchanged": true,
+  "includes_private_consumer_traceback_cleanup": true,
+  "market_refresh_seconds": 5,
+  "metadata_refresh_seconds": 15,
+  "metadata_pool_workers": 3
+}

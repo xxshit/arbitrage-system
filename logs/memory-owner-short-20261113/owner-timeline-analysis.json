@@ -1,0 +1,130 @@
+{
+  "status": "completed",
+  "total_memory_delta": {
+    "Rss_bytes": 3952640,
+    "Private_Dirty_bytes": 3952640,
+    "Anonymous_bytes": 3952640,
+    "Swap_bytes": 0,
+    "stat_rss_bytes": 3932160,
+    "process_minor": 3335
+  },
+  "top_faults": [
+    [
+      2383615,
+      2370
+    ],
+    [
+      2383650,
+      965
+    ],
+    [
+      2383616,
+      0
+    ],
+    [
+      2383649,
+      0
+    ],
+    [
+      2383657,
+      0
+    ],
+    [
+      2383658,
+      0
+    ],
+    [
+      2383660,
+      0
+    ],
+    [
+      2383661,
+      0
+    ],
+    [
+      2383664,
+      0
+    ],
+    [
+      2383666,
+      0
+    ]
+  ],
+  "faults_in_growth_seconds": [
+    [
+      2383650,
+      965
+    ],
+    [
+      2383605,
+      0
+    ],
+    [
+      2383606,
+      0
+    ],
+    [
+      2383614,
+      0
+    ],
+    [
+      2383624,
+      0
+    ],
+    [
+      2383649,
+      0
+    ],
+    [
+      2383652,
+      0
+    ],
+    [
+      2383653,
+      0
+    ],
+    [
+      2383655,
+      0
+    ],
+    [
+      2383665,
+      0
+    ]
+  ],
+  "spikes": [
+    {
+      "at": "2026-11-12T18:22:37.032527+00:00",
+      "anonymous_delta": 2977792,
+      "rss_delta": 2977792,
+      "stat_delta": 3014656,
+      "fault_delta": 727,
+      "threads": [
+        {
+          "tid": 2383650,
+          "start_ticks": 727482295,
+          "minor": 727,
+          "cpu_ticks": 3
+        }
+      ]
+    },
+    {
+      "at": "2026-11-12T18:23:47.032619+00:00",
+      "anonymous_delta": 974848,
+      "rss_delta": 974848,
+      "stat_delta": 1048576,
+      "fault_delta": 238,
+      "threads": [
+        {
+          "tid": 2383650,
+          "start_ticks": 727482295,
+          "minor": 238,
+          "cpu_ticks": 2
+        }
+      ]
+    }
+  ],
+  "falls": [],
+  "maximum_read_seconds": 0.017602022737264633,
+  "identity_unchanged": true
+}

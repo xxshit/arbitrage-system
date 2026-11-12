@@ -1,0 +1,801 @@
+{
+  "elapsed_seconds": 19.725981069728732,
+  "sampler_exit": 0,
+  "abort": null,
+  "pipe_counts": {
+    "stdout_bytes": 116354,
+    "stderr_bytes": 0,
+    "errors": 0
+  },
+  "aggregate": {
+    "counts": {
+      "lines": 264,
+      "invalid": 4,
+      "target_thread_samples": 760,
+      "unknown_frames": 3570,
+      "other_thread_samples": 10545
+    },
+    "frames": [
+      {
+        "tid": 2383614,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.register",
+        "line": 201,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "background_spot_market_refresh",
+        "line": 15545,
+        "count": 17
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "background_spot_market_refresh",
+        "line": 15551,
+        "count": 78
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "capture_price_history",
+        "line": 2912,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "evaluate_alerts",
+        "line": 3766,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "evaluate_alerts",
+        "line": 3777,
+        "count": 4
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "fetch_market_payloads",
+        "line": 1662,
+        "count": 3
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "load_transfer_statuses",
+        "line": 2347,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "load_transfer_statuses",
+        "line": 2354,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "load_transfer_statuses",
+        "line": 2366,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "opportunity_source",
+        "line": 13326,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "refresh_binance_open_interest",
+        "line": 2420,
+        "count": 3
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "register_alert_routes",
+        "line": 3621,
+        "count": 3
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "register_alert_routes",
+        "line": 3645,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "register_alert_routes.<locals>.<genexpr>",
+        "line": 3621,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "save_latest_market_snapshot",
+        "line": 3852,
+        "count": 3
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "spot_futures_snapshot",
+        "line": 3960,
+        "count": 3
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "spot_futures_snapshot",
+        "line": 4005,
+        "count": 3
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "spot_futures_snapshot",
+        "line": 4053,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "spot_futures_snapshot",
+        "line": 4057,
+        "count": 5
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "spot_futures_snapshot",
+        "line": 4065,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "spot_futures_snapshot",
+        "line": 4081,
+        "count": 3
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "spot_futures_snapshot",
+        "line": 4085,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "app.py",
+        "function": "update_spot_divergences",
+        "line": 3586,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "background_runtime.py",
+        "function": "WorkerRuntime.guard.<locals>.run",
+        "line": 44,
+        "count": 95
+      },
+      {
+        "tid": 2383614,
+        "file": "snapshot_persistence.py",
+        "function": "update_snapshots",
+        "line": 69,
+        "count": 2
+      },
+      {
+        "tid": 2383614,
+        "file": "snapshot_persistence.py",
+        "function": "update_snapshots",
+        "line": 74,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "spread_history.py",
+        "function": "HistoryBuffer.observe",
+        "line": 81,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "spread_history.py",
+        "function": "extrema",
+        "line": 23,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "spread_history.py",
+        "function": "observations",
+        "line": 53,
+        "count": 1
+      },
+      {
+        "tid": 2383614,
+        "file": "spread_history.py",
+        "function": "observations.<locals>.stamp",
+        "line": 40,
+        "count": 1
+      },
+      {
+        "tid": 2383615,
+        "file": "app.py",
+        "function": "background_spread_history",
+        "line": 15534,
+        "count": 95
+      },
+      {
+        "tid": 2383615,
+        "file": "background_runtime.py",
+        "function": "WorkerRuntime.guard.<locals>.run",
+        "line": 44,
+        "count": 95
+      },
+      {
+        "tid": 2383616,
+        "file": "app.py",
+        "function": "background_dual_market_refresh",
+        "line": 15564,
+        "count": 11
+      },
+      {
+        "tid": 2383616,
+        "file": "app.py",
+        "function": "background_dual_market_refresh",
+        "line": 15569,
+        "count": 84
+      },
+      {
+        "tid": 2383616,
+        "file": "app.py",
+        "function": "dual_futures_snapshot",
+        "line": 4125,
+        "count": 2
+      },
+      {
+        "tid": 2383616,
+        "file": "app.py",
+        "function": "dual_futures_snapshot",
+        "line": 4161,
+        "count": 1
+      },
+      {
+        "tid": 2383616,
+        "file": "app.py",
+        "function": "dual_futures_snapshot",
+        "line": 4179,
+        "count": 1
+      },
+      {
+        "tid": 2383616,
+        "file": "app.py",
+        "function": "dual_futures_snapshot",
+        "line": 4241,
+        "count": 1
+      },
+      {
+        "tid": 2383616,
+        "file": "app.py",
+        "function": "dual_futures_snapshot",
+        "line": 4255,
+        "count": 6
+      },
+      {
+        "tid": 2383616,
+        "file": "app.py",
+        "function": "enrich_next_funding_net",
+        "line": 3011,
+        "count": 1
+      },
+      {
+        "tid": 2383616,
+        "file": "app.py",
+        "function": "fetch_market_payloads",
+        "line": 1662,
+        "count": 2
+      },
+      {
+        "tid": 2383616,
+        "file": "app.py",
+        "function": "format_funding_time",
+        "line": 2969,
+        "count": 1
+      },
+      {
+        "tid": 2383616,
+        "file": "app.py",
+        "function": "next_settlement_boundary",
+        "line": 2997,
+        "count": 1
+      },
+      {
+        "tid": 2383616,
+        "file": "app.py",
+        "function": "save_latest_dual_futures_snapshot",
+        "line": 3226,
+        "count": 6
+      },
+      {
+        "tid": 2383616,
+        "file": "background_runtime.py",
+        "function": "WorkerRuntime.guard.<locals>.run",
+        "line": 44,
+        "count": 95
+      },
+      {
+        "tid": 2383616,
+        "file": "snapshot_persistence.py",
+        "function": "update_snapshots",
+        "line": 74,
+        "count": 6
+      },
+      {
+        "tid": 2383649,
+        "file": "market_transport.py",
+        "function": "PublicMarketHttp.get_json",
+        "line": 158,
+        "count": 5
+      },
+      {
+        "tid": 2383649,
+        "file": "quote_refresh.py",
+        "function": "PublicBookRefresh.confirm_bulk",
+        "line": 278,
+        "count": 5
+      },
+      {
+        "tid": 2383649,
+        "file": "quote_refresh.py",
+        "function": "PublicBookRefresh.run",
+        "line": 236,
+        "count": 95
+      },
+      {
+        "tid": 2383649,
+        "file": "quote_refresh.py",
+        "function": "PublicBookRefresh.run_bulk",
+        "line": 297,
+        "count": 5
+      },
+      {
+        "tid": 2383649,
+        "file": "quote_refresh.py",
+        "function": "PublicBookRefresh.run_bulk",
+        "line": 304,
+        "count": 90
+      },
+      {
+        "tid": 2383656,
+        "file": "market_transport.py",
+        "function": "PublicMarketHttp.get_json",
+        "line": 158,
+        "count": 3
+      },
+      {
+        "tid": 2383656,
+        "file": "market_transport.py",
+        "function": "PublicMarketHttp.get_json",
+        "line": 192,
+        "count": 2
+      },
+      {
+        "tid": 2383656,
+        "file": "quote_refresh.py",
+        "function": "PublicBookRefresh.confirm_bulk",
+        "line": 278,
+        "count": 5
+      },
+      {
+        "tid": 2383656,
+        "file": "quote_refresh.py",
+        "function": "PublicBookRefresh.run",
+        "line": 236,
+        "count": 95
+      },
+      {
+        "tid": 2383656,
+        "file": "quote_refresh.py",
+        "function": "PublicBookRefresh.run_bulk",
+        "line": 297,
+        "count": 5
+      },
+      {
+        "tid": 2383656,
+        "file": "quote_refresh.py",
+        "function": "PublicBookRefresh.run_bulk",
+        "line": 304,
+        "count": 90
+      },
+      {
+        "tid": 2383666,
+        "file": "market_transport.py",
+        "function": "PublicMarketHttp.get_json",
+        "line": 158,
+        "count": 2
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "HistoryBucket.__iter__",
+        "line": 158,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "HistoryBucket.__iter__",
+        "line": 160,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "HistoryBucket.bounds",
+        "line": 184,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "HistoryBucket.replace",
+        "line": 136,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "PulseDetector.observe",
+        "line": 281,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "PulseDetector.observe",
+        "line": 289,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "PulseDetector.observe",
+        "line": 344,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "PulseDetector.observe",
+        "line": 364,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "PulseDetector.observe",
+        "line": 378,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "PulseDetector.observe",
+        "line": 408,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "Track.remember",
+        "line": 218,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "Track.remember",
+        "line": 234,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "finite",
+        "line": 87,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_engine.py",
+        "function": "motion_threshold",
+        "line": 34,
+        "count": 2
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub._updates",
+        "line": 180,
+        "count": 2
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 227,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 228,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 242,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 244,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 262,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 266,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 275,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 287,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 293,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 294,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 300,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 316,
+        "count": 3
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "AlertStreamHub.ingest",
+        "line": 321,
+        "count": 9
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "PublicWorker.run",
+        "line": 563,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "PublicWorker.run",
+        "line": 588,
+        "count": 2
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "PublicWorker.run",
+        "line": 589,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "PublicWorker.run",
+        "line": 595,
+        "count": 2
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "PublicWorker.run",
+        "line": 604,
+        "count": 23
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "parse_frame",
+        "line": 61,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "parse_frame",
+        "line": 96,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "parse_frame",
+        "line": 129,
+        "count": 1
+      },
+      {
+        "tid": 2383710,
+        "file": "anomaly_streams.py",
+        "function": "parse_frame.<locals>.book",
+        "line": 66,
+        "count": 1
+      }
+    ]
+  },
+  "started_at_utc": "2026-11-12T18:05:02.972516+00:00",
+  "ended_at_utc": "2026-11-12T18:05:22.698603+00:00",
+  "counters_before": {
+    "at_utc": "2026-11-12T18:05:02.972501+00:00",
+    "rss_bytes": 720211968,
+    "anonymous_bytes": 700448768,
+    "threads": {
+      "2383615": {
+        "minor_faults": 158023,
+        "major_faults": 0,
+        "cpu_ticks": 50980
+      },
+      "2383614": {
+        "minor_faults": 6293,
+        "major_faults": 0,
+        "cpu_ticks": 40953
+      },
+      "2383649": {
+        "minor_faults": 1068,
+        "major_faults": 0,
+        "cpu_ticks": 5142
+      },
+      "2383616": {
+        "minor_faults": 10008,
+        "major_faults": 0,
+        "cpu_ticks": 36244
+      },
+      "2383656": {
+        "minor_faults": 1913,
+        "major_faults": 0,
+        "cpu_ticks": 5907
+      },
+      "2383651": {
+        "minor_faults": 3400,
+        "major_faults": 0,
+        "cpu_ticks": 204
+      },
+      "2383710": {
+        "minor_faults": 6416,
+        "major_faults": 0,
+        "cpu_ticks": 313734
+      },
+      "2383666": {
+        "minor_faults": 2684,
+        "major_faults": 0,
+        "cpu_ticks": 862
+      }
+    }
+  },
+  "counters_after": {
+    "at_utc": "2026-11-12T18:05:22.698896+00:00",
+    "rss_bytes": 720211968,
+    "anonymous_bytes": 700448768,
+    "threads": {
+      "2383615": {
+        "minor_faults": 158023,
+        "major_faults": 0,
+        "cpu_ticks": 50980
+      },
+      "2383614": {
+        "minor_faults": 6293,
+        "major_faults": 0,
+        "cpu_ticks": 41101
+      },
+      "2383649": {
+        "minor_faults": 1068,
+        "major_faults": 0,
+        "cpu_ticks": 5156
+      },
+      "2383616": {
+        "minor_faults": 10008,
+        "major_faults": 0,
+        "cpu_ticks": 36332
+      },
+      "2383656": {
+        "minor_faults": 1913,
+        "major_faults": 0,
+        "cpu_ticks": 5924
+      },
+      "2383651": {
+        "minor_faults": 3400,
+        "major_faults": 0,
+        "cpu_ticks": 204
+      },
+      "2383710": {
+        "minor_faults": 6418,
+        "major_faults": 0,
+        "cpu_ticks": 314682
+      },
+      "2383666": {
+        "minor_faults": 2684,
+        "major_faults": 0,
+        "cpu_ticks": 863
+      }
+    }
+  },
+  "identity": {
+    "master": 2383599,
+    "worker": 2383603,
+    "invocation": "25e853ed5afe41bbabb2a7a1d6f380a6",
+    "start_ticks": 727482204
+  },
+  "quote_age_before": 11,
+  "quote_age_after": 11,
+  "boundary": "New approval only: 20 seconds collecting, 30 second hard deadline including startup/output. No repeat. Function counts are not retained-allocation attribution.",
+  "valid_function_mapping": true,
+  "wrapper_exit": 0,
+  "wrapper_stderr_bytes": 0
+}

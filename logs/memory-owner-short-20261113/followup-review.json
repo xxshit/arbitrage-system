@@ -1,0 +1,526 @@
+{
+  "assembled_at_utc": "2026-11-12T18:28:18.970969+00:00",
+  "status": "PRECISE_GROWTH_ALIGNS_WITH_THREAD_2383650_NOT_HISTORY; NEW_SINGLE_THREAD_FUNCTION_APPROVAL_PENDING; ROOT_UNRESOLVED",
+  "function_map": {
+    "authorization": "User explicitly permitted one corrected attempt; now consumed. No new function retry.",
+    "report": {
+      "path": "logs/memory-owner-short-20261113/frame-owner-v2.json",
+      "sha256": "819e38eb60df956b4c8505feb43dbfaccff961504df2d27c0c4b38ab851db100"
+    },
+    "sampler_exit": 0,
+    "abort": null,
+    "elapsed_seconds": 19.725981069728732,
+    "started_at_utc": "2026-11-12T18:05:02.972516+00:00",
+    "ended_at_utc": "2026-11-12T18:05:22.698603+00:00",
+    "identity": {
+      "master": 2383599,
+      "worker": 2383603,
+      "invocation": "25e853ed5afe41bbabb2a7a1d6f380a6",
+      "start_ticks": 727482204
+    },
+    "target_thread_samples": 760,
+    "discarded_invalid_lines": 4,
+    "mapping": {
+      "2383615": "app.background_spread_history; 95 samples all line 15534 sleep",
+      "2383614": "app.background_spot_market_refresh",
+      "2383616": "app.background_dual_market_refresh",
+      "2383649": "quote_refresh.PublicBookRefresh.run/run_bulk",
+      "2383656": "quote_refresh.PublicBookRefresh.run/run_bulk",
+      "2383710": "anomaly_streams.PublicWorker.run/AlertStreamHub.ingest",
+      "2383666": "Only market_transport.PublicMarketHttp.get_json matched, role unresolved",
+      "2383651": "No allowlisted frames, role unresolved"
+    },
+    "rss_delta_bytes": 0,
+    "owner_thread_minor_delta": 0,
+    "limits": [
+      "This identifies the role of the earlier faulting thread, not an allocating line or object.",
+      "The entire mapped owner interval was idle; it cannot identify the active history subphase.",
+      "Four rejected lines and unknown frames were not saved; their contents are not reconstructed."
+    ]
+  },
+  "native_phase_control": {
+    "report": {
+      "path": "logs/memory-owner-short-20261113/history-native-phases.json",
+      "sha256": "0f13282ac5eacaae0c1898ed8ef6add11d4048792b180019ac65cbd681cc9429"
+    },
+    "remote_private_dir": "/tmp/arbiscope-history-phases.yzx8eso5",
+    "generated_fixture": "/tmp/arbiscope-history-native-short-v2.4hoz_tuk/synthetic",
+    "paths": 1171,
+    "rows": 9368,
+    "points_per_hour": 240,
+    "rounds_per_arm": 3,
+    "production_source_sha256": {
+      "spread_history.py": "fbf165aeb763e6a9a788f17c1ff755ce56d0eac15baf8939551086d8f992b3a8",
+      "opportunity_history.py": "0ea42d46db6c23f43950cbc7d654330984225d5de73bfd57d7157f4e55efabe4",
+      "opportunity_pool.py": "6b929eb655de812d09e9a2ddf993c2b5b46c3b9478a2fac7add38c3ecd6e9dad"
+    },
+    "arms": [
+      {
+        "arm": "windows",
+        "start_utc": "2026-11-12T18:16:56.560441+00:00",
+        "end_utc": "2026-11-12T18:16:59.476800+00:00",
+        "rss_samples_bytes": [
+          29372416,
+          35328000,
+          35799040
+        ],
+        "rss_growth_from_baseline_bytes": 15323136,
+        "malloc_used_growth_bytes": 1845760,
+        "malloc_free_growth_bytes": 4290048,
+        "sqlite_live_at_all_round_ends": [
+          0,
+          0,
+          0
+        ],
+        "day_arrays_before_release": 1171,
+        "day_arrays_after_release": 0,
+        "rss_after_cache_release_bytes": 35864576,
+        "source_unchanged": true,
+        "validator_pid": 2386119,
+        "measured_pid": 2386117,
+        "validation_output_sha256": "12ef39d4d41fef17ed86c08d2fd3f57f0ae45adf7dfe6a76e6ef26ad21cb026a"
+      },
+      {
+        "arm": "rolling",
+        "start_utc": "2026-11-12T18:17:00.568602+00:00",
+        "end_utc": "2026-11-12T18:17:06.864352+00:00",
+        "rss_samples_bytes": [
+          23007232,
+          24129536,
+          24371200
+        ],
+        "rss_growth_from_baseline_bytes": 4247552,
+        "malloc_used_growth_bytes": 43184,
+        "malloc_free_growth_bytes": 104272,
+        "sqlite_live_at_all_round_ends": [
+          0,
+          0,
+          0
+        ],
+        "day_arrays_before_release": 0,
+        "day_arrays_after_release": 0,
+        "rss_after_cache_release_bytes": 24289280,
+        "source_unchanged": true,
+        "validator_pid": 2386133,
+        "measured_pid": 2386125,
+        "validation_output_sha256": "1d816fe1208c63d2859efd1e382cee503efee36e4bb899b08770156d2dd20f8e"
+      },
+      {
+        "arm": "full",
+        "start_utc": "2026-11-12T18:17:08.588739+00:00",
+        "end_utc": "2026-11-12T18:17:17.671070+00:00",
+        "rss_samples_bytes": [
+          31313920,
+          38035456,
+          37703680
+        ],
+        "rss_growth_from_baseline_bytes": 17555456,
+        "malloc_used_growth_bytes": 1816592,
+        "malloc_free_growth_bytes": 3209200,
+        "sqlite_live_at_all_round_ends": [
+          0,
+          0,
+          0
+        ],
+        "day_arrays_before_release": 1171,
+        "day_arrays_after_release": 0,
+        "rss_after_cache_release_bytes": 37662720,
+        "source_unchanged": true,
+        "validator_pid": 2386140,
+        "measured_pid": 2386135,
+        "validation_output_sha256": "873e55c3b663e92344b44a99a652e0488e812bcc55cc6fdc80f48ee14866e82d"
+      }
+    ],
+    "all_guards_ok": true,
+    "limits": [
+      "Generated dense current-day data; does not represent all retained production days or cross-thread allocator history.",
+      "Fixed-count sequential short comparison, not a soak or proof of an unbounded trend.",
+      "Full-profile third sample decreased, so this does not reproduce the continuing production slope.",
+      "SQLite global live count is from the independent synthetic process only.",
+      "No production heap/object reads, app import, restart, forced GC, trim or limit changes."
+    ]
+  },
+  "diagnostic_failures_preserved": {
+    "history_phase_v1": "Preflight aborted before /proc phase sampling because UTC captured_at was incorrectly compared to MySQL SYSTEM NOW. No function sampling retried.",
+    "native_first_dispatch": "Preflight aborted before any synthetic child or source upload; ages 28807/28819 include 28800 second SQL clock offset. Empty private directory and dispatch record retained.",
+    "clock_fix": "Keep transaction session SYSTEM; use UTC_TIMESTAMP for UTC market capture timestamps. Actual offset 28800, read_only=1 recorded in native v2 dispatch.",
+    "first_native_comparison_limit": "history-native-result.json includes in-process value validation. It is auxiliary only. The subsequent phases measure first, then validate via a different PID after the last sample."
+  },
+  "runtime_changed": false,
+  "deployed": false,
+  "long_test": false,
+  "main_cause_confirmed": false,
+  "evidence": [
+    {
+      "path": "logs/memory-owner-short-20261113/v2-authorization.json",
+      "sha256": "004eb827b42dbf9387f93a82efe03aa32cbba38e28f704441bc51916da04ad4f"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/frame-v2-dispatch.stderr",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/history-shape.json",
+      "sha256": "a031c8726853382b37df0c8c9b02707fe6823dc6eaae6b072a9e5ae70487116b"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/history-native-local-check.json",
+      "sha256": "8fbe5e653dee70b5a1d8aa9fe394cd62b7b4b620ac60ca9911b0cb7677e6fd3f"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/history-native-dispatch.json",
+      "sha256": "1dabab342cc4f773c0c7d8865422b5e2867b42f1edd8f1b1aac4eb2bd9def1a3"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/history-native-v2-dispatch.json",
+      "sha256": "7a8c7f651db0b78fd49c184aefcbe48a2cf0571464e7334eef28594acd75af2a"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/history-native-result.json",
+      "sha256": "a7ff2af0195aafd630ed13473b626af40e2008e199943ad7482d8321e3bd01ed"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/history-phase-20261112-180906.stderr",
+      "sha256": "feb4e70808f0c42f908aa1407a29c5d48867ec27a127c4cf28d73db7430cb25c"
+    },
+    {
+      "path": "logs/memory-owner-short-20261113/observation-20261112-181008.json",
+      "sha256": "20c608317a03b4c12d800f3a95739998389d21b77b97a61929eb3cc533e3b1a7"
+    }
+  ],
+  "kernel_counter_correlation": {
+    "report": {
+      "path": "logs/memory-owner-short-20261113/history-phase-v2-20261112-181859.json",
+      "sha256": "0a7e0ae0bb1350a9fe82bd05a3d96cff42214537d9ca8f5160b72b806b529e6a"
+    },
+    "started_at_utc": "2026-11-12T18:19:00.793122+00:00",
+    "ended_at_utc": "2026-11-12T18:21:15.815545+00:00",
+    "elapsed_seconds": 135.013932983391,
+    "identity": {
+      "master": 2383599,
+      "worker": 2383603,
+      "start_ticks": 727482204,
+      "invocation": "25e853ed5afe41bbabb2a7a1d6f380a6",
+      "history_thread": 2383615,
+      "thread_start_ticks": 727482286
+    },
+    "identity_unchanged": true,
+    "total": {
+      "rss_bytes": 2621440,
+      "process_minor": 3257,
+      "history_minor": 2580,
+      "history_cpu_ticks": 847,
+      "history_read_chars": 456762181,
+      "history_write_chars": 134915817
+    },
+    "positive_stat_rss_intervals": [
+      {
+        "at_utc": "2026-11-12T18:19:46.301878+00:00",
+        "elapsed": 45.5005,
+        "rss_delta_bytes": 1835008,
+        "process_minor": 473,
+        "history_minor": 0,
+        "history_cpu_ticks": 0,
+        "history_read_chars": 0,
+        "history_write_chars": 0
+      },
+      {
+        "at_utc": "2026-11-12T18:20:21.301904+00:00",
+        "elapsed": 80.5006,
+        "rss_delta_bytes": 786432,
+        "process_minor": 204,
+        "history_minor": 0,
+        "history_cpu_ticks": 0,
+        "history_read_chars": 0,
+        "history_write_chars": 0
+      }
+    ],
+    "interpretation": "History owns 79% of faults but stat RSS growth is not aligned with its busy periods. /proc stat RSS uses batched accounting; precise smaps_rollup alignment is pending, so no root assignment or exclusion.",
+    "prepared_background_history_control": "Prepared locally but not executed after production timing contradicted a direct history attribution."
+  },
+  "precise_kernel_timeline": {
+    "raw_report": {
+      "path": "logs/memory-owner-short-20261113/owner-timeline-20261112-182233.json",
+      "sha256": "096501ad8cc360f421881f70a9e03d92d1610f5b9ec79c78da17426d87154e9a"
+    },
+    "analysis": {
+      "status": "completed",
+      "total_memory_delta": {
+        "Rss_bytes": 3952640,
+        "Private_Dirty_bytes": 3952640,
+        "Anonymous_bytes": 3952640,
+        "Swap_bytes": 0,
+        "stat_rss_bytes": 3932160,
+        "process_minor": 3335
+      },
+      "top_faults": [
+        [
+          2383615,
+          2370
+        ],
+        [
+          2383650,
+          965
+        ],
+        [
+          2383616,
+          0
+        ],
+        [
+          2383649,
+          0
+        ],
+        [
+          2383657,
+          0
+        ],
+        [
+          2383658,
+          0
+        ],
+        [
+          2383660,
+          0
+        ],
+        [
+          2383661,
+          0
+        ],
+        [
+          2383664,
+          0
+        ],
+        [
+          2383666,
+          0
+        ]
+      ],
+      "faults_in_growth_seconds": [
+        [
+          2383650,
+          965
+        ],
+        [
+          2383605,
+          0
+        ],
+        [
+          2383606,
+          0
+        ],
+        [
+          2383614,
+          0
+        ],
+        [
+          2383624,
+          0
+        ],
+        [
+          2383649,
+          0
+        ],
+        [
+          2383652,
+          0
+        ],
+        [
+          2383653,
+          0
+        ],
+        [
+          2383655,
+          0
+        ],
+        [
+          2383665,
+          0
+        ]
+      ],
+      "spikes": [
+        {
+          "at": "2026-11-12T18:22:37.032527+00:00",
+          "anonymous_delta": 2977792,
+          "rss_delta": 2977792,
+          "stat_delta": 3014656,
+          "fault_delta": 727,
+          "threads": [
+            {
+              "tid": 2383650,
+              "start_ticks": 727482295,
+              "minor": 727,
+              "cpu_ticks": 3
+            }
+          ]
+        },
+        {
+          "at": "2026-11-12T18:23:47.032619+00:00",
+          "anonymous_delta": 974848,
+          "rss_delta": 974848,
+          "stat_delta": 1048576,
+          "fault_delta": 238,
+          "threads": [
+            {
+              "tid": 2383650,
+              "start_ticks": 727482295,
+              "minor": 238,
+              "cpu_ticks": 2
+            }
+          ]
+        }
+      ],
+      "falls": [],
+      "maximum_read_seconds": 0.017602022737264633,
+      "identity_unchanged": true
+    },
+    "started_at_utc": "2026-11-12T18:22:34.013968+00:00",
+    "ended_at_utc": "2026-11-12T18:24:44.037835+00:00",
+    "elapsed_seconds": 130.01497734244913,
+    "new_threads": 0,
+    "exited_threads": 0,
+    "interpretation": "All 3,952,640 added anonymous/private-dirty/RSS bytes in this 130-second window align exactly with 965 minor faults from TID 2383650, start ticks 727482295. History TID 2383615 has 2370 faults outside growth seconds. This locates a page-touching execution thread; allocation and object ownership still need code-level attribution. It does not globally exonerate history or prove an unbounded leak in the new thread."
+  },
+  "next_function_proposal": {
+    "path": "logs/memory-owner-short-20261113/growth-owner-proposal/proposal.json",
+    "sha256": "75177819097aed816fafa123caa03c5aa176055a95b2ef76cb73496018540b1a",
+    "status": "PREPARED_LOCAL_ONLY_USER_PERMISSION_REQUESTED_NOT_STARTED",
+    "why_new_permission": "Prior once-only v2 grant consumed; new TID was not in the previous allowlist.",
+    "new_tids": {
+      "2383650": 727482295
+    }
+  },
+  "post_observation": {
+    "path": "logs/memory-owner-short-20261113/observation-20261112-182633.json",
+    "sha256": "f2b15352d8518eb2959d6fcc705525e78b65fd54484fd87d452f7eb60e0ae37c",
+    "finished_at_utc": "2026-11-12T18:26:54.883919+00:00",
+    "identity": {
+      "services": {
+        "arbitrage-private": {
+          "ActiveState": "active",
+          "InvocationID": "25e853ed5afe41bbabb2a7a1d6f380a6",
+          "MainPID": "2383599",
+          "NRestarts": "0"
+        },
+        "lewan-game": {
+          "ActiveState": "active",
+          "InvocationID": "9713cdbc61094381bc0d3c8bc27eca11",
+          "MainPID": "398878",
+          "NRestarts": "0"
+        },
+        "mysql": {
+          "ActiveState": "active",
+          "InvocationID": "43b595043d5e45ce824f9332a34556c3",
+          "MainPID": "398829",
+          "NRestarts": "0"
+        }
+      },
+      "worker": 2383603,
+      "worker_start_ticks": 727482204
+    },
+    "identity_unchanged": true,
+    "source_matches_prior": true,
+    "refresh_rules": [
+      {
+        "enabled": "1",
+        "rule_key": "dual_market_refresh",
+        "value": "5"
+      },
+      {
+        "enabled": "1",
+        "rule_key": "spot_market_refresh",
+        "value": "5"
+      }
+    ],
+    "errors": {},
+    "boot_workers": [
+      {
+        "pid": 2383603,
+        "utc_us": "1794499286926596"
+      }
+    ],
+    "health_count": 146,
+    "health_last": {
+      "alert_history": {
+        "decoded_rows": 51907,
+        "delta_reads": 1739,
+        "full_reads": 1,
+        "last_read_seconds": 0.0298,
+        "rows": 8892,
+        "spool_bytes": 17751908
+      },
+      "allocator_free_bytes": 352803568,
+      "allocator_used_bytes": 136013072,
+      "anonymous_bytes": 739446784,
+      "cgroup_bytes": 1340764160,
+      "db_checked_out": 1,
+      "db_holders": [
+        {
+          "seconds": 0.05,
+          "worker": "funding-alerts"
+        }
+      ],
+      "db_longest_checkout_seconds": 1.62,
+      "dead": [],
+      "file_cache_bytes": 588574720,
+      "journal_utc_us": 1794507989482991,
+      "memory_events": {
+        "high": 4392,
+        "low": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_group_kill": 0,
+        "oom_kill": 0
+      },
+      "memory_high_bytes": 1342177280,
+      "memory_limit_bytes": 1610612736,
+      "memory_sampled_at_epoch": 1794507989.458729,
+      "memory_stall_microseconds": 60515,
+      "pid": 2383603,
+      "restarts": 0,
+      "rss_bytes": 748785664,
+      "workers": 30
+    },
+    "progress_before": [
+      {
+        "kind": "spot",
+        "latest_at": "2026-11-12 18:26:22"
+      },
+      {
+        "kind": "dual",
+        "latest_at": "2026-11-12 18:26:14"
+      },
+      {
+        "kind": "alarm",
+        "latest_at": "2026-11-12 18:26:34"
+      }
+    ],
+    "progress_after": [
+      {
+        "kind": "spot",
+        "latest_at": "2026-11-12 18:26:42"
+      },
+      {
+        "kind": "dual",
+        "latest_at": "2026-11-12 18:26:34"
+      },
+      {
+        "kind": "alarm",
+        "latest_at": "2026-11-12 18:26:54"
+      }
+    ],
+    "root_transaction_aggregates": [
+      {
+        "count": "1",
+        "locked_rows": "390",
+        "max_seconds": "0"
+      }
+    ],
+    "sql_connection_aggregates": [
+      {
+        "COMMAND": "Sleep",
+        "count": "5",
+        "max_seconds": "1"
+      }
+    ]
+  }
+}

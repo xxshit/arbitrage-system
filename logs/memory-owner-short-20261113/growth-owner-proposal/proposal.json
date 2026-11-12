@@ -1,0 +1,63 @@
+{
+  "prepared_at_utc": "2026-11-12T18:26:11.294959+00:00",
+  "authorization": "PENDING_NEW_EXPLICIT_APPROVAL; PREVIOUS_SINGLE_V2_SAMPLE_CONSUMED",
+  "remote_directory_proposed": "/tmp/arbiscope-growth-owner-20261113",
+  "target_threads": {
+    "2383650": 727482295
+  },
+  "identity": {
+    "master": 2383599,
+    "worker": 2383603,
+    "invocation": "25e853ed5afe41bbabb2a7a1d6f380a6",
+    "start_ticks": 727482204
+  },
+  "duration_seconds": 20,
+  "rate_hz": 5,
+  "outer_deadline_seconds": 30,
+  "source_files": {
+    "frame-owner-once.py": {
+      "bytes": 5837,
+      "sha256": "22213df961a8ce47ef32ced06147effd662e150679990f110b46f4983c583aed"
+    },
+    "frame-aggregate.py": {
+      "bytes": 3520,
+      "sha256": "dfa1ec40192312f91c645704db440a5ff7051842a6eab178f68a6ae9b4df639a"
+    },
+    "frame-manifest.json": {
+      "bytes": 45512,
+      "sha256": "836c75470bf0dde42127d30985c2608c72edd3ed6991beacee7715bfe47edc75"
+    },
+    "bounded-sampler.py": {
+      "bytes": 2831,
+      "sha256": "5bcbc0ab99508d49c7aa4e1e06998428c5950c7ed9e896f32205dbc4fcc7d6e2"
+    }
+  },
+  "total_upload_bytes": 57700,
+  "includes_full_app_source": false,
+  "includes_continuation": false,
+  "remote_started": false,
+  "parser_scoping_check": {
+    "status": "pass",
+    "checks": 2,
+    "result": {
+      "counts": {
+        "lines": 2,
+        "target_thread_samples": 3,
+        "unknown_frames": 3,
+        "other_thread_samples": 5
+      },
+      "frames": [
+        {
+          "tid": 2383650,
+          "file": "market_transport.py",
+          "function": "PublicMarketHttp.get_json",
+          "line": 158,
+          "count": 3
+        }
+      ]
+    },
+    "purpose": "New single-target allowlist includes only new TID and discards old target; fixture function name is not a production finding."
+  },
+  "existing_lifecycle_checks_reused_unchanged": "logs/memory-owner-short-20261113/bounded-sampler-check.json",
+  "limits": "Nonblocking. Raw frames exist only in pipe memory; only target allowlisted function/line counts exported. No locals, account/SQL values, heap content, raw stack storage, pause or restart. No retry."
+}

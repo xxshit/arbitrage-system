@@ -1,0 +1,401 @@
+{
+  "root": "/tmp/arbiscope-history-native-short-v2.4hoz_tuk",
+  "guards": [
+    {
+      "at_utc": "2026-11-12T18:14:35.275027+00:00",
+      "psi": 0.0,
+      "available_bytes": 11919769600,
+      "quote_ages": [
+        13,
+        21
+      ],
+      "ok": true
+    },
+    {
+      "at_utc": "2026-11-12T18:14:40.284835+00:00",
+      "psi": 0.0,
+      "available_bytes": 11916382208,
+      "quote_ages": [
+        18,
+        6
+      ],
+      "ok": true
+    },
+    {
+      "at_utc": "2026-11-12T18:14:45.289829+00:00",
+      "psi": 0.0,
+      "available_bytes": 11905781760,
+      "quote_ages": [
+        3,
+        11
+      ],
+      "ok": true
+    },
+    {
+      "at_utc": "2026-11-12T18:14:50.294837+00:00",
+      "psi": 0.0,
+      "available_bytes": 11940950016,
+      "quote_ages": [
+        8,
+        16
+      ],
+      "ok": true
+    }
+  ],
+  "script_sha256": "b5ec3e493042aa25ed4cda541057558eedadcdfb29939789b93f451c203018cb",
+  "clock_check": [
+    "2026-11-13 02:14:35.278596",
+    "2026-11-12 18:14:35.278596",
+    "SYSTEM",
+    "28800",
+    "1"
+  ],
+  "status": "finished",
+  "abort": null,
+  "exit_code": 0,
+  "elapsed_seconds": 15.015507803298533,
+  "stderr_bytes": 0,
+  "result": {
+    "started_at_utc": "2026-11-12T18:14:35.319104+00:00",
+    "source_sha256": {
+      "spread_history.py": "fbf165aeb763e6a9a788f17c1ff755ce56d0eac15baf8939551086d8f992b3a8",
+      "opportunity_history.py": "0ea42d46db6c23f43950cbc7d654330984225d5de73bfd57d7157f4e55efabe4",
+      "opportunity_pool.py": "6b929eb655de812d09e9a2ddf993c2b5b46c3b9478a2fac7add38c3ecd6e9dad"
+    },
+    "python": "3.12.3 (main, Aug 31 2026, 10:18:26) [GCC 13.3.0]",
+    "sqlite_version": "3.45.1",
+    "paths": 1171,
+    "rows": 9368,
+    "points_per_hour": 240,
+    "rounds": 3,
+    "generated_db_bytes": 43855872,
+    "generated_db_sha256": "99fc5fc416ac4fca1cc24dbda24aa89edb3eed9adbe67d0ddbdb6de8dbdbcd21",
+    "gc_enabled": true,
+    "arms": [
+      {
+        "arm": "rows",
+        "started_at_utc": "2026-11-12T18:14:38.322530+00:00",
+        "baseline": {
+          "at_utc": "2026-11-12T18:14:38.322539+00:00",
+          "python_blocks": 39279,
+          "gc_counts": [
+            248,
+            8,
+            1
+          ],
+          "rss_bytes": 20258816,
+          "anonymous_bytes": 8253440,
+          "malloc_used": 2437632,
+          "malloc_free": 159232,
+          "malloc_mapped": 610304,
+          "malloc_arena": 2596864,
+          "sqlite_live": 0,
+          "sqlite_high": 56
+        },
+        "samples": [
+          {
+            "at_utc": "2026-11-12T18:14:38.333451+00:00",
+            "python_blocks": 39304,
+            "gc_counts": [
+              258,
+              8,
+              1
+            ],
+            "rss_bytes": 20889600,
+            "anonymous_bytes": 8380416,
+            "malloc_used": 2441184,
+            "malloc_free": 155680,
+            "malloc_mapped": 610304,
+            "malloc_arena": 2596864,
+            "sqlite_live": 0,
+            "sqlite_high": 2225504,
+            "round": 0,
+            "rows_or_profiles": 9368,
+            "elapsed_seconds": 0.01091093197464943,
+            "output_sha256": null,
+            "cached_paths": 0
+          },
+          {
+            "at_utc": "2026-11-12T18:14:38.343720+00:00",
+            "python_blocks": 39323,
+            "gc_counts": [
+              261,
+              8,
+              1
+            ],
+            "rss_bytes": 20893696,
+            "anonymous_bytes": 8384512,
+            "malloc_used": 2442400,
+            "malloc_free": 154464,
+            "malloc_mapped": 610304,
+            "malloc_arena": 2596864,
+            "sqlite_live": 0,
+            "sqlite_high": 2225504,
+            "round": 1,
+            "rows_or_profiles": 9368,
+            "elapsed_seconds": 0.010198756121098995,
+            "output_sha256": null,
+            "cached_paths": 0
+          },
+          {
+            "at_utc": "2026-11-12T18:14:38.353124+00:00",
+            "python_blocks": 39340,
+            "gc_counts": [
+              264,
+              8,
+              1
+            ],
+            "rss_bytes": 20893696,
+            "anonymous_bytes": 8384512,
+            "malloc_used": 2442608,
+            "malloc_free": 154256,
+            "malloc_mapped": 610304,
+            "malloc_arena": 2596864,
+            "sqlite_live": 0,
+            "sqlite_high": 2225504,
+            "round": 2,
+            "rows_or_profiles": 9368,
+            "elapsed_seconds": 0.009423734620213509,
+            "output_sha256": null,
+            "cached_paths": 0
+          }
+        ],
+        "after_release": {
+          "at_utc": "2026-11-12T18:14:38.353393+00:00",
+          "python_blocks": 39353,
+          "gc_counts": [
+            265,
+            8,
+            1
+          ],
+          "rss_bytes": 20893696,
+          "anonymous_bytes": 8384512,
+          "malloc_used": 2442560,
+          "malloc_free": 154304,
+          "malloc_mapped": 610304,
+          "malloc_arena": 2596864,
+          "sqlite_live": 0,
+          "sqlite_high": 2225504
+        },
+        "finished_at_utc": "2026-11-12T18:14:38.353545+00:00"
+      },
+      {
+        "arm": "decode",
+        "started_at_utc": "2026-11-12T18:14:38.389599+00:00",
+        "baseline": {
+          "at_utc": "2026-11-12T18:14:38.389607+00:00",
+          "python_blocks": 39274,
+          "gc_counts": [
+            248,
+            8,
+            1
+          ],
+          "rss_bytes": 20058112,
+          "anonymous_bytes": 8253440,
+          "malloc_used": 2437808,
+          "malloc_free": 159056,
+          "malloc_mapped": 610304,
+          "malloc_arena": 2596864,
+          "sqlite_live": 0,
+          "sqlite_high": 56
+        },
+        "samples": [
+          {
+            "at_utc": "2026-11-12T18:14:39.122618+00:00",
+            "python_blocks": 39473,
+            "gc_counts": [
+              333,
+              8,
+              1
+            ],
+            "rss_bytes": 20811776,
+            "anonymous_bytes": 8437760,
+            "malloc_used": 2441728,
+            "malloc_free": 155136,
+            "malloc_mapped": 610304,
+            "malloc_arena": 2596864,
+            "sqlite_live": 0,
+            "sqlite_high": 2225504,
+            "round": 0,
+            "rows_or_profiles": 9368,
+            "elapsed_seconds": 0.7331965612247586,
+            "output_sha256": null,
+            "cached_paths": 0
+          },
+          {
+            "at_utc": "2026-11-12T18:14:39.863430+00:00",
+            "python_blocks": 39491,
+            "gc_counts": [
+              336,
+              8,
+              1
+            ],
+            "rss_bytes": 20811776,
+            "anonymous_bytes": 8437760,
+            "malloc_used": 2442000,
+            "malloc_free": 154864,
+            "malloc_mapped": 610304,
+            "malloc_arena": 2596864,
+            "sqlite_live": 0,
+            "sqlite_high": 2225504,
+            "round": 1,
+            "rows_or_profiles": 9368,
+            "elapsed_seconds": 0.7407963844016194,
+            "output_sha256": null,
+            "cached_paths": 0
+          },
+          {
+            "at_utc": "2026-11-12T18:14:40.587269+00:00",
+            "python_blocks": 39509,
+            "gc_counts": [
+              339,
+              8,
+              1
+            ],
+            "rss_bytes": 20811776,
+            "anonymous_bytes": 8437760,
+            "malloc_used": 2442000,
+            "malloc_free": 154864,
+            "malloc_mapped": 610304,
+            "malloc_arena": 2596864,
+            "sqlite_live": 0,
+            "sqlite_high": 2225504,
+            "round": 2,
+            "rows_or_profiles": 9368,
+            "elapsed_seconds": 0.7238301038742065,
+            "output_sha256": null,
+            "cached_paths": 0
+          }
+        ],
+        "after_release": {
+          "at_utc": "2026-11-12T18:14:40.587719+00:00",
+          "python_blocks": 39521,
+          "gc_counts": [
+            340,
+            8,
+            1
+          ],
+          "rss_bytes": 20811776,
+          "anonymous_bytes": 8437760,
+          "malloc_used": 2441952,
+          "malloc_free": 154912,
+          "malloc_mapped": 610304,
+          "malloc_arena": 2596864,
+          "sqlite_live": 0,
+          "sqlite_high": 2225504
+        },
+        "finished_at_utc": "2026-11-12T18:14:40.587855+00:00"
+      },
+      {
+        "arm": "profile",
+        "started_at_utc": "2026-11-12T18:14:40.624394+00:00",
+        "baseline": {
+          "at_utc": "2026-11-12T18:14:40.624404+00:00",
+          "python_blocks": 39279,
+          "gc_counts": [
+            248,
+            8,
+            1
+          ],
+          "rss_bytes": 20217856,
+          "anonymous_bytes": 8253440,
+          "malloc_used": 2437808,
+          "malloc_free": 159056,
+          "malloc_mapped": 610304,
+          "malloc_arena": 2596864,
+          "sqlite_live": 0,
+          "sqlite_high": 56
+        },
+        "samples": [
+          {
+            "at_utc": "2026-11-12T18:14:43.625608+00:00",
+            "python_blocks": 114616,
+            "gc_counts": [
+              0,
+              8,
+              4
+            ],
+            "rss_bytes": 31465472,
+            "anonymous_bytes": 18931712,
+            "malloc_used": 4161040,
+            "malloc_free": 2617840,
+            "malloc_mapped": 610304,
+            "malloc_arena": 6778880,
+            "sqlite_live": 0,
+            "sqlite_high": 2225504,
+            "round": 0,
+            "rows_or_profiles": 1171,
+            "elapsed_seconds": 3.0015207109972835,
+            "output_sha256": "873e55c3b663e92344b44a99a652e0488e812bcc55cc6fdc80f48ee14866e82d",
+            "cached_paths": 1171
+          },
+          {
+            "at_utc": "2026-11-12T18:14:46.640837+00:00",
+            "python_blocks": 115830,
+            "gc_counts": [
+              0,
+              5,
+              7
+            ],
+            "rss_bytes": 38211584,
+            "anonymous_bytes": 25677824,
+            "malloc_used": 4252080,
+            "malloc_free": 4402768,
+            "malloc_mapped": 610304,
+            "malloc_arena": 8654848,
+            "sqlite_live": 0,
+            "sqlite_high": 2225504,
+            "round": 1,
+            "rows_or_profiles": 1171,
+            "elapsed_seconds": 3.015338827855885,
+            "output_sha256": "873e55c3b663e92344b44a99a652e0488e812bcc55cc6fdc80f48ee14866e82d",
+            "cached_paths": 1171
+          },
+          {
+            "at_utc": "2026-11-12T18:14:49.653514+00:00",
+            "python_blocks": 115875,
+            "gc_counts": [
+              0,
+              11,
+              9
+            ],
+            "rss_bytes": 39022592,
+            "anonymous_bytes": 26488832,
+            "malloc_used": 4281840,
+            "malloc_free": 4381200,
+            "malloc_mapped": 610304,
+            "malloc_arena": 8663040,
+            "sqlite_live": 0,
+            "sqlite_high": 2225504,
+            "round": 2,
+            "rows_or_profiles": 1171,
+            "elapsed_seconds": 3.0125766517594457,
+            "output_sha256": "873e55c3b663e92344b44a99a652e0488e812bcc55cc6fdc80f48ee14866e82d",
+            "cached_paths": 1171
+          }
+        ],
+        "after_release": {
+          "at_utc": "2026-11-12T18:14:49.654963+00:00",
+          "python_blocks": 41755,
+          "gc_counts": [
+            0,
+            11,
+            9
+          ],
+          "rss_bytes": 39022592,
+          "anonymous_bytes": 26488832,
+          "malloc_used": 2615408,
+          "malloc_free": 6047632,
+          "malloc_mapped": 610304,
+          "malloc_arena": 8663040,
+          "sqlite_live": 0,
+          "sqlite_high": 2225504
+        },
+        "finished_at_utc": "2026-11-12T18:14:49.655567+00:00"
+      }
+    ],
+    "boundary": "Fresh synthetic processes, no website attach/import/restart/forced-GC/trim. Separate phases and fixed inputs; not proof of production allocator ownership.",
+    "source_unchanged": true,
+    "finished_at_utc": "2026-11-12T18:14:49.708621+00:00"
+  }
+}

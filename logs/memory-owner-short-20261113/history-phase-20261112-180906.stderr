@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "<stdin>", line 87, in <module>
+  File "<stdin>", line 51, in guard
+AssertionError: quote age guard

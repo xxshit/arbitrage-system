@@ -1,0 +1,17 @@
+{
+  "root": "/tmp/arbiscope-history-native-short.qs38gt3r",
+  "guards": [
+    {
+      "at_utc": "2026-11-12T18:13:33.487837+00:00",
+      "psi": 0.0,
+      "available_bytes": 11928842240,
+      "quote_ages": [
+        28807,
+        28819
+      ],
+      "ok": false
+    }
+  ],
+  "script_sha256": "b5ec3e493042aa25ed4cda541057558eedadcdfb29939789b93f451c203018cb",
+  "status": "preflight_guard_abort"
+}

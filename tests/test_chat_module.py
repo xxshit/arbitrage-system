@@ -660,7 +660,7 @@ class ChatModuleTests(unittest.TestCase):
             style = handle.read()
         page = self.alice.get("/").get_data(as_text=True)
 
-        self.assertIn("chatMessageRequests.has(requestKey)", script)
+        self.assertIn("chatMessageRequests.get(requestKey)?.pageRead===read", script)
         self.assertIn("chatMessageIsRendered(item.id)", script)
         self.assertIn("appendNewChatMessages([data.item],true)", script)
         self.assertIn("let chatSendInFlight=false", script)

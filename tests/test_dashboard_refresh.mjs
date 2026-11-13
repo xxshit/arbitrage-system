@@ -6,7 +6,7 @@ import test from 'node:test';
 const source=readFileSync(new URL('../static/app.js',import.meta.url),'utf8');
 const tracking=source.slice(source.indexOf('const pageRefreshProfiles='),source.indexOf('const delistingWarningObserver='));
 const networkHelper=source.slice(source.indexOf('async function fetchRefreshJson('),source.indexOf('let dashboardLoadingPromise=null;'));
-const loader=networkHelper+source.slice(source.indexOf('let dashboardLoadingPromise=null;'),source.indexOf('function onchainDecimal'));
+const loader=source.slice(source.indexOf('let dashboardLoadingPromise=null;'),source.indexOf('function onchainDecimal'));
 
 function harness(){
   let now=100000,nextId=0;
@@ -16,7 +16,7 @@ function harness(){
     clearTimeout(id){timers.delete(id)},setInterval(){return 0},clearInterval(){},
     activeViewId:()=>context.active,active:'dashboard',authState:{is_admin:false},
     renderAlertStreamStatus(){},loadSelectedAlertHistory(){},alertNoticeMemory:new Map(),alertNotional:1000,alertSummaryVersion:0,latestAlertGroups:[],clearAlertCurrent(){},
-    document:{querySelectorAll:()=>[]},applyGroupFrameClasses(){},
+    document:{querySelectorAll:()=>[],addEventListener(){},visibilityState:'visible'},applyGroupFrameClasses(){},
     byId(id){if(!elements.has(id))elements.set(id,{textContent:''});return elements.get(id)},
     fetch:async()=>({ok:true,json:async()=>({items:[]})}),
   };
@@ -89,7 +89,7 @@ test('inactive dashboard does not accumulate requests or poll at 250ms',async()=
   const h=harness();h.run('installPageRefreshTracking();pageRefreshState("dashboard").startedAt=90000');
   h.context.active='spot-futures';await h.context.startConfiguredPageTimers();
   const controller=h.run('pageRefreshControllers.get("dashboard")');
-  assert.equal(h.timers.get(controller.timer).at-h.now(),5000);
+  assert.equal(controller.timer,null);
 });
 
 test('indicator displays real source time and ages it even without another response',async()=>{
@@ -206,7 +206,7 @@ for(const [name,start,end,lock,hasData,rowId] of [
   ['loadSpotFutures','async function loadSpotFutures(','function hedgeMetric(','spotFuturesLoading','spotFuturesHasData','spotFuturesRows'],
   ['loadDualFutures','async function loadDualFutures(','function addDualLiquidityHeader(','dualFuturesLoading','dualFuturesHasData','dualFuturesRows'],
 ])test(`${name}: real loader releases its lock after timeout without clearing good rows`,async()=>{
-  const h=harness();Object.assign(h.context,{[lock]:false,[hasData]:true,spotFuturesPage:1,spotFuturesSearch:'',spotFundingInterval:'all',spotSort:{key:'open_spread',direction:'desc'},dualFuturesPage:1,dualFuturesSearch:'',dualSort:{key:'open_spread',direction:'desc'},dualIncludeBybitOkx:false});
+  const h=harness();h.context.active=name==='loadSpotFutures'?'spot-futures':'dual-futures';Object.assign(h.context,{[lock]:false,[hasData]:true,spotFuturesPage:1,spotFuturesSearch:'',spotFundingInterval:'all',spotSort:{key:'open_spread',direction:'desc'},dualFuturesPage:1,dualFuturesSearch:'',dualSort:{key:'open_spread',direction:'desc'},dualIncludeBybitOkx:false});
   h.context.byId(rowId).innerHTML='last good rows';h.run(source.slice(source.indexOf(start),source.indexOf(end)));
   let requests=0;h.context.fetch=(_url,{signal})=>{requests++;return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(new Error('aborted'))))};
   const pending=h.context[name]();assert.equal(h.context[lock],true);await h.advance(10000);assert.equal(await pending,false);
@@ -227,7 +227,7 @@ function spotLoaderHarness(){
     destroyFloatingPopup(){},updateSortHeaders(){},escapeChatHtml:String,
     replaceHtmlKeepingExchangeLogos(target,markup){target.innerHTML=markup;renders.push(markup)}});
   h.context.byId('spotFuturesRows').innerHTML='previous rows';
-  h.context.fetch=url=>new Promise((resolve,reject)=>requests.push({url,resolve:data=>resolve({ok:true,json:async()=>data}),reject}));
+  h.context.fetch=(url,options)=>new Promise((resolve,reject)=>requests.push({url,signal:options.signal,resolve:data=>resolve({ok:true,json:async()=>data}),reject}));
   h.run(source.slice(source.indexOf('async function loadSpotFutures('),source.indexOf('function hedgeMetric(')));
   h.run('installPageRefreshTracking()');
   const payload=symbol=>({symbols:[{symbol,rows:[{long_exchange:'Gate',open_spread:.5}]}],total_symbols:1,page:1,pages:1,updated_at:'12:00:00',captured_at_epoch:100,errors:{}});
@@ -608,4 +608,107 @@ test('removing an isolated alert does not replay the surviving alert, while a ne
   let active=[healthy,isolated];h.context.fetch=async()=>({ok:true,json:async()=>({active_events:active,events:[],basis_tracking:[],checked_at_epoch:100})});
   await h.context.loadAlerts(true);active=[healthy];await h.context.loadAlerts();assert.equal(sounds,0);
   active=[{...healthy,basis:2}];await h.context.loadAlerts();assert.equal(sounds,1);
+});
+
+for(const scope of ['spot','dual']){
+  test(`${scope}: leaving aborts the page read, late data cannot repaint, and hidden callbacks do not fetch`,async()=>{
+    const h=browseHarness(scope),view=scope==='spot'?'spot-futures':'dual-futures';
+    const pending=h.load(),request=h.requests[0];
+    h.context.active='risk';h.run('syncPageReadScopes()');
+    assert.equal(request.signal.aborted,true);
+    assert.equal(await h.load(),false);assert.equal(h.requests.length,1);
+    request.resolve(h.data([h.group('late',1)]));assert.equal(await pending,false);
+    assert.deepEqual(h.renders,[]);
+    assert.equal(h.run(`pageRefreshState('${view}').completedAt`),0);
+    assert.notEqual(h.run(`pageRefreshState('${view}').failed`),true);
+    assert.equal(h.run('pageReadScopes.size'),0);
+  });
+  test(`${scope}: A-B-A queues one fresh read after cancellation, never paints the previous visit`,async()=>{
+    const h=browseHarness(scope),view=scope==='spot'?'spot-futures':'dual-futures';
+    const old=h.load();h.context.active='risk';h.run('syncPageReadScopes()');
+    h.context.active=view;h.run('syncPageReadScopes()');const next=h.load(),duplicate=h.load();
+    h.requests[0].resolve(h.data([h.group('old',1)]));await old;await h.flush();
+    assert.deepEqual(h.renders,[]);assert.equal(h.requests.length,2);
+    h.requests[1].resolve(h.data([h.group('new',2)]));await Promise.all([next,duplicate]);
+    assert.deepEqual(h.renders,['new']);assert.equal(h.run(`pageReadScopes.get('${view}').controllers.size`),0);
+  });
+}
+
+test('only the selected page timer remains scheduled; global alerts still run every five seconds',async()=>{
+  const h=harness(),counts={spot:0,dual:0,alerts:0};h.context.active='spot-futures';
+  h.context.loadSpotFutures=async()=>{counts.spot++};h.context.loadDualFutures=async()=>{counts.dual++};h.context.loadAlerts=async()=>{counts.alerts++};
+  h.run('installPageRefreshTracking()');await h.context.startConfiguredPageTimers();await h.advance(15000);
+  assert.deepEqual(counts,{spot:3,dual:0,alerts:3});assert.equal(h.run("pageRefreshControllers.get('dual-futures').timer"),null);
+  h.context.active='dual-futures';h.run('syncPageReadScopes()');await h.context.loadDualFutures();await h.advance(10000);
+  assert.deepEqual(counts,{spot:3,dual:3,alerts:5});assert.equal(h.run("pageRefreshControllers.get('spot-futures').timer"),null);
+  h.context.document.visibilityState='hidden';h.run('syncPageReadScopes()');await h.advance(10000);
+  assert.deepEqual(counts,{spot:3,dual:3,alerts:7});
+});
+
+test('switching during JSON decode discards it, releases controllers and does not reset the success clock',async()=>{
+  const h=spotLoaderHarness();let finishBody;
+  h.context.fetch=async()=>({ok:true,json:()=>new Promise(resolve=>finishBody=resolve)});
+  const pending=h.context.loadSpotFutures();await h.flush();
+  h.context.active='dual-futures';h.run('syncPageReadScopes()');
+  finishBody(h.payload('late body'));assert.equal(await pending,false);
+  assert.deepEqual(h.renders,[]);assert.equal(h.timers.size,0);assert.equal(h.run('spotFuturesLoading'),false);
+});
+
+test('all inactive section entry points suppress delayed filters and mutation follow-up reads',async()=>{
+  const h=harness(),calls=[];
+  for(const [view,profile] of Object.entries(h.run('pageRefreshProfiles'))){
+    for(const name of profile.names)h.context[name]=async()=>{calls.push(name)};
+  }
+  h.context.active='risk';h.run('installPageRefreshTracking()');
+  for(const profile of Object.values(h.run('pageRefreshProfiles')))for(const name of profile.names)await h.context[name]();
+  assert.deepEqual(calls.sort(),['loadAlerts','loadChatUsers','loadSecurityAlerts'].sort());
+});
+
+test('spot page still receives dual-futures alerts and sounds without loading dual lists or alert history',async()=>{
+  const h=harness(),urls=[];h.context.active='spot-futures';let sounds=0,tips=[];
+  Object.assign(h.context,{pruneAlertMutes(){},isAlertMuted:()=>false,alertsInitialized:false,alertSignature:'',alertAudibleSignature:'',
+    renderAlertMasterDetail(){throw new Error('hidden history rendered')},renderAlertMuteList(){throw new Error('hidden mute list rendered')},
+    renderAlertStreamStatus(){throw new Error('hidden stream panel rendered')},renderTipsItems(items){tips=items},startAlertCountdown(){},playAlarmSound(){sounds++}});
+  h.run(source.slice(source.indexOf('async function loadAlerts('),source.indexOf('function tokenHedgeList(')));
+  let active=[];h.context.fetch=async url=>{urls.push(url);return {ok:true,json:async()=>({active_events:active,checked_at_epoch:100})}};
+  await h.context.loadAlerts();
+  active=[{id:1,symbol:'DEMO/USDT',strategy:'futures_futures',type:'rapid_spread',audible:true,notice_key:'dual-round-1',pulse:{state:'active'}}];
+  await h.context.loadAlerts();await h.context.loadAlerts();
+  assert.equal(sounds,1);assert.equal(tips[0].strategy,'futures_futures');
+  assert.equal(urls.length,3);assert.ok(urls.every(url=>url.startsWith('/api/alerts?view=active&notional=')));
+});
+
+test('hidden chat never fetches conversation bodies; switching away cancels a pending read without rendering',async()=>{
+  const h=harness();Object.assign(h.context,{chatPeerId:1,chatLastMessageId:0,chatOldestMessageId:0,chatRecallCursor:0,chatMessageRequests:new Map(),URLSearchParams});
+  h.run(source.slice(source.indexOf('async function loadChatMessages('),source.indexOf('async function loadOlderChatMessages(')));
+  let calls=0,signal,resolve;h.context.fetch=(_url,options)=>{calls++;signal=options.signal;return new Promise(done=>resolve=done)};
+  assert.equal(await h.context.loadChatMessages(),false);assert.equal(calls,0);
+  h.context.active='chat';const pending=h.context.loadChatMessages();assert.equal(calls,1);
+  h.context.active='spot-futures';h.run('syncPageReadScopes()');assert.equal(signal.aborted,true);
+  resolve({ok:true,json:async()=>{throw new Error('hidden body must not decode')}});
+  await assert.rejects(pending,{name:'PageReadCancelledError'});assert.equal(h.context.chatMessageRequests.size,0);
+});
+
+test('stale filter debounce cannot launch a hidden page read after navigation',async()=>{
+  const h=spotLoaderHarness();
+  h.context.setTimeout(()=>h.context.loadSpotFutures(true),180);
+  h.context.active='dual-futures';h.run('syncPageReadScopes()');await h.advance(180);
+  assert.equal(h.requests.length,0);assert.equal(h.context.spotFuturesLoading,false);
+});
+
+test('returning to a visible browser tab refreshes its current section immediately',async()=>{
+  const h=harness(),handlers=[];let reads=0;h.context.active='spot-futures';
+  h.context.document.addEventListener=(name,fn)=>{if(name==='visibilitychange')handlers.push(fn)};
+  h.context.loadSpotFutures=async()=>{reads++};h.context.refreshCurrentSection=()=>h.context.loadSpotFutures();
+  h.run('installPageRefreshTracking()');await h.context.startConfiguredPageTimers();
+  h.context.document.visibilityState='hidden';handlers.forEach(fn=>fn());await h.advance(10000);assert.equal(reads,0);
+  h.context.document.visibilityState='visible';handlers.forEach(fn=>fn());await h.flush();assert.equal(reads,1);
+  await h.advance(5000);assert.equal(reads,2);
+});
+
+test('page navigation does not postpone the shared security notification cadence',async()=>{
+  const h=harness();h.context.authState.is_admin=true;let notices=0;h.context.loadSecurityAlerts=async()=>{notices++};
+  h.run('installPageRefreshTracking()');await h.context.startConfiguredPageTimers();
+  for(let i=0;i<7;i++){await h.advance(4000);h.context.active=i%2?'spot-futures':'dual-futures';h.run('syncPageReadScopes()')}
+  await h.advance(2000);assert.equal(notices,1);
 });

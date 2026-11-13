@@ -44,7 +44,7 @@ class FrontendRefreshContractTests(unittest.TestCase):
         self.assertIn("state.completedAt=Date.now()", finish)
         self.assertIn("if(succeeded)state.completedAt=Date.now()", finish)
         self.assertIn("state.cycleStartedAt=Date.now()", finish)
-        self.assertIn("finally{finishPageRefresh(viewId,succeeded)}", install)
+        self.assertIn("finishPageRefresh(viewId,succeeded)", install)
         self.assertIn("state.sourceUpdatedAt", render)
         self.assertIn("行情延迟", render)
         self.assertIn("conic-gradient(from -90deg", STYLE_CSS)

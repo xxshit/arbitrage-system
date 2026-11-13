@@ -1,15 +1,18 @@
 /* No keys in localStorage, URLs, diagnostics or rendered responses. */
 window.BinanceHedge=(()=>{
-  let loading=false,lastLoad=0,context=null,generation=0,preview=null,placing=false;
+  let loading=false,lastLoad=0,lastRead=null,context=null,generation=0,preview=null,placing=false;
   const el=id=>document.getElementById(id),esc=value=>String(value??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   let executions=[];
   const stateNames={PREVIEW:'待确认',QUEUED:'已排队',CHECKING:'重新核验',DISPATCHING:'双腿发送中',RECONCILING:'核验成交',REDUCING:'限价减少差额',HEDGED:'净数量已配对',ATTENTION:'需要处理',UNKNOWN:'状态待核实，禁止重发',ACKNOWLEDGED:'本人已接管差额',QUERY_QUEUED:'等待只读对账',NO_FILL:'未留配对仓位',ABORTED:'已取消发送'};
-  async function api(path,method='GET',body){
+  async function api(path,method='GET',body,read=null){
+    if(read&&method!=='GET')throw new Error('页面取消范围仅适用于读取');
+    read?.assertCurrent();
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20000);
+    read?.controllers.add(controller);
     try{const response=await fetch('/api/binance'+path,{method,credentials:'same-origin',cache:'no-store',signal:controller.signal,
       headers:{'Content-Type':'application/json','X-CSRF-Token':authState.csrf_token||''},...(body?{body:JSON.stringify(body)}:{})});
-      const result=await response.json();if(!response.ok)throw new Error(result.error||'币安请求未完成');return result;
-    }catch(error){if(error.name==='AbortError')throw new Error('请求超时，状态未确认；请核对原记录，不会自动重发');throw error}finally{clearTimeout(timer)}
+      read?.assertCurrent();const result=await response.json();read?.assertCurrent();if(!response.ok)throw new Error(result.error||'币安请求未完成');return result;
+    }catch(error){read?.assertCurrent();if(error.name==='AbortError')throw new Error('请求超时，状态未确认；请核对原记录，不会自动重发');throw error}finally{clearTimeout(timer);read?.controllers.delete(controller)}
   }
   function ensurePanel(){
     if(el('binanceAccountPanel')||!el('my-positions'))return;
@@ -44,12 +47,14 @@ window.BinanceHedge=(()=>{
       <details><summary>订单与手续费证据</summary><pre>${esc(JSON.stringify({spot:r.spot,futures:r.futures,reduction:r.reduction_fill},null,2))}</pre></details></article>`}).join('')||'<p>尚未提交双腿订单。</p>'}`;
   }
   async function load(force=false){
-    if(!authState.is_admin||loading||(!force&&Date.now()-lastLoad<5000))return;
+    const read=globalThis.pageReadContext?.('my-positions');
+    if((read&&!read.current())||!authState.is_admin||loading||(!force&&read===lastRead&&Date.now()-lastLoad<5000))return;
     ensurePanel();loading=true;
-    try{const data=await api('/account');el('binanceAccountState').textContent=(data.connected?`已连接 · Key 尾号 ${data.key_suffix}。`:'尚未连接。')+data.reason;
+    try{const data=await api('/account','GET',undefined,read);el('binanceAccountState').textContent=(data.connected?`已连接 · Key 尾号 ${data.key_suffix}。`:'尚未连接。')+data.reason;
       executions=data.executions||[];el('binanceExecutions').innerHTML=executionMarkup(executions);bindActions();el('binanceRefresh').disabled=!data.connected;el('binanceConnectForm').querySelector('button[type=submit]').disabled=!data.configured;
       if(!data.configured)el('binanceAccountState').textContent+=' 服务器密钥保险箱尚未配置。';
-    }catch(error){if(el('binanceAccountState'))el('binanceAccountState').textContent=error.message}finally{loading=false;lastLoad=Date.now()}
+      lastLoad=Date.now();lastRead=read;
+    }catch(error){if(read&&!read.current())return;if(el('binanceAccountState'))el('binanceAccountState').textContent=error.message}finally{loading=false}
   }
   function bindActions(){
     el('binanceExecutions').querySelectorAll('[data-binance-reconcile]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{await api(`/intents/${b.dataset.binanceReconcile}/reconcile`,'POST',{});await load(true)}catch(e){el('binanceAccountState').textContent=e.message}finally{b.disabled=false}});

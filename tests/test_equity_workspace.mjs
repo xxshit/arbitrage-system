@@ -22,6 +22,7 @@ function harness(){
     setPageRefreshSource(...args){context.sourceState=args},
     fetchRefreshJson(url){requests.push(url);return Promise.resolve({items:[],page:1,pages:1,total:0,captured_at_epoch:1000})},
   };
+  context.pageReadContext=()=>({current:()=>true,assertCurrent(){},json:(...args)=>context.fetchRefreshJson(...args)});context.isPageReadCancelled=error=>error?.name==='PageReadCancelledError';
   vm.createContext(context);vm.runInContext(feature,context);
   return {context,nodes,queued,requests,run:code=>vm.runInContext(code,context),node:id=>context.byId(id)};
 }
@@ -31,7 +32,7 @@ test('equity navigation is exactly between spot and positions with its own view'
   const spot=html.indexOf('data-view="spot-futures"'),equity=html.indexOf('data-view="equity-arbitrage"'),positions=html.indexOf('data-view="my-positions"');
   assert.ok(spot<equity&&equity<positions);assert.ok(html.includes('id="equity-arbitrage" class="view"'));
   assert.ok(source.includes("if(viewId==='equity-arbitrage')loadEquityArbitrage();"));
-  assert.ok(source.includes("every('equity-arbitrage',pageRefreshProfiles['equity-arbitrage'].seconds,()=>loadEquityArbitrage(),()=>activeViewId()==='equity-arbitrage')"));
+  assert.ok(source.includes("every('equity-arbitrage',pageRefreshProfiles['equity-arbitrage'].seconds,()=>loadEquityArbitrage(),()=>pageIsVisible('equity-arbitrage'))"));
   assert.ok(source.includes("'equity-arbitrage':{label:'美股套利',seconds:15,names:['loadEquityArbitrage']}"));
 });
 

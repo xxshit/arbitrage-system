@@ -19,7 +19,7 @@ function fixture(fetcher){
   vm.runInNewContext(source,ctx);const api=ctx.window.BinanceHedge;
   const opportunity={strategy:'spot_futures',group:{symbol:'BTC/USDT'},row:{long_exchange:'Binance'}};
   api.builder(opportunity);nodes.get('binanceClip').value='20';nodes.get('binanceMinEdge').value='0';nodes.get('binanceExitSlippage').value='20';nodes.get('binanceResidual').value='hold';
-  return {nodes,api,opportunity};
+  return {nodes,api,opportunity,ctx,node};
 }
 const response=enabled=>({ok:true,json:async()=>({execution_enabled:enabled,intent:{id:'synthetic',result:{prepared:true,prepared_at:Date.now()/1000},expires_at:Date.now()/1000+15,plan:{quantity:'.001',base:'BTC',buy_cap:'80000',sell_cap:'80100',spot_vwap:'80000',futures_vwap:'80100',worst_net_bps:'1',max_single_leg_quote:'80.1'}}})});
 
@@ -81,4 +81,24 @@ test('independent reconciliation shows the failed leg without discarding verifie
   assert.match(html,/独立核验未完成：现货/);assert.match(html,/其余已核实结果保留/);
   assert.match(html,/0.196/);assert.match(html,/两请求写完跨度 81ms/);
   assert.ok(!html.includes('data-binance-ack='));
+});
+
+test('leaving positions suppresses account display reads while order actions retain their own lifecycle',async()=>{
+  const calls=[];const f=fixture(async(url,options)=>{calls.push({url,options});return response(false)});
+  f.ctx.pageReadContext=()=>({current:()=>false});
+  await f.api.load(true);assert.equal(calls.length,0);
+  await f.nodes.get('binanceDepthCheck').events.click();
+  assert.equal(calls.length,1);assert.equal(calls[0].options.method,'POST');
+  assert.equal(calls[0].options.signal.aborted,false);assert.equal(f.nodes.get('hedgeSubmitButton').disabled,true);
+});
+
+test('cancelled account response does not decode or repaint and releases its controller',async()=>{
+  let resolve,signal,visible=true;const f=fixture((_url,options)=>{signal=options.signal;return new Promise(done=>resolve=done)});
+  f.node('binanceAccountPanel');const status=f.node('binanceAccountState');status.textContent='previous status';
+  const read={controllers:new Set(),current:()=>visible,assertCurrent(){if(!visible){const e=new Error('cancelled');e.name='PageReadCancelledError';throw e}}};
+  f.ctx.pageReadContext=()=>read;
+  const pending=f.api.load(true);assert.equal(read.controllers.size,1);visible=false;
+  for(const c of read.controllers)c.abort();assert.equal(signal.aborted,true);
+  resolve({ok:true,json:async()=>{throw new Error('stale data decoded')}});await pending;
+  assert.equal(status.textContent,'previous status');assert.equal(read.controllers.size,0);
 });

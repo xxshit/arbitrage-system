@@ -214,22 +214,27 @@
     $('opportunityPage').textContent=`第 ${state.page} / ${pages} 页`;
     $('opportunityPrev').disabled=state.page<=1;$('opportunityNext').disabled=state.page>=pages;
   }
-  async function load(refresh=true){
+  async function load(refresh=true,read=globalThis.pageReadContext?.('thinking')){
+    if(read&&!read.current())return null;
     if(!init())return null;
     if(!refresh&&state.data){render();return state.data}
-    if(state.controller)return state.data;
+    if(state.controller&&!state.controller.signal.aborted)return state.data;
     const controller=new AbortController(),version=++state.version;state.controller=controller;
+    read?.controllers.add(controller);
     const timeout=setTimeout(()=>controller.abort(),12000);
     try{
       const response=await fetch(`/api/arbitrage-thinking/simple?${new URLSearchParams({strategy:state.strategy,scope:state.scope,notional:state.notional,hold_hours:state.hold_hours})}`,{signal:controller.signal,cache:'no-store'});
+      read?.assertCurrent();
       if(!response.ok)throw new Error(response.status===401?'登录已失效，请重新登录':'候选读取失败');
       const data=await response.json();
+      read?.assertCurrent();
       if(version!==state.version)return state.data;
       state.data=data;state.watchPaths=data.watch_paths||[];state.error='';render();return data;
     }catch(error){
+      if(read&&!read.current())return null;
       if(version!==state.version)return state.data;
       state.error=error.name==='AbortError'?'读取超时':error.message;render();return state.data;
-    }finally{clearTimeout(timeout);if(version===state.version)state.controller=null}
+    }finally{clearTimeout(timeout);read?.controllers.delete(controller);if(version===state.version)state.controller=null}
   }
   function resetRequest(){
     ++state.version;state.controller?.abort();state.controller=null;state.error='';state.data=null;state.order=[];state.page=1;
@@ -322,6 +327,7 @@
       }
     },
     expire(){
+      if(globalThis.pageIsVisible&&!globalThis.pageIsVisible('thinking'))return;
       document.querySelectorAll('[data-score-base]').forEach(node=>{
         if(node.dataset.scoreBase==='')return;
         const item={score:Number(node.dataset.scoreBase),score_parts:{current:Number(node.dataset.scoreCurrent)},

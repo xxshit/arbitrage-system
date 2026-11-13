@@ -1,0 +1,8 @@
+{
+  "at_utc": "2026-11-13T10:43:57.929764+00:00",
+  "tests": 8,
+  "errors": 0,
+  "failures": 0,
+  "publisher_sha256": "113a9364f35b2a4009ab6b31c7a7bd9d2fa38a4277e258d3fdb1c1be7fd4933d",
+  "scope": "synthetic release protection only"
+}

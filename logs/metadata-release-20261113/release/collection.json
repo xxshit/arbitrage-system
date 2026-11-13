@@ -1,0 +1,34 @@
+{
+  "root": "/root/arbiscope-release-metadata-owner.22didsd7",
+  "exit": 0,
+  "files": {
+    "before.json": {
+      "sha": "d79201ba57a4cd78fdfc760c08e70cf6fc0990bf872bb4478c745d8326cc47f1"
+    },
+    "stopped-before.json": {
+      "sha": "9fa01612f5f419d1c78fc1e07fc62d0e791b9c5cd21838fe64159215da740f88"
+    },
+    "stopped-after.json": {
+      "sha": "905c0e107797143d5e78692aa79939a02863e7b7aea4313f7268c8882fc3ab8f"
+    },
+    "after.json": {
+      "sha": "3706f660680fd25d93960aa276ef7d5a67925b00025729ffebce3250ff5f3f67"
+    },
+    "backup-check.json": {
+      "sha": "618eacb5564b5b5835d0df3bef0d57b18bf8a2467fcd3524c615c15e31f4aed4"
+    },
+    "https-check.json": {
+      "sha": "dc950cb29d2bc533b94d5666ebdeb15d72a3b75abbc93963722eb6502908aece"
+    },
+    "new-worker-health.json": {
+      "sha": "2aa602e0cc5caa33c60f2e930f20e4137b32cc4ce0b7a2fe7916decea22df4a6"
+    },
+    "result.json": {
+      "sha": "04a5c4d3c522cbfec48b0fb49f80ee7ab8d27eba60050fb7bf5b22dce39cc4a7"
+    },
+    "publish.stdout": {
+      "sha": "cb60f93d8b9d5132c83ead33881f32061963bfab55b91280f49b84b75a3f370f"
+    }
+  },
+  "stderr_bytes": 0
+}

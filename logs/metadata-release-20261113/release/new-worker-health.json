@@ -1,0 +1,49 @@
+{
+  "boot_pids": [
+    2392786
+  ],
+  "error_counts": {},
+  "health_sample_count": 2,
+  "last_health": {
+    "alert_history": {
+      "decoded_rows": 13432,
+      "delta_reads": 11,
+      "full_reads": 1,
+      "last_read_seconds": 0.0206,
+      "rows": 13406,
+      "spool_bytes": 8592880
+    },
+    "allocator_free_bytes": 36141088,
+    "allocator_used_bytes": 110020576,
+    "anonymous_bytes": 320045056,
+    "at_utc_us": "1794566780156684",
+    "cgroup_bytes": 1341235200,
+    "db_checked_out": 1,
+    "db_holders": [
+      {
+        "seconds": 0.01,
+        "worker": "price-history-backfill"
+      }
+    ],
+    "db_longest_checkout_seconds": 2.89,
+    "dead": [],
+    "file_cache_bytes": 1014845440,
+    "invocation": "02fcf4b56a07420f891d0c161f63c8bd",
+    "memory_events": {
+      "high": 1,
+      "low": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_group_kill": 0,
+      "oom_kill": 0
+    },
+    "memory_high_bytes": 1342177280,
+    "memory_limit_bytes": 1610612736,
+    "memory_sampled_at_epoch": 1794566780.151125,
+    "memory_stall_microseconds": 0,
+    "pid": 2392786,
+    "restarts": 0,
+    "rss_bytes": 329699328,
+    "workers": 30
+  }
+}

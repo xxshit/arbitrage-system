@@ -1,0 +1,164 @@
+{
+  "at_utc": "2026-11-13T10:45:18.928694+00:00",
+  "db_identity": {
+    "port": 3306,
+    "server_uuid": "b5813606-9d1d-11f1-b740-00163e1f5d8b",
+    "socket": "/var/run/mysqld/mysqld.sock"
+  },
+  "identity": {
+    "services": {
+      "arbitrage-private": {
+        "ActiveState": "inactive",
+        "InvocationID": "25e853ed5afe41bbabb2a7a1d6f380a6",
+        "MainPID": "0",
+        "NRestarts": "0"
+      },
+      "lewan-game": {
+        "ActiveState": "failed",
+        "InvocationID": "9713cdbc61094381bc0d3c8bc27eca11",
+        "MainPID": "0",
+        "NRestarts": "0"
+      },
+      "mysql": {
+        "ActiveState": "active",
+        "InvocationID": "0d929bdd57b046d288c78b4759f96d7d",
+        "MainPID": "2388567",
+        "NRestarts": "0"
+      }
+    },
+    "worker": null,
+    "worker_start_ticks": null
+  },
+  "index_digest": "fefa88a6d04e8c9cbe52679b90055ebe563a869646028fbce25124aef1a7f966",
+  "new_table_counts": {
+    "binance_account_link": 0,
+    "binance_executor_health": 1,
+    "binance_hedge_intent": 0
+  },
+  "private_hashes": {
+    ".binance_api_encryption.key": "691dcd5815106ceba8f8b23d88f4bc69f411cec000fbdc02173590c1af62ea88",
+    ".chat_encryption.key": "4737cd7cd231529af40c6166f06847ea03b44e7e2f4ad4f519d7dc825e148a5f",
+    ".env": "da1ff1c73e94484a7b3254bd22943fd4450d2846476b4d80d789b6314fb70b5e"
+  },
+  "protected_hashes": {
+    "account_stable": "e90969f4ab28fba28f885951a694145541f954b442df83b7710edd82670391f9",
+    "personal_watches": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "positions": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "runtime_rules": "91ac18ba4717b8c6fca937ac632c09d5d70cd4e4eaaea31d7bf0116d03fb3850",
+    "watch_flags": "bd9408191f28c7bbf65cb0f9ade4e6ceea9594a27f3e81b44d87b2b5a361b661"
+  },
+  "refresh_rules": [
+    [
+      "dual_market_refresh",
+      1,
+      "5"
+    ],
+    [
+      "spot_market_refresh",
+      1,
+      "5"
+    ]
+  ],
+  "site_limits": {
+    "MemoryHigh": "1342177280",
+    "MemoryMax": "1610612736"
+  },
+  "source": {
+    "alert_history_index.py": "8161fb56a801c0cd7e89df06c9cdf074da8858501235b24c73429ed6be6f8ea7",
+    "alert_read_payload.py": "0c9345baa6dcba00f24c6d80ad3239a4130e0a59d81f55b270f24c00d54733b5",
+    "alert_reminders.py": "fc5b1a6f213544b7cafe5d6a3af174f7f4dd758964e66c7a7b09041f65ab4e67",
+    "alert_screening.py": "a38be0da586f2be8ec8c54ed9e6e9a2c2a9cecccbd1b65a11e2c3f6334d2b899",
+    "anomaly_engine.py": "6dd52fed9f69c13539fa1bc4ece090702c3e6a5259db855996af44b8fd472737",
+    "anomaly_streams.py": "ad1603aee41a71a3aee1fb3f272ccb2f750f57ddf4264cf5de8abd118353fd0e",
+    "app.py": "3e3c818f8f3d38410eef87e325535017d5456e959a04bc09421da5b4908b9696",
+    "asset_catalog.py": "d6ab273298ce9743a1bdfc321bb90fc110b34ad7a5840564b3774cb673f1fc47",
+    "background_runtime.py": "c4cfe235c4d467d9fe65580e7017faa2f08d34a877e133fb53de318d0d61a5c5",
+    "binance_hedge/__init__.py": "4ffaecdd788efe93f0c3fde20defb38a837047504aa402c3c59c562613d37221",
+    "binance_hedge/budget.py": "16fd84f9e2e97841c22a1ac9c9003bfd5826ae1387ed98bc5ab036849910fcd4",
+    "binance_hedge/client.py": "a1d1a766e62dcd03c73934c7e9a433c136abe63c96cbf5a4589691f5af41980f",
+    "binance_hedge/executor.py": "fd23a54635426cfdfeeb7f0331aada70b6923c6967f82288e3c23fe6a3e617e0",
+    "binance_hedge/planner.py": "c69d8ba64ddcc8c264120485620a8893f8ff26fa41ba708f033b864e62440cbc",
+    "binance_hedge/store.py": "1659f06d3857f3a133760be2c540c4492ea80293c8a89880575a5d504e011077",
+    "binance_hedge/streams.py": "dbac27e26797bea533409ea4a61e7c7dd2b5bb8e0bec1fc52259fe6f29e34665",
+    "binance_hedge/wakeup.py": "4eb1bb54e870d709e1abe34c5394440c7a758dd8682f84f701a5b351b9909c2e",
+    "binance_hedge/web.py": "d960b8313b1324eef452285e8e4267ba03f9af23920d44e98496a7f450392169",
+    "binance_hedge/worker.py": "6f1c47f11a3a06dce2c098b2d258739a1b90fc378c4d649574b6d374fa57b872",
+    "deploy/arbitrage-binance.service": "7e948faf141daedc9fb0939fbdc23efa573c0d2f51a749e90f41b5fa11efece5",
+    "equity_spot.py": "d5f82b4918a65b2f751caac4ecb2354fb6dbfcce450055b910fcaa9086e69edc",
+    "funding_alerts.py": "8b6c4a16dd638896fd2a464ff67708bbe5f12a8eb3862258fc81540d71687345",
+    "funding_history.py": "24c266b9d798ba224a7b6b15cd4d1e3303b6c559d2a4336c4030eab630dd9125",
+    "market_status.py": "00c7eb9ac20f16cb754cdbd2bf1cf8d6064485e479e14799247e6021ff16ef94",
+    "market_transport.py": "968f2b2c2daba7704a35ced5d631d9cb0496c2a4f6341418622ee52e74c30d21",
+    "opportunity_activity.py": "11fbd036b19a266dcc5044b14c4ad35aa8e490177710640f36c210a9419bb47e",
+    "opportunity_funding.py": "4c2e7795883d3c7e55faa1f7dc2709f8731140f9beb0d000f067b0beda7bc2b2",
+    "opportunity_history.py": "0ea42d46db6c23f43950cbc7d654330984225d5de73bfd57d7157f4e55efabe4",
+    "opportunity_pool.py": "6b929eb655de812d09e9a2ddf993c2b5b46c3b9478a2fac7add38c3ecd6e9dad",
+    "opportunity_validation.py": "23af34d1e27e7a4350450a75a0de00adb45d4f8099f4a5424da34f15e42f7d34",
+    "persistence_policy.py": "e1488fb9eb8d887d90fca4de4a79f81eb6b1eefac751a8fff5b9deb489e01463",
+    "quote_refresh.py": "7b82007454d4e87621d8b56a4504709fc8f98bbe369cd0ce8aa5365819ca9d59",
+    "read_performance.py": "b8d26671f5d990f53ead2c02bd9ed4b3fc81b0ab69c9c731c10a4c79899c33c2",
+    "scripts/backup_mysql.sh": "c06f939ff3ba4b181bcfe5c728fbbc49444e4b05de94bcff5315c65b46153e0d",
+    "scripts/run_mysql_backup_loop.sh": "4f1b8d5d8a54fcb4d584bb8c606eab400960aab648fe2b35e499c5394edbaad1",
+    "snapshot_persistence.py": "fea4ad427fcdfa3b190e66dd1171e2775f3b78ef572a505f230a6173ab8fa2d2",
+    "spread_history.py": "fbf165aeb763e6a9a788f17c1ff755ce56d0eac15baf8939551086d8f992b3a8",
+    "static/app.js": "ca32b225e723092032046f194c2f2d9403c7261de2e6cfdc890b6478bddaee14",
+    "static/binance-hedge.js": "3652b438162c97cf4715fe6e4335e23464c59cb780c53cd3a47acb891e1807f6",
+    "static/style.css": "2376022afb3f42e441c576492bff258e4cd27594731c45dc82f8640f87e7de4a",
+    "templates/index.html": "db268a37aae129262f766648c98b257a1ce19da789f3ce39f04e415f7b0f7273",
+    "trend_reference.py": "c5372d28bfc18d4ef03d06257454d3cbe3dd2074c9dd326a19178c678d451bef"
+  },
+  "static_sha256": "ca32b225e723092032046f194c2f2d9403c7261de2e6cfdc890b6478bddaee14",
+  "table_counts": {
+    "account_device": 1,
+    "account_security_event": 2,
+    "alert_event": 1158692,
+    "alert_pulse": 915682,
+    "alert_reminder_state": 4898,
+    "automation_status": 17,
+    "basis_expansion_log": 185538,
+    "basis_tracking": 62302,
+    "chat_attachment": 0,
+    "chat_contact_remark": 0,
+    "chat_message": 0,
+    "chat_message_preference": 0,
+    "chat_push_subscription": 2,
+    "chat_view_state": 2,
+    "daily_horn_signal": 5972,
+    "dual_futures_price_history": 4510,
+    "early_trend_signal": 744,
+    "equity_spot_snapshot": 1,
+    "exchange_funding_rate_record": 161921,
+    "funding_alert_event": 151,
+    "funding_alert_state": 524,
+    "funding_rate_record": 109567,
+    "futures_price_history": 936869,
+    "futures_trend_reference": 512,
+    "hedge_position": 0,
+    "index_component_snapshot": 1912,
+    "invite_code": 1,
+    "lark_push_state": 899,
+    "latest_dual_futures_snapshot": 1584,
+    "latest_market_snapshot": 1233,
+    "listing_event": 80,
+    "listing_state": 662,
+    "login_security_alert": 0,
+    "market_asset_classification": 543,
+    "onchain_opportunity_snapshot": 48,
+    "opportunity_watch": 0,
+    "push_signal_validation": 308,
+    "runtime_rule": 21,
+    "spot_divergence": 129,
+    "strategy": 2,
+    "symbol_alias": 3,
+    "thought_live_snapshot": 21,
+    "thought_push_event": 2419,
+    "thought_push_snapshot": 14,
+    "thought_watch": 23,
+    "trade_validation": 30,
+    "trade_validation_candle": 7335,
+    "transfer_network_snapshot": 12366,
+    "trend_horizon_event": 2534,
+    "trend_horizon_validation": 843,
+    "user_account": 2
+  }
+}

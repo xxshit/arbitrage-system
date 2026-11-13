@@ -1,0 +1,27 @@
+[
+  {
+    "cache_control": null,
+    "path": "/login",
+    "status": 200
+  },
+  {
+    "cache_control": null,
+    "path": "/api/runtime-health",
+    "status": 401
+  },
+  {
+    "cache_control": "no-store",
+    "path": "/api/binance/account",
+    "status": 401
+  },
+  {
+    "cache_control": "private, no-store",
+    "path": "/api/dual-futures",
+    "status": 401
+  },
+  {
+    "cache_control": "private, no-store",
+    "path": "/api/alerts?view=active",
+    "status": 401
+  }
+]

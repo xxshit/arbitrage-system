@@ -1,0 +1,95 @@
+{
+  "reviewed_at_utc": "2026-11-13T10:49:17.278041+00:00",
+  "status": "DEPLOYMENT_AND_INITIAL_CHECKS_PASSED; MEMORY_OBSERVATION_PENDING",
+  "release": "/root/arbiscope-release-metadata-owner.22didsd7",
+  "dispatch_session": 13858,
+  "actual_exit": 0,
+  "stderr_bytes": 0,
+  "changed_files": [
+    "app.py"
+  ],
+  "candidate_sha256": "3e3c818f8f3d38410eef87e325535017d5456e959a04bc09421da5b4908b9696",
+  "backup": {
+    "binance_restore_key_matches": true,
+    "bytes": 635849407,
+    "completed_footer": true,
+    "dump_exit": 0,
+    "dump_stderr_bytes": 0,
+    "gzip_exit": 0,
+    "gzip_stderr_bytes": 0,
+    "gzip_valid": true,
+    "restore_key_matches": true,
+    "sha256": "64ce4bec99738ddb9ecc075cb6dec345c188f89c1f948391130230c2ae5446e9",
+    "tables": 54,
+    "verified_at_utc": "2026-11-13T10:45:18.128927+00:00"
+  },
+  "stopped_54_counts_exact": true,
+  "original_protection_hashes_unchanged": true,
+  "mysql_and_game_preserved_from_preexisting_outage": true,
+  "new_identity": {
+    "services": {
+      "arbitrage-private": {
+        "ActiveState": "active",
+        "InvocationID": "02fcf4b56a07420f891d0c161f63c8bd",
+        "MainPID": "2392782",
+        "NRestarts": "0"
+      },
+      "lewan-game": {
+        "ActiveState": "failed",
+        "InvocationID": "9713cdbc61094381bc0d3c8bc27eca11",
+        "MainPID": "0",
+        "NRestarts": "0"
+      },
+      "mysql": {
+        "ActiveState": "active",
+        "InvocationID": "0d929bdd57b046d288c78b4759f96d7d",
+        "MainPID": "2388567",
+        "NRestarts": "0"
+      }
+    },
+    "worker": 2392786,
+    "worker_start_ticks": 734225447
+  },
+  "start_requested_at_utc": "2026-11-13T10:45:19.256219+00:00",
+  "initial_acceptance_at_utc": "2026-11-13T10:46:20.475640+00:00",
+  "evidence": {
+    "manual-release-review.json": {
+      "sha256": "c26dcb8cebc5e36d745e6d5393b89d8dcff0be96d342436efec7d28da2322837",
+      "bytes": 1444
+    },
+    "preflight.stderr": {
+      "sha256": "59209ad3c3f89a2f5d731ca75ac8373fd29f9c37006beda795145deb9013c0a9",
+      "bytes": 230
+    },
+    "preflight-stopped.json": {
+      "sha256": "58386a0cb059cac7129fe4e9c7d09f598630e80c54c1a78c3890bef7f46297d8",
+      "bytes": 7636
+    },
+    "service-triage.json": {
+      "sha256": "6feb082210487f8c61235b57fb32d9409b213e8750bd474aed1bd9f610895f49",
+      "bytes": 4631
+    },
+    "release-guard-receipt.json": {
+      "sha256": "c8885a7fb18bc8f78a8ad3870c0c07ae16c442ca046cacefa724839d4c6b4c0c",
+      "bytes": 235
+    },
+    "release/result.json": {
+      "sha256": "04a5c4d3c522cbfec48b0fb49f80ee7ab8d27eba60050fb7bf5b22dce39cc4a7",
+      "bytes": 7500
+    },
+    "release/backup-check.json": {
+      "sha256": "618eacb5564b5b5835d0df3bef0d57b18bf8a2467fcd3524c615c15e31f4aed4",
+      "bytes": 386
+    },
+    "release/collection.json": {
+      "sha256": "54b24194d451563e1eb200332c894b157a1bdcdfc74fb2d0feb65af474e07ddd",
+      "bytes": 1126
+    },
+    "observation-20261113-104639.json": {
+      "sha256": "83ff8e50ee915c85dab303a7ca54df94341e093f103757e095a0e22d93635e8a",
+      "bytes": 12556
+    }
+  },
+  "no_synthetic_long_tests": true,
+  "memory_verdict": "PENDING_SAME_NEW_WORKER_REAL_LOAD; do not compare cold-start RSS to old-worker endpoint as proof of fix"
+}

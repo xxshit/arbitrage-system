@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "<stdin>", line 95, in <module>
+  File "<stdin>", line 43, in snapshot
+  File "<stdin>", line 26, in identity
+  File "<stdin>", line 12, in need
+RuntimeError: protected_service_not_active

@@ -1,0 +1,32 @@
+{
+  "reviewed_at_utc": "2026-11-13T10:44:30.382135+00:00",
+  "status": "NEW_RELEASE_GATE_PASSED",
+  "user_authorized": true,
+  "file_scope": [
+    "app.py"
+  ],
+  "function_scope": [
+    "fetch_equity_metadata",
+    "collect_equity_metadata"
+  ],
+  "runtime_candidate_sha256": "3e3c818f8f3d38410eef87e325535017d5456e959a04bc09421da5b4908b9696",
+  "input_short_review_sha256": "bc5d32de8fcb6f2e56eabb0f33954832c8794a1704894a74a402d87627bfb02d",
+  "publisher_sha256": "113a9364f35b2a4009ab6b31c7a7bd9d2fa38a4277e258d3fdb1c1be7fd4933d",
+  "manifest_sha256": "84120d4dae978fc54e0945765ec9b8ab11960cd4f5642637ceb49099616ed926",
+  "dispatcher_sha256": "a8de0dadfb0d33961322dac9151f6678c81c5c358bfaa218284a3688d1c5ace8",
+  "guard_tests": 8,
+  "stderr_bytes": 0,
+  "preflight_sha256": "58386a0cb059cac7129fe4e9c7d09f598630e80c54c1a78c3890bef7f46297d8",
+  "preexisting_service_outage": {
+    "at_utc": "2026-11-12T22:43:06.631158+00:00",
+    "game_failed_exit143": true,
+    "mysql_restarted_before_this_release": true,
+    "service_triage_sha256": "6feb082210487f8c61235b57fb32d9409b213e8750bd474aed1bd9f610895f49",
+    "site_inactive": true
+  },
+  "protection_matches_original": true,
+  "backup": "REQUIRED_FRESH_AND_VERIFIED_BY_ONCE_PUBLISHER_BEFORE_REPLACE",
+  "rollback": "only app.py; never business database",
+  "no_new_synthetic_soak": true,
+  "memory_acceptance": "pending real new-worker observation; historical failures cannot be rescored"
+}

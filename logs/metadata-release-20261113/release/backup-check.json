@@ -1,0 +1,14 @@
+{
+  "binance_restore_key_matches": true,
+  "bytes": 635849407,
+  "completed_footer": true,
+  "dump_exit": 0,
+  "dump_stderr_bytes": 0,
+  "gzip_exit": 0,
+  "gzip_stderr_bytes": 0,
+  "gzip_valid": true,
+  "restore_key_matches": true,
+  "sha256": "64ce4bec99738ddb9ecc075cb6dec345c188f89c1f948391130230c2ae5446e9",
+  "tables": 54,
+  "verified_at_utc": "2026-11-13T10:45:18.128927+00:00"
+}

@@ -1,0 +1,9 @@
+{
+  "at_utc": "2026-11-13T10:49:17.274082+00:00",
+  "status": "PASS_IN_MEMORY_COMPILE_PYTHON_3_12",
+  "files": {
+    "observe-metadata-readonly.py": "9fcd6f4b4f2816b917885b237b22616604fe5ddfbf097880df883ad977dc28ee",
+    "collect-observation.py": "50e00caa438846f7a236462071b33821de530449259476e4b495ccd906b2da33"
+  },
+  "prior_check_failure": "System python3 py_compile attempted external ~/Library/Caches/com.apple.python and failed PermissionError before compilation; no application code run. Retried with project Python compile() in memory without cache writes."
+}

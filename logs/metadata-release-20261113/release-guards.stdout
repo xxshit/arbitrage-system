@@ -1,0 +1,13 @@
+test_backup_and_stopped_count_gates_precede_start (__main__.Guards.test_backup_and_stopped_count_gates_precede_start) ... ok
+test_bad_previous_hash_refuses_restore (__main__.Guards.test_bad_previous_hash_refuses_restore) ... ok
+test_each_protected_value_and_service_identity (__main__.Guards.test_each_protected_value_and_service_identity) ... ok
+test_exact_original_counts (__main__.Guards.test_exact_original_counts) ... ok
+test_existing_restore_new_removal_and_drift_rejection (__main__.Guards.test_existing_restore_new_removal_and_drift_rejection) ... ok
+test_extra_global_or_function_change_rejected (__main__.Guards.test_extra_global_or_function_change_rejected) ... ok
+test_flags_or_active_executor_never_pass (__main__.Guards.test_flags_or_active_executor_never_pass) ... ok
+test_two_function_candidate_and_fixed_receipts (__main__.Guards.test_two_function_candidate_and_fixed_receipts) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 3.578s
+
+OK

@@ -1,0 +1,10 @@
+{
+  "path": "logs/read-memory-20261024/representative-workload-20261026/production-indexdelta-j3lBdx/observation-20261107-035031.json",
+  "sha256": "6e9e6551639f939cf34f9ab0be2a0764ea0dc48840ed9ac3820b993584b069f6",
+  "bytes_unchanged": 5507979,
+  "old_blocks_512": 10760,
+  "new_blocks_512": 1368,
+  "mtime_preserved": true,
+  "mode_preserved": true,
+  "free_after": 143536128
+}

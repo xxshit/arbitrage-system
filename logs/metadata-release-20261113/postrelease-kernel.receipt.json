@@ -1,0 +1,9 @@
+{
+  "started_at_utc": "2026-11-13T11:34:58.295558+00:00",
+  "finished_at_utc": "2026-11-13T11:37:09.744524+00:00",
+  "exit": 0,
+  "script_sha256": "a031b784d8e492e1aa8aceaf7a5f3dd43c8974ca77cfdcedec38f1155362eb15",
+  "report_sha256": "79bb676effded38da17bf364ce5c5dbd9663d4992b6e478fbcd32d0f1379d7e8",
+  "report_bytes": 128585,
+  "stderr_bytes": 0
+}

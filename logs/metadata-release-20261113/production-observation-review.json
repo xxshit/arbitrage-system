@@ -1,0 +1,561 @@
+{
+  "active_history_count_boundary": {
+    "later_read_only_aggregate": [
+      {
+        "newest_bucket_epoch": "1794570000",
+        "now_epoch": "1794570081",
+        "oldest_bucket_epoch": "1793878800",
+        "outside_current_eight_day_window": "1",
+        "read_only": "1",
+        "rows_since_start_bucket": "5892",
+        "rows_total": "870017",
+        "utc_clock": "2026-11-13 11:41:21.069146"
+      }
+    ],
+    "net_change": -66992,
+    "note": "The existing eight-day rolling retention remains active. These aggregates are compatible with retention after the preexisting outage, not a per-row deletion audit. No extra cleanup or retention change was performed. Do not claim every historical table count stayed equal while active.",
+    "price_history_at_final_protection": 869877,
+    "price_history_before": 936869,
+    "source_retention_function": "app.py:capture_price_history unchanged",
+    "source_retention_seconds": 691200
+  },
+  "actual_dispatch_exit": 0,
+  "after_first_30min_endpoint_changes": {
+    "allocator_free_bytes": 37867344,
+    "allocator_used_bytes": 3551408,
+    "anonymous_bytes": 46854144,
+    "file_cache_bytes": -47345664,
+    "rss_bytes": 46854144
+  },
+  "backup": {
+    "binance_restore_key_matches": true,
+    "bytes": 635849407,
+    "completed_footer": true,
+    "dump_exit": 0,
+    "dump_stderr_bytes": 0,
+    "gzip_exit": 0,
+    "gzip_stderr_bytes": 0,
+    "gzip_valid": true,
+    "restore_key_matches": true,
+    "sha256": "64ce4bec99738ddb9ecc075cb6dec345c188f89c1f948391130230c2ae5446e9",
+    "tables": 54,
+    "verified_at_utc": "2026-11-13T10:45:18.128927+00:00"
+  },
+  "changed_definitions": [
+    "fetch_equity_metadata",
+    "collect_equity_metadata"
+  ],
+  "changed_files": [
+    "app.py"
+  ],
+  "complete_quarter_hour_medians": [
+    {
+      "allocator_free_bytes": {
+        "max": 93194480,
+        "median": 82260384,
+        "min": 66951104
+      },
+      "allocator_used_bytes": {
+        "max": 129661152,
+        "median": 129046592,
+        "min": 128323904
+      },
+      "anonymous_bytes": {
+        "max": 463765504,
+        "median": 453300224,
+        "min": 437551104
+      },
+      "complete": true,
+      "db_checked_out": {
+        "max": 0,
+        "median": 0,
+        "min": 0
+      },
+      "db_longest_checkout_seconds": {
+        "max": 2.89,
+        "median": 2.89,
+        "min": 2.89
+      },
+      "file_cache_bytes": {
+        "max": 888127488,
+        "median": 874749952,
+        "min": 864960512
+      },
+      "rss_bytes": {
+        "max": 473358336,
+        "median": 462893056,
+        "min": 447143936
+      },
+      "samples": 15,
+      "start_utc": "2026-11-13T11:00:00+00:00"
+    },
+    {
+      "allocator_free_bytes": {
+        "max": 118844304,
+        "median": 109573584,
+        "min": 94992720
+      },
+      "allocator_used_bytes": {
+        "max": 132805216,
+        "median": 131197056,
+        "min": 129533616
+      },
+      "anonymous_bytes": {
+        "max": 498233344,
+        "median": 484237312,
+        "min": 465948672
+      },
+      "complete": true,
+      "db_checked_out": {
+        "max": 1,
+        "median": 0,
+        "min": 0
+      },
+      "db_longest_checkout_seconds": {
+        "max": 2.89,
+        "median": 2.89,
+        "min": 2.89
+      },
+      "file_cache_bytes": {
+        "max": 862298112,
+        "median": 839536640,
+        "min": 828022784
+      },
+      "rss_bytes": {
+        "max": 507822080,
+        "median": 493826048,
+        "min": 475537408
+      },
+      "samples": 15,
+      "start_utc": "2026-11-13T11:15:00+00:00"
+    }
+  ],
+  "continuation_local_only": true,
+  "deployed_app_sha256": "3e3c818f8f3d38410eef87e325535017d5456e959a04bc09421da5b4908b9696",
+  "elapsed_since_initial_acceptance_seconds": 3158.341351032257,
+  "evidence": {
+    "deployment-review.json": {
+      "bytes": 3220,
+      "path": "logs/metadata-release-20261113/deployment-review.json",
+      "sha256": "00a9fe6c7a674d53d8e100a18eedd133851864b7ab880927901be87503b0cf1f"
+    },
+    "equity-progress-final.json": {
+      "bytes": 1562,
+      "path": "logs/metadata-release-20261113/equity-progress-final.json",
+      "sha256": "37c962b3391256b6996db9a672242fae2eac90665d73cb311c281601cf9de6d0"
+    },
+    "equity-progress-final.receipt.json": {
+      "bytes": 279,
+      "path": "logs/metadata-release-20261113/equity-progress-final.receipt.json",
+      "sha256": "7229d756a13773ae831acf2262f18b9cdbf305271468288e854dea317b985e4d"
+    },
+    "equity-progress-initial.json": {
+      "bytes": 1544,
+      "path": "logs/metadata-release-20261113/equity-progress-initial.json",
+      "sha256": "21502c4357db907a56c13647707552251f89e57079f2deac2a2d6d68ee3e4ed8"
+    },
+    "final-protection.json": {
+      "bytes": 8030,
+      "path": "logs/metadata-release-20261113/final-protection.json",
+      "sha256": "62c48db0216c9afb9077696871491ec2cd8ddfa440ba25c709818086b30e945e"
+    },
+    "final-protection.receipt.json": {
+      "bytes": 334,
+      "path": "logs/metadata-release-20261113/final-protection.receipt.json",
+      "sha256": "4e58dc7e416ee5f6ddab35a09d14c667d93a406c91e9aa3178814673cb752c82"
+    },
+    "local-capacity-recovery-review.json": {
+      "bytes": 599,
+      "path": "logs/metadata-release-20261113/local-capacity-recovery-review.json",
+      "sha256": "3a390bca3e3f0b67909206947a9656bbd43d713c277cf0cd537f0c6ed531fd82"
+    },
+    "local-python-cache-cleanup.json": {
+      "bytes": 171,
+      "path": "logs/metadata-release-20261113/local-python-cache-cleanup.json",
+      "sha256": "14219220e37e58bc7b0a35fd86a8886c25b8dae6550c09159a3506b0414121b8"
+    },
+    "manual-release-review.json": {
+      "bytes": 1444,
+      "path": "logs/metadata-release-20261113/manual-release-review.json",
+      "sha256": "c26dcb8cebc5e36d745e6d5393b89d8dcff0be96d342436efec7d28da2322837"
+    },
+    "postrelease-kernel.receipt.json": {
+      "bytes": 350,
+      "path": "logs/metadata-release-20261113/postrelease-kernel.receipt.json",
+      "sha256": "519d1633c2921d808326e575795e1d00eedf93d304589d40d2866409b2138a92"
+    },
+    "public-postcheck.json": {
+      "bytes": 778,
+      "path": "logs/metadata-release-20261113/public-postcheck.json",
+      "sha256": "6866f3d094adda641df8aa7a250853738b77121f8cc1deced192ae222041fc37"
+    },
+    "public-postcheck.receipt.json": {
+      "bytes": 278,
+      "path": "logs/metadata-release-20261113/public-postcheck.receipt.json",
+      "sha256": "9408b66eef1515d077773aa33cd7dd841f3da1c24f392c37ceefb4c407f1f5e9"
+    },
+    "release/backup-check.json": {
+      "bytes": 386,
+      "path": "logs/metadata-release-20261113/release/backup-check.json",
+      "sha256": "618eacb5564b5b5835d0df3bef0d57b18bf8a2467fcd3524c615c15e31f4aed4"
+    },
+    "release/result.json": {
+      "bytes": 7500,
+      "path": "logs/metadata-release-20261113/release/result.json",
+      "sha256": "04a5c4d3c522cbfec48b0fb49f80ee7ab8d27eba60050fb7bf5b22dce39cc4a7"
+    },
+    "transparent-compression-batch-failure.json": {
+      "bytes": 755,
+      "path": "logs/metadata-release-20261113/transparent-compression-batch-failure.json",
+      "sha256": "6025aefb662bb80dc74cbe757f8923fe6091d1a2d633998bffc8a6ae0d141d4e"
+    },
+    "transparent-compression-pilot.json": {
+      "bytes": 380,
+      "path": "logs/metadata-release-20261113/transparent-compression-pilot.json",
+      "sha256": "a55aa6d0674c5adf77f915eb56900d42108f8fb3f0cb613651ef6dd815ec0eb7"
+    }
+  },
+  "first_full_health": {
+    "at_utc": "2026-11-13T10:46:20.156684+00:00",
+    "rss_bytes": 329699328
+  },
+  "first_partial_startup_sample_workers": 1,
+  "functionality": {
+    "alarm_count_delta_observation": 1151,
+    "dead_workers": 0,
+    "five_second_refresh_rules": [
+      [
+        "dual_market_refresh",
+        1,
+        "5"
+      ],
+      [
+        "spot_market_refresh",
+        1,
+        "5"
+      ]
+    ],
+    "journal_error_labels": {},
+    "last_connections": [
+      {
+        "COMMAND": "Sleep",
+        "count": "5",
+        "max_seconds": "1"
+      }
+    ],
+    "last_transactions": [
+      {
+        "count": "0",
+        "locked_rows": "0",
+        "max_seconds": "0"
+      }
+    ],
+    "longest_completed_checkout_seconds": 2.89,
+    "max_active_holder_seconds": 0.01,
+    "max_checked_out_in_health": 1,
+    "metadata_boundary": "Gate briefly stale in both two-point checks, with old timestamps retained; later public postcheck shows all three venues ok. No claim of zero upstream errors or a per-upstream 5-second SLA.",
+    "nonempty_db_holder_samples": [
+      {
+        "holders": [
+          {
+            "seconds": 0.01,
+            "worker": "price-history-backfill"
+          }
+        ],
+        "utc_us": 1794566780156684
+      },
+      {
+        "holders": [
+          {
+            "seconds": 0.0,
+            "worker": "alert-pulse-writer"
+          }
+        ],
+        "utc_us": 1794569120431171
+      }
+    ],
+    "progress_first": [
+      {
+        "kind": "spot",
+        "latest_at": "2026-11-13 10:46:41",
+        "newest_age_seconds": "0.2156",
+        "rows_total": "1233"
+      },
+      {
+        "kind": "dual",
+        "latest_at": "2026-11-13 10:46:23",
+        "newest_age_seconds": "18.2156",
+        "rows_total": "1585"
+      },
+      {
+        "kind": "alarm",
+        "latest_at": "2026-11-13 10:46:40",
+        "newest_age_seconds": "1.2156",
+        "rows_total": "915706"
+      }
+    ],
+    "progress_last": [
+      {
+        "kind": "spot",
+        "latest_at": "2026-11-13 11:38:43",
+        "newest_age_seconds": "15.6967",
+        "rows_total": "1233"
+      },
+      {
+        "kind": "dual",
+        "latest_at": "2026-11-13 11:38:44",
+        "newest_age_seconds": "14.6967",
+        "rows_total": "1585"
+      },
+      {
+        "kind": "alarm",
+        "latest_at": "2026-11-13 11:38:58",
+        "newest_age_seconds": "0.6967",
+        "rows_total": "916857"
+      }
+    ],
+    "worker_restarts": 0
+  },
+  "game_current": {
+    "ActiveState": "failed",
+    "InvocationID": "9713cdbc61094381bc0d3c8bc27eca11",
+    "MainPID": "0",
+    "NRestarts": "0"
+  },
+  "health_max_gap_seconds": 60.146204,
+  "initial_acceptance_at_utc": "2026-11-13T10:46:20.475640+00:00",
+  "kernel_observation": {
+    "delta": {
+      "Anonymous_bytes": 5136384,
+      "Private_Dirty_bytes": 5132288,
+      "Rss_bytes": 5136384,
+      "Swap_bytes": 0
+    },
+    "exit": 0,
+    "read_overhead_max_seconds": 0.011216691695153713,
+    "report": {
+      "bytes": 128585,
+      "path": "logs/metadata-release-20261113/postrelease-kernel.json",
+      "sha256": "79bb676effded38da17bf364ce5c5dbd9663d4992b6e478fbcd32d0f1379d7e8"
+    },
+    "review": {
+      "bytes": 6060,
+      "path": "logs/metadata-release-20261113/postrelease-kernel-review.json",
+      "sha256": "8080c0456d450c8f39e36072213dd5827f4eb1514bdd5820e59bee50b1880f76"
+    },
+    "seconds": 130.01626858115196,
+    "stderr_bytes": 0,
+    "thread_identity_boundary": "New worker threads have not been mapped to Python functions. Several threads faulted in growth seconds, so there is no exclusive owner assignment. High minor-fault totals alone do not identify retained allocations."
+  },
+  "last_health": {
+    "alert_history": {
+      "decoded_rows": 26338,
+      "delta_reads": 634,
+      "full_reads": 1,
+      "last_read_seconds": 0.0471,
+      "rows": 14560,
+      "spool_bytes": 23251125
+    },
+    "allocator_free_bytes": 132860064,
+    "allocator_used_bytes": 133085024,
+    "anonymous_bytes": 512802816,
+    "cgroup_bytes": 1340682240,
+    "db_checked_out": 0,
+    "db_holders": [],
+    "db_longest_checkout_seconds": 2.89,
+    "dead": [],
+    "file_cache_bytes": 814952448,
+    "journal_utc_us": 1794569900479967,
+    "memory_events": {
+      "high": 4403,
+      "low": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_group_kill": 0,
+      "oom_kill": 0
+    },
+    "memory_high_bytes": 1342177280,
+    "memory_limit_bytes": 1610612736,
+    "memory_sampled_at_epoch": 1794569900.4776464,
+    "memory_stall_microseconds": 860984,
+    "pid": 2392786,
+    "restarts": 0,
+    "rss_bytes": 522391552,
+    "workers": 30
+  },
+  "local_reader": {
+    "active_reader_sessions": [],
+    "actual_exit": 0,
+    "prior_capacity_stops": [
+      2617,
+      64981
+    ],
+    "session": 20118,
+    "stop_reason": "Continued production growth observed; ended local collection without waiting to fill a two-hour window. Website not stopped or restarted."
+  },
+  "memory_conclusion": "RSS and anonymous residency continued to increase after the first 30 minutes. Two complete 15-minute medians rose; a separate 130-second kernel observation added 5,136,384 anonymous bytes. The deployed mechanism has local causal evidence but does not remove all production growth.",
+  "memory_verdict": "FAILED_STABILITY_IN_OBSERVED_WINDOW; not a completed two-hour run and not a claim of unbounded future growth",
+  "mysql_current": {
+    "ActiveState": "active",
+    "InvocationID": "0d929bdd57b046d288c78b4759f96d7d",
+    "MainPID": "2388567",
+    "NRestarts": "0"
+  },
+  "next": "Preserve this failed trend and scoped deployment. Remaining growth owner/functions require fresh evidence; do not infer function names from TID offsets, reuse consumed one-shot sampling permissions, repeat long tests, or replay any publisher.",
+  "no_new_automation_or_remote_git_push": true,
+  "no_production_attach_or_content_sampling": true,
+  "no_runtime_change_after_release": true,
+  "no_synthetic_long_tests": true,
+  "no_trim_forced_gc_or_limit_change": true,
+  "observation_finished_at_utc": "2026-11-13T11:38:58.816991+00:00",
+  "observation_reports": [
+    {
+      "bytes": 12556,
+      "path": "logs/metadata-release-20261113/observation-20261113-104639.json",
+      "sha256": "83ff8e50ee915c85dab303a7ca54df94341e093f103757e095a0e22d93635e8a"
+    },
+    {
+      "bytes": 14754,
+      "path": "logs/metadata-release-20261113/observation-20261113-104921.json",
+      "sha256": "8ddd1c0d42937cde43d0debf0a0ce85f91ac03071e2b6ad7c9140439189db738"
+    },
+    {
+      "bytes": 19265,
+      "path": "logs/metadata-release-20261113/observation-20261113-105547.json",
+      "sha256": "012c9c5fc7bc9ee039c01aad8eb3fb2a9f91ef5e4d812875cb0537310bdeb4b7"
+    },
+    {
+      "bytes": 23889,
+      "path": "logs/metadata-release-20261113/observation-20261113-110108.json",
+      "sha256": "ffee5d746c2ab5e6e6af4c17057ba70911ad5b4736521c9d49f685f33bd1cb4c"
+    },
+    {
+      "bytes": 28399,
+      "path": "logs/metadata-release-20261113/observation-20261113-110630.json",
+      "sha256": "74064f0d6439e57c537ff9e2bead68f8f9a4d00418f57c7851b93bc58e9a132e"
+    },
+    {
+      "bytes": 34413,
+      "path": "logs/metadata-release-20261113/observation-20261113-111425.json",
+      "sha256": "84ce4d4c077b2a4c859cc239ae5d58b3a3453a873d062e223c7a3ada5ae2befd"
+    },
+    {
+      "bytes": 39041,
+      "path": "logs/metadata-release-20261113/observation-20261113-111938.json",
+      "sha256": "1f67b81e48fa1835e545e31bf8acc2c312c17a6d91d2bb4d48087ae538c3effe"
+    },
+    {
+      "bytes": 42826,
+      "path": "logs/metadata-release-20261113/observation-20261113-112459.json",
+      "sha256": "35f4094f7ed477d3004d790d9fa0b888ffd625e5d57c52680b9f2a23cd602940"
+    },
+    {
+      "bytes": 48241,
+      "path": "logs/metadata-release-20261113/observation-20261113-113022.json",
+      "sha256": "36258b6ec22265daf7f254510ccb391cd9d77af1a80024e50737485cd92ee501"
+    },
+    {
+      "bytes": 52022,
+      "path": "logs/metadata-release-20261113/observation-20261113-113544.json",
+      "sha256": "e2c3d0c6f6541bf07d954b7aace2f608e2c3a02f0e12262bdb08cf871159e447"
+    },
+    {
+      "bytes": 54261,
+      "path": "logs/metadata-release-20261113/observation-20261113-113837.json",
+      "sha256": "c6d735b6a2ed2910df806a7e71f55b8751186abfca2b1d78b4a47ddc4cfd6339"
+    }
+  ],
+  "original_dispatch_session": 13858,
+  "preexisting_game_outage": {
+    "at_utc": "2026-11-12T22:43:06.631158+00:00",
+    "game_failed_exit143": true,
+    "mysql_restarted_before_this_release": true,
+    "service_triage_sha256": "6feb082210487f8c61235b57fb32d9409b213e8750bd474aed1bd9f610895f49",
+    "site_inactive": true
+  },
+  "protection": {
+    "backup_retained": {
+      "bytes": 635849407,
+      "matching_binance_key": true,
+      "matching_chat_key": true,
+      "mode": "0o600",
+      "size_matches": true
+    },
+    "binance_rows": {
+      "binance_account_link": 0,
+      "binance_executor_health": 1,
+      "binance_hedge_intent": 0
+    },
+    "final_at_utc": "2026-11-13T11:39:04.646335+00:00",
+    "https": [
+      {
+        "cache_control": null,
+        "path": "/login",
+        "status": 200
+      },
+      {
+        "cache_control": null,
+        "path": "/api/runtime-health",
+        "status": 401
+      },
+      {
+        "cache_control": "no-store",
+        "path": "/api/binance/account",
+        "status": 401
+      },
+      {
+        "cache_control": "private, no-store",
+        "path": "/api/dual-futures",
+        "status": 401
+      },
+      {
+        "cache_control": "private, no-store",
+        "path": "/api/alerts?view=active",
+        "status": 401
+      }
+    ],
+    "limits_unchanged": true,
+    "live_execution_enabled": false,
+    "loopback_only": true,
+    "original_hashes_match": true,
+    "source_files_match": 42,
+    "stopped_51_plus_3_counts_exact": true
+  },
+  "publisher_stderr_bytes": 0,
+  "release": "/root/arbiscope-release-metadata-owner.22didsd7",
+  "reviewed_at_utc": "2026-11-13T11:42:46.945271+00:00",
+  "rss_ols_mib_per_hour_after_first_30min": 116.23191801563937,
+  "status": "MINIMAL_RELEASE_PASSED; PRODUCTION_MEMORY_STILL_GROWING; ISSUE_NOT_CLOSED",
+  "subsequent_full_workers_samples": 53,
+  "unique_boot_workers": [
+    {
+      "pid": 2392786,
+      "utc_us": "1794566719351662"
+    }
+  ],
+  "unique_health_samples": 54,
+  "worker_identity": {
+    "services": {
+      "arbitrage-private": {
+        "ActiveState": "active",
+        "InvocationID": "02fcf4b56a07420f891d0c161f63c8bd",
+        "MainPID": "2392782",
+        "NRestarts": "0"
+      },
+      "lewan-game": {
+        "ActiveState": "failed",
+        "InvocationID": "9713cdbc61094381bc0d3c8bc27eca11",
+        "MainPID": "0",
+        "NRestarts": "0"
+      },
+      "mysql": {
+        "ActiveState": "active",
+        "InvocationID": "0d929bdd57b046d288c78b4759f96d7d",
+        "MainPID": "2388567",
+        "NRestarts": "0"
+      }
+    },
+    "worker": 2392786,
+    "worker_start_ticks": 734225447
+  }
+}

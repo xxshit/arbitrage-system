@@ -1,0 +1,305 @@
+{
+  "actual_exit": 0,
+  "boundary": "Kernel metadata only. One-second overlap is correlation, not malloc ownership or a Python function identity. No process-memory attach, heap, stack, locals, SQL parameters, or account contents.",
+  "captured_end_utc": "2026-11-13T11:37:09.353518+00:00",
+  "captured_start_utc": "2026-11-13T11:34:59.320256+00:00",
+  "elapsed_seconds": 130.01626858115196,
+  "events": [
+    {
+      "at_utc": "2026-11-13T11:35:12.344126+00:00",
+      "delta": {
+        "Anonymous_bytes": 2818048,
+        "Private_Dirty_bytes": 2818048,
+        "Rss_bytes": 2818048,
+        "Swap_bytes": 0
+      },
+      "elapsed_seconds": 13.006880226545036,
+      "thread_minor": [
+        {
+          "minor": 4964,
+          "minor_bytes": 20332544,
+          "start_ticks": 734225670,
+          "tid": 2392906
+        },
+        {
+          "minor": 692,
+          "minor_bytes": 2834432,
+          "start_ticks": 734225535,
+          "tid": 2392840
+        },
+        {
+          "minor": 1,
+          "minor_bytes": 4096,
+          "start_ticks": 734227532,
+          "tid": 2392972
+        }
+      ]
+    },
+    {
+      "at_utc": "2026-11-13T11:35:37.344074+00:00",
+      "delta": {
+        "Anonymous_bytes": 167936,
+        "Private_Dirty_bytes": 167936,
+        "Rss_bytes": 167936,
+        "Swap_bytes": 0
+      },
+      "elapsed_seconds": 38.00682900566608,
+      "thread_minor": [
+        {
+          "minor": 4500,
+          "minor_bytes": 18432000,
+          "start_ticks": 734225670,
+          "tid": 2392906
+        },
+        {
+          "minor": 41,
+          "minor_bytes": 167936,
+          "start_ticks": 734225535,
+          "tid": 2392848
+        },
+        {
+          "minor": 3,
+          "minor_bytes": 12288,
+          "start_ticks": 734225798,
+          "tid": 2392923
+        },
+        {
+          "minor": 2,
+          "minor_bytes": 8192,
+          "start_ticks": 734225569,
+          "tid": 2392869
+        }
+      ]
+    },
+    {
+      "at_utc": "2026-11-13T11:35:57.344209+00:00",
+      "delta": {
+        "Anonymous_bytes": 65536,
+        "Private_Dirty_bytes": 65536,
+        "Rss_bytes": 65536,
+        "Swap_bytes": 0
+      },
+      "elapsed_seconds": 58.006964546628296,
+      "thread_minor": [
+        {
+          "minor": 4293,
+          "minor_bytes": 17584128,
+          "start_ticks": 734225670,
+          "tid": 2392906
+        },
+        {
+          "minor": 16,
+          "minor_bytes": 65536,
+          "start_ticks": 734225535,
+          "tid": 2392847
+        },
+        {
+          "minor": 3,
+          "minor_bytes": 12288,
+          "start_ticks": 734225799,
+          "tid": 2392931
+        },
+        {
+          "minor": 3,
+          "minor_bytes": 12288,
+          "start_ticks": 734227532,
+          "tid": 2392972
+        },
+        {
+          "minor": 2,
+          "minor_bytes": 8192,
+          "start_ticks": 734225569,
+          "tid": 2392869
+        },
+        {
+          "minor": 1,
+          "minor_bytes": 4096,
+          "start_ticks": 734225535,
+          "tid": 2392844
+        },
+        {
+          "minor": 1,
+          "minor_bytes": 4096,
+          "start_ticks": 734225798,
+          "tid": 2392923
+        }
+      ]
+    },
+    {
+      "at_utc": "2026-11-13T11:36:57.344266+00:00",
+      "delta": {
+        "Anonymous_bytes": 2084864,
+        "Private_Dirty_bytes": 2084864,
+        "Rss_bytes": 2084864,
+        "Swap_bytes": 0
+      },
+      "elapsed_seconds": 118.00702023599297,
+      "thread_minor": [
+        {
+          "minor": 6363,
+          "minor_bytes": 26062848,
+          "start_ticks": 734225670,
+          "tid": 2392906
+        },
+        {
+          "minor": 509,
+          "minor_bytes": 2084864,
+          "start_ticks": 734225799,
+          "tid": 2392930
+        },
+        {
+          "minor": 3,
+          "minor_bytes": 12288,
+          "start_ticks": 734227532,
+          "tid": 2392972
+        },
+        {
+          "minor": 2,
+          "minor_bytes": 8192,
+          "start_ticks": 734225569,
+          "tid": 2392869
+        },
+        {
+          "minor": 1,
+          "minor_bytes": 4096,
+          "start_ticks": 734225534,
+          "tid": 2392836
+        }
+      ]
+    }
+  ],
+  "exited_threads": 0,
+  "fault_threads_in_growth_seconds": [
+    [
+      2392906,
+      20120
+    ],
+    [
+      2392840,
+      692
+    ],
+    [
+      2392930,
+      509
+    ],
+    [
+      2392848,
+      41
+    ],
+    [
+      2392847,
+      16
+    ],
+    [
+      2392972,
+      7
+    ],
+    [
+      2392869,
+      6
+    ],
+    [
+      2392923,
+      4
+    ],
+    [
+      2392931,
+      3
+    ],
+    [
+      2392844,
+      1
+    ],
+    [
+      2392836,
+      1
+    ]
+  ],
+  "growth_sample_count": 4,
+  "identity": {
+    "invocation": "02fcf4b56a07420f891d0c161f63c8bd",
+    "master": 2392782,
+    "start_ticks": 734225447,
+    "worker": 2392786
+  },
+  "identity_unchanged": true,
+  "max_host_pressure_avg10": 0.0,
+  "max_quote_age_seconds": 20,
+  "max_read_seconds": 0.011216691695153713,
+  "minor_total": 608619,
+  "negative_anonymous_bytes": 0,
+  "net_memory_delta": {
+    "Anonymous_bytes": 5136384,
+    "Private_Dirty_bytes": 5132288,
+    "Rss_bytes": 5136384,
+    "Swap_bytes": 0
+  },
+  "new_threads": 0,
+  "positive_anonymous_bytes": 5136384,
+  "report_sha256": "79bb676effded38da17bf364ce5c5dbd9663d4992b6e478fbcd32d0f1379d7e8",
+  "script_sha256": "a031b784d8e492e1aa8aceaf7a5f3dd43c8974ca77cfdcedec38f1155362eb15",
+  "status": "completed",
+  "stderr_bytes": 0,
+  "top_fault_threads": [
+    [
+      2392906,
+      604491
+    ],
+    [
+      2392799,
+      2648
+    ],
+    [
+      2392840,
+      701
+    ],
+    [
+      2392930,
+      509
+    ],
+    [
+      2392869,
+      130
+    ],
+    [
+      2392848,
+      41
+    ],
+    [
+      2392923,
+      18
+    ],
+    [
+      2392972,
+      17
+    ],
+    [
+      2392847,
+      16
+    ],
+    [
+      2392931,
+      12
+    ],
+    [
+      2392927,
+      12
+    ],
+    [
+      2392844,
+      12
+    ],
+    [
+      2392800,
+      11
+    ],
+    [
+      2392836,
+      1
+    ],
+    [
+      2392789,
+      0
+    ]
+  ]
+}

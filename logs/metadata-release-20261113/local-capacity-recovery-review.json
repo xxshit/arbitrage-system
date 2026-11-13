@@ -1,0 +1,7 @@
+{
+  "at_utc": "2026-11-13T11:09:20.502701+00:00",
+  "local_failure": "ENOSPC while creating here-document temp file; final readonly preparation and continuation update did not run",
+  "recovery": "Removed only 1834 untracked generated Python bytecode files under repository, 41064059 B. Source/DB/backups/raw evidence untouched. Prior local watch session 2617 stopped with exit 0. New bounded read-only resume has a 125 MiB free-space guard. No server process restart.",
+  "cleanup_detail_sha256": "6afcc84f845cb86dffea23098688ee0774b40e2eef9dd4aa88d447136cbc9f1a",
+  "disk_free_bytes": 168538112
+}

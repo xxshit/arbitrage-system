@@ -1,0 +1,14 @@
+{
+  "at_utc": "2026-11-13T11:19:33.488589+00:00",
+  "status": "BATCH_ABORTED_ON_FIRST_TEMP_COPY_BEFORE_REPLACE",
+  "reason": "ditto returned 0 but compressed temp logical size was 0 and SHA mismatched; guard refused atomic replacement",
+  "source": "logs/read-memory-20261024/representative-workload-20261026/production-indexdelta-j3lBdx/poll-20261107-035031.json",
+  "source_bytes": 3957779,
+  "source_sha256": "169b7edf037abf3f094e90c36176addd81f895ca0710771727a7464cda5174b9",
+  "invalid_temp_logical_bytes": 0,
+  "invalid_temp_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "original_kept": true,
+  "no_more_compression_attempts": true,
+  "free_before_temp_cleanup": 455127040,
+  "free_after_temp_cleanup": 455745536
+}

@@ -3,6 +3,7 @@
 No cookies, credentials, environment proxies, redirects or trading endpoints.
 The total network deadline includes pool wait, TLS, headers and body reads.
 """
+from background_runtime import memory_phase
 from collections import OrderedDict
 import gzip
 import http.client
@@ -42,6 +43,7 @@ def read_bounded_body(read):
             output.write(part)
 
 
+@memory_phase('market_json_decode')
 def decode_json(body, encoding=""):
     if len(body) > MAX_BODY:
         raise ValueError("public_payload_too_large")

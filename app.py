@@ -67,7 +67,7 @@ from opportunity_funding import funding_quality, funding_window
 from opportunity_pool import POLICY as OPPORTUNITY_POLICY, classify as classify_opportunity, funding_profile
 from persistence_policy import funding_write_due
 from snapshot_persistence import changed_values, equity_payload_update, exact_snapshot_select, update_snapshots
-from background_runtime import WorkerRuntime, memory_status, mysql_engine_options
+from background_runtime import WorkerRuntime, memory_status, mysql_engine_options, memory_phase
 from read_performance import read_indexes, wallet_symbol_predicate
 
 load_dotenv()
@@ -1669,6 +1669,7 @@ class MarketPayloads(dict):
         self.observed_at = {}
 
 
+@memory_phase('market_batch')
 def fetch_market_payloads(urls, cache_seconds=None, live_timeout=1.5):
     """低频资料走短期缓存；行情请求失败时复用最近有效值，绝不拖慢盘口快照。"""
     cache_seconds = cache_seconds or {}
@@ -2938,6 +2939,7 @@ def contract_mid_price(group):
     return (row["short_bid"] + row["short_ask"]) / 2
 
 
+@memory_phase('price_history_write')
 def capture_price_history(groups):
     global LAST_PRICE_HISTORY_BUCKET
     now = int(time.time())
@@ -3851,6 +3853,7 @@ def background_alert_pulses():
         time.sleep(retry_delay)
 
 
+@memory_phase('spot_alerts')
 def evaluate_alerts(groups):
     isolated = update_spot_divergences(groups)
     active_trackings = BasisTracking.query.filter_by(resolved_at=None).all()
@@ -3920,6 +3923,7 @@ def enrich_basis_openings(groups, strategy):
         }
 
 
+@memory_phase('spot_snapshot_write')
 def save_latest_market_snapshot(groups):
     def values_for(row):
         values = {field: row[field] for field in (
@@ -3982,6 +3986,7 @@ def fetch_equity_metadata(url):
     return (body, encoding), time.monotonic()
 
 
+@memory_phase('equity_metadata')
 def collect_equity_metadata():
     """Non-blocking, bounded public-directory cache, called only by market worker."""
     now = time.monotonic()
@@ -4014,6 +4019,7 @@ def collect_equity_metadata():
     return results, errors
 
 
+@memory_phase('equity_snapshot')
 def refresh_equity_spot_snapshot(results, errors, urls):
     # Runs only in the existing market worker, never during an HTTP page read.
     observed = {key: market_payload_observed_at(url) for key, url in urls.items()}
@@ -4030,6 +4036,7 @@ def refresh_equity_spot_snapshot(results, errors, urls):
         EQUITY_SPOT_CACHE["saved_at"] = time.time()
 
 
+@memory_phase('spot_snapshot')
 def spot_futures_snapshot():
     global MARKET_REFRESH_METRICS
     started_at = time.perf_counter()
@@ -4205,6 +4212,7 @@ def spot_futures_snapshot():
     return live_snapshot
 
 
+@memory_phase('dual_snapshot')
 def dual_futures_snapshot():
     urls = {
         "binance_books": "https://fapi.binance.com/fapi/v1/ticker/bookTicker",
@@ -7770,6 +7778,7 @@ def market_rank_identities(groups):
     ]} for group in groups]
 
 
+@memory_phase('spread_history_write')
 def persist_spread_history(now=None):
     return SPREAD_HISTORY_STORE.persist(SPREAD_HISTORY_BUFFER, time.time() if now is None else now)
 
@@ -13429,6 +13438,7 @@ def opportunity_source(row):
                 long_factor=route.get("long_factor", 1), short_factor=route.get("short_factor", 1))
 
 
+@memory_phase('opportunity_quality')
 def refresh_opportunity_quality(now):
     """Stream one symbol at a time. Retain only small summaries, not 8D ORM rows."""
     snapshot = load_latest_market_snapshot() or {"symbols": []}
@@ -13561,6 +13571,7 @@ def opportunity_funding_events(groups):
         return events
 
 
+@memory_phase('thinking_candidates')
 def spot_thinking_candidates(snapshot, notional, hold_hours, include_paths=(), for_validation=False):
     if not snapshot:
         return []

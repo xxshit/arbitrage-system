@@ -8,6 +8,7 @@ from pathlib import Path
 import ctypes
 import gc
 import os
+import resource
 import sys
 import threading
 import time
@@ -124,6 +125,87 @@ _POOL_ROLES = frozenset({
     "asyncio",
 })
 
+# Inclusive counters for a small set of normal public-market calls. These are
+# kernel first-touch counts, not allocation sizes or additive nested totals.
+_MEMORY_PHASES = frozenset({
+    "market_json_decode", "market_batch", "spot_snapshot", "dual_snapshot",
+    "equity_metadata", "equity_snapshot", "spot_snapshot_write",
+    "price_history_write", "spot_alerts", "spread_history_write",
+    "thinking_candidates", "opportunity_quality", "quote_confirm",
+    "quote_projection",
+})
+_MEMORY_PHASE_ROLES = frozenset({
+    "spot-market-refresh", "dual-market-refresh", "spot-spread-history",
+    "quote-confirm-bn_spot", "quote-confirm-bybit",
+})
+_MEMORY_PHASE_LIMIT = 128
+_MEMORY_PHASE_LOCK = threading.Lock()
+_MEMORY_PHASE_COUNTS = {}
+_MEMORY_PHASE_DROPPED = 0
+_MEMORY_PHASE_LOCAL = threading.local()
+
+
+def _phase_sample():
+    try:
+        usage = resource.getrusage(resource.RUSAGE_THREAD)
+        return usage.ru_minflt, usage.ru_utime + usage.ru_stime
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def memory_phase(name):
+    """Count normal call boundaries; never inspect arguments, frames or heaps."""
+    if name not in _MEMORY_PHASES:
+        raise ValueError("unknown memory phase")
+
+    def decorate(target):
+        @wraps(target)
+        def measured(*args, **kwargs):
+            global _MEMORY_PHASE_DROPPED
+            role = threading.current_thread().name
+            before = _phase_sample() if role in _MEMORY_PHASE_ROLES else None
+            if before is None:
+                return target(*args, **kwargs)
+            try:
+                identity = _MEMORY_PHASE_LOCAL.identity
+            except AttributeError:
+                try:
+                    tid = threading.get_native_id()
+                    ticks = int(Path(f"/proc/self/task/{tid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+                    identity = _MEMORY_PHASE_LOCAL.identity = (tid, ticks)
+                except (OSError, ValueError, IndexError):
+                    return target(*args, **kwargs)
+            started = time.time()
+            try:
+                return target(*args, **kwargs)
+            finally:
+                after = _phase_sample()
+                if after is not None:
+                    faults = max(0, after[0] - before[0])
+                    key = (*identity, role, name)
+                    with _MEMORY_PHASE_LOCK:
+                        row = _MEMORY_PHASE_COUNTS.get(key)
+                        if row is None and len(_MEMORY_PHASE_COUNTS) < _MEMORY_PHASE_LIMIT:
+                            row = _MEMORY_PHASE_COUNTS[key] = dict(
+                                tid=identity[0], start_ticks=identity[1], role=role, phase=name,
+                                calls=0, minor_faults=0, max_minor_faults=0, cpu_seconds=0)
+                        if row is not None:
+                            row.update(calls=row["calls"]+1, minor_faults=row["minor_faults"]+faults,
+                                       max_minor_faults=max(row["max_minor_faults"], faults),
+                                       last_minor_faults=faults, last_started_at=started,
+                                       last_finished_at=time.time(),
+                                       cpu_seconds=row["cpu_seconds"]+max(0, after[1]-before[1]))
+                        else:
+                            _MEMORY_PHASE_DROPPED += 1
+        return measured
+    return decorate
+
+
+def memory_phase_totals():
+    with _MEMORY_PHASE_LOCK:
+        return dict(rows=[dict(row) for row in _MEMORY_PHASE_COUNTS.values()],
+                    limit=_MEMORY_PHASE_LIMIT, dropped_calls=_MEMORY_PHASE_DROPPED)
+
 
 def thread_memory_counters():
     """Bounded kernel counters and fixed role labels, never frames or values.
@@ -160,6 +242,7 @@ def memory_status():
         pages = int(Path("/proc/self/statm").read_text().split()[1])
         result["rss_bytes"] = pages * os.sysconf("SC_PAGE_SIZE")
         result["thread_counters"] = thread_memory_counters()
+        result["memory_phases"] = memory_phase_totals()
         result["python_allocated_blocks"] = sys.getallocatedblocks()
         result["gc_counts"] = gc.get_count()
         result["gc_collections"] = [generation["collections"] for generation in gc.get_stats()]

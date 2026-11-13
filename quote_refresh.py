@@ -4,6 +4,7 @@ Not a heartbeat/receipt-time renewal of a cached price. Every accepted item is
 a newly fetched complete public order book. Original WS detection continues.
 No credentials, account endpoints, trading, database or notification methods.
 """
+from background_runtime import memory_phase
 from collections import Counter
 import http.client
 import json
@@ -107,6 +108,7 @@ def parse_snapshot(feed, symbol, data, started, received, elapsed):
         return None
 
 
+@memory_phase('quote_projection')
 def parse_bulk_snapshot(feed, data, symbols, started, received, elapsed):
     """A new complete BBO read, never a renewal from another coin's heartbeat."""
     if elapsed < 0 or elapsed > MAX_RTT or not 0 <= received-started <= MAX_RTT+.1:
@@ -273,6 +275,7 @@ class PublicBookRefresh:
                     selected.append((key, owner, book))
             return selected
 
+    @memory_phase('quote_confirm')
     def confirm_bulk(self, client, feed, selected):
         started, began = time.time(), time.monotonic()
         data = client.get_json(BULK_URLS[feed], timeout=MAX_RTT, weight_limit=3000 if feed == 'bn_spot' else None)

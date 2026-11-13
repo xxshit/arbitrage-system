@@ -6,7 +6,9 @@ duplicated, and shutdown signals (BaseException) are deliberately not swallowed.
 from functools import wraps
 from pathlib import Path
 import ctypes
+import gc
 import os
+import sys
 import threading
 import time
 
@@ -100,11 +102,67 @@ def cgroup_memory_limits(root):
     return limits
 
 
+_THREAD_ROLES = frozenset({
+    "MainThread", "runtime-health", "alert-pulse-writer", "alert-history-reader",
+    "alert-stream-io", "dashboard-quotes", "dashboard-major-analysis",
+    "dashboard-momentum", "dashboard-oi-market-cap", "spot-market-refresh",
+    "spot-spread-history", "dual-market-refresh", "funding-history-binance",
+    "funding-history-bybit", "funding-history-okx", "binance-settlement-tail",
+    "funding-alerts", "price-history-backfill", "long-trend-references",
+    "index-component-sync", "onchain-opportunity-refresh", "announcement-scan",
+    "daily-horn-scan", "intraday-sudden-pump-scan", "intraday-early-trend-scan",
+    "transfer-network-sync", "thought-analysis-push", "hei-risk-watch",
+    "trend-horizon-validation", "push-signal-validation", "chat-retention-cleanup",
+    "turnover-basis-watch", "quote-confirm-bn_spot", "quote-confirm-bn_future",
+    "quote-confirm-gate", "quote-confirm-bybit",
+})
+_POOL_ROLES = frozenset({
+    "market-http", "equity-metadata", "dashboard-quotes", "dashboard-http",
+    "chat-web-push", "background-funding-binance", "background-funding-bybit",
+    "background-funding-okx", "background-index", "background-price-history",
+    "background-major-analysis", "background-momentum", "background-sudden-pump",
+    "asyncio",
+})
+
+
+def thread_memory_counters():
+    """Bounded kernel counters and fixed role labels, never frames or values.
+
+    Read only this process's /proc task metadata. TID + start ticks bind a
+    sample across thread reuse; minor faults identify first touches, not malloc
+    ownership. No thread objects, per-sample history or unknown names retained.
+    """
+    rows, skipped = [], 0
+    threads = threading.enumerate()
+    for thread in threads[:256]:
+        tid = thread.native_id
+        if not isinstance(tid, int) or tid <= 0:
+            skipped += 1
+            continue
+        name = thread.name
+        prefix, _, suffix = name.rpartition("_")
+        role = name if name in _THREAD_ROLES else (
+            prefix if prefix in _POOL_ROLES and suffix.isdecimal() else "other")
+        try:
+            fields = Path(f"/proc/self/task/{tid}/stat").read_text().rsplit(")", 1)[1].split()
+            rows.append(dict(tid=tid, start_ticks=int(fields[19]), role=role,
+                             minor_faults=int(fields[7]),
+                             cpu_ticks=int(fields[11])+int(fields[12])))
+        except (OSError, ValueError, IndexError):
+            skipped += 1  # exited threads and unsupported platforms are normal
+    return dict(rows=rows, enumerated=len(threads), skipped=skipped,
+                truncated=max(0, len(threads)-256))
+
+
 def memory_status():
     result = {"pid": os.getpid()}
     try:
         pages = int(Path("/proc/self/statm").read_text().split()[1])
         result["rss_bytes"] = pages * os.sysconf("SC_PAGE_SIZE")
+        result["thread_counters"] = thread_memory_counters()
+        result["python_allocated_blocks"] = sys.getallocatedblocks()
+        result["gc_counts"] = gc.get_count()
+        result["gc_collections"] = [generation["collections"] for generation in gc.get_stats()]
         relative = next(line.split("::", 1)[1] for line in Path("/proc/self/cgroup").read_text().splitlines()
                         if line.startswith("0::"))
         root = Path("/sys/fs/cgroup") / relative.lstrip("/")
@@ -131,6 +189,8 @@ def memory_status():
             info = read_info()
             result["allocator_used_bytes"] = info.uordblks
             result["allocator_free_bytes"] = info.fordblks
+            result["allocator_mmap_bytes"] = info.hblkhd
+            result["allocator_arena_bytes"] = info.arena
         except (AttributeError, OSError):
             pass
     except (OSError, ValueError, IndexError, KeyError, StopIteration):

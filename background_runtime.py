@@ -13,6 +13,8 @@ import sys
 import threading
 import time
 
+from runtime_allocator import python_allocator_status
+
 
 class WorkerRuntime:
     def __init__(self):
@@ -244,6 +246,7 @@ def memory_status():
         result["thread_counters"] = thread_memory_counters()
         result["memory_phases"] = memory_phase_totals()
         result["python_allocated_blocks"] = sys.getallocatedblocks()
+        result["python_allocator"] = python_allocator_status()
         result["gc_counts"] = gc.get_count()
         result["gc_collections"] = [generation["collections"] for generation in gc.get_stats()]
         relative = next(line.split("::", 1)[1] for line in Path("/proc/self/cgroup").read_text().splitlines()

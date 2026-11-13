@@ -67,6 +67,7 @@ from opportunity_funding import funding_quality, funding_window
 from opportunity_pool import POLICY as OPPORTUNITY_POLICY, classify as classify_opportunity, funding_profile
 from persistence_policy import funding_write_due
 from snapshot_persistence import changed_values, equity_payload_update, exact_snapshot_select, update_snapshots
+from runtime_object_counts import public_object_counts
 from background_runtime import WorkerRuntime, memory_status, mysql_engine_options, memory_phase
 from read_performance import read_indexes, wallet_symbol_predicate
 
@@ -16550,6 +16551,14 @@ def background_runtime_health():
     logger.propagate = False
     while True:
         state = {**BACKGROUND_RUNTIME.snapshot(), **memory_status(), "alert_history": ALERT_HISTORY_INDEX.status()}
+
+        state["public_object_counts"] = public_object_counts(
+            ALERT_STREAM_HUB, MARKET_PAYLOAD_CACHE, MARKET_PAYLOAD_CACHE_LOCK,
+            dict(spot=SPOT_FUTURES_CACHE.get("snapshot"), dual=DUAL_FUTURES_CACHE.get("snapshot"),
+                 equity=EQUITY_SPOT_CACHE.get("snapshot"), spot_view=SPOT_VIEW_CACHE, dual_view=DUAL_VIEW_CACHE),
+            owners=dict(spread_buffer=SPREAD_HISTORY_BUFFER, book_buffer=OPPORTUNITY_BOOKS,
+                        activity=OPPORTUNITY_ACTIVITY, validation=OPPORTUNITY_VALIDATION,
+                        trend_references=LONG_TREND_REFERENCES, profiles=OPPORTUNITY_PROFILES))
         workers = state.pop("workers")
         state.update(workers=len(workers), dead=[name for name, row in workers.items() if not row["alive"]],
                      restarts=sum(row["restarts"] for row in workers.values()))

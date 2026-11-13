@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import unittest
 import weakref
 from market_transport import discard_market_response
+from background_runtime import memory_phase
 
 
 def load_batch(source=None):
@@ -18,7 +19,7 @@ def load_batch(source=None):
     namespace = dict(time=SimpleNamespace(monotonic=lambda: 1000., time=lambda: 5000.),
                      as_completed=as_completed, MARKET_PAYLOAD_CACHE={},
                      MARKET_PAYLOAD_CACHE_LOCK=threading.Lock(),
-                     discard_market_response=discard_market_response)
+                     discard_market_response=discard_market_response, memory_phase=memory_phase)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), namespace)
     return namespace
 

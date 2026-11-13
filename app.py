@@ -2985,6 +2985,23 @@ def nearest_trend_points(history, key_builder, target_buckets, lag_buckets=2):
     return {key: value for key, (_bucket_at, value) in points.items()}
 
 
+def trend_history_points(model, symbols, target_buckets, *, dual=False):
+    """Read only price scalars; release each bounded batch before enriching rows."""
+    columns = (model.symbol, model.exchange, model.bucket_at, model.price) if dual else (
+        model.symbol, model.bucket_at, model.price)
+    query = db.session.query(*columns).filter(
+        model.symbol.in_(symbols), model.bucket_at.in_(trend_candidate_buckets(target_buckets)))
+    # The same caller-owned transaction, with at most 500 scalar rows buffered.
+    # No ORM instance/state graph or full .all() list is needed for this fold.
+    result = db.session.execute(query.statement.execution_options(yield_per=500))
+    try:
+        return nearest_trend_points(
+            result, (lambda item: (item.symbol, item.exchange)) if dual else (lambda item: (item.symbol,)),
+            target_buckets)
+    finally:
+        result.close()
+
+
 def enrich_price_changes(groups, windows=None):
     if not groups:
         return
@@ -2992,10 +3009,7 @@ def enrich_price_changes(groups, windows=None):
     now_bucket = int(time.time()) // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
     target_buckets = [now_bucket - seconds for seconds in windows.values()]
     symbols = [group["symbol"] for group in groups]
-    history = FuturesPriceHistory.query.filter(
-        FuturesPriceHistory.symbol.in_(symbols), FuturesPriceHistory.bucket_at.in_(trend_candidate_buckets(target_buckets))
-    ).all()
-    points = nearest_trend_points(history, lambda item: (item.symbol,), target_buckets)
+    points = trend_history_points(FuturesPriceHistory, symbols, target_buckets)
     for group in groups:
         current = contract_mid_price(group)
         for key, seconds in windows.items():
@@ -3328,10 +3342,7 @@ def enrich_dual_futures_price_changes(groups):
     now_bucket = int(time.time()) // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
     target_buckets = [now_bucket - seconds for seconds in TREND_WINDOWS.values()]
     symbols = [group["symbol"] for group in groups]
-    history = DualFuturesPriceHistory.query.filter(
-        DualFuturesPriceHistory.symbol.in_(symbols), DualFuturesPriceHistory.bucket_at.in_(trend_candidate_buckets(target_buckets))
-    ).all()
-    points = nearest_trend_points(history, lambda item: (item.symbol, item.exchange), target_buckets)
+    points = trend_history_points(DualFuturesPriceHistory, symbols, target_buckets, dual=True)
     for group in groups:
         for row in group["rows"]:
             for side, exchange, current in (
@@ -3370,10 +3381,7 @@ def enrich_dual_binance_reference(groups):
         references.setdefault(item.symbol, {"basis": item.basis, "price": (item.short_ask + item.short_bid) / 2})
     now_bucket = int(time.time()) // PRICE_HISTORY_BUCKET_SECONDS * PRICE_HISTORY_BUCKET_SECONDS
     target_buckets = [now_bucket - seconds for seconds in TREND_WINDOWS.values()]
-    history = FuturesPriceHistory.query.filter(
-        FuturesPriceHistory.symbol.in_(symbols), FuturesPriceHistory.bucket_at.in_(trend_candidate_buckets(target_buckets))
-    ).all()
-    points = nearest_trend_points(history, lambda item: (item.symbol,), target_buckets)
+    points = trend_history_points(FuturesPriceHistory, symbols, target_buckets)
     for group in groups:
         reference = references.get(group["symbol"], {})
         current_price = reference.get("price")

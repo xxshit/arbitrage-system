@@ -15,6 +15,7 @@ from urllib.request import Request
 import weakref
 
 from market_transport import decode_json
+from background_runtime import memory_phase
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = Path(os.environ.get('ARBI_METADATA_SOURCE', ROOT/'app.py'))
@@ -41,7 +42,7 @@ def environment():
            ('get_json','fetch_equity_metadata','collect_equity_metadata')]
     assert len(nodes)==3
     env=dict(Request=Request,HTTPError=HTTPError,urlopen=Mock(),MARKET_HTTP=SimpleNamespace(context=object()),
-             time=SimpleNamespace(monotonic=lambda:100.),decode_json=decode_json,
+             time=SimpleNamespace(monotonic=lambda:100.),decode_json=decode_json,memory_phase=memory_phase,
              EQUITY_METADATA_POOL=Mock(),EQUITY_METADATA_PENDING={},EQUITY_METADATA_ERRORS={},EQUITY_METADATA_RETRY_AT={},
              MARKET_PAYLOAD_CACHE={},EQUITY_SPOT_URLS={KEY:URL},EQUITY_SPOT_TTLS={KEY:60})
     env['EQUITY_METADATA_POOL'].submit.side_effect=lambda *args:Future()

@@ -1,12 +1,17 @@
 import os
 import unittest
 from unittest.mock import patch, MagicMock
+from types import SimpleNamespace
 
 os.environ["DATABASE_URL"] = "sqlite://"
 os.environ.setdefault("SECRET_KEY", "live-page-refresh-test")
 os.environ.setdefault("CHAT_ENCRYPTION_KEY", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
 
 import app as module
+
+
+def wire(payload):
+    return SimpleNamespace(decode=lambda: payload, close=lambda: None)
 
 
 class StopWorker(BaseException):
@@ -17,7 +22,7 @@ class LivePageRefreshTests(unittest.TestCase):
     def test_failed_market_read_preserves_cache_and_original_observation_time(self):
         url='https://api.binance.com/api/v3/ticker/bookTicker'
         cache={url:dict(payload=[{'symbol':'X'}],fetched_at=90)}
-        with patch.object(module,'MARKET_PAYLOAD_CACHE',cache), patch.object(module.MARKET_HTTP,'get_json',side_effect=TimeoutError('deadline')), \
+        with patch.object(module,'MARKET_PAYLOAD_CACHE',cache), patch.object(module.MARKET_HTTP,'get_wire',side_effect=TimeoutError('deadline')), \
              patch('app.time.monotonic',return_value=100),patch('app.time.time',return_value=1000):
             results,errors=module.fetch_market_payloads({'binance_spot':url})
         self.assertEqual(results['binance_spot'],[{'symbol':'X'}])
@@ -28,7 +33,7 @@ class LivePageRefreshTests(unittest.TestCase):
     def test_successful_compressed_transport_refresh_clears_failure_and_dates_at_start(self):
         url='https://api.binance.com/api/v3/ticker/bookTicker'
         cache={}
-        with patch.object(module,'MARKET_PAYLOAD_CACHE',cache),patch.object(module.MARKET_HTTP,'get_json',return_value=[{'symbol':'X'}]), \
+        with patch.object(module,'MARKET_PAYLOAD_CACHE',cache),patch.object(module.MARKET_HTTP,'get_wire',return_value=wire([{'symbol':'X'}])), \
              patch('app.time.monotonic',return_value=100),patch('app.time.time',return_value=1000):
             results,errors=module.fetch_market_payloads({'binance_spot':url})
         self.assertEqual(errors,{})
@@ -38,7 +43,7 @@ class LivePageRefreshTests(unittest.TestCase):
     def test_metadata_ttl_retains_original_timestamp_without_new_http_request(self):
         url='https://fapi.binance.com/fapi/v1/exchangeInfo'
         with patch.object(module,'MARKET_PAYLOAD_CACHE',{url:dict(payload={'symbols':[]},fetched_at=90)}), \
-             patch.object(module.MARKET_HTTP,'get_json',side_effect=AssertionError('no HTTP')), \
+             patch.object(module.MARKET_HTTP,'get_wire',side_effect=AssertionError('no HTTP')), \
              patch('app.time.monotonic',return_value=100),patch('app.time.time',return_value=1000):
             results,errors=module.fetch_market_payloads({'futures_info':url},{'futures_info':3600})
         self.assertEqual(results.observed_at['futures_info'],990)
@@ -52,8 +57,8 @@ class LivePageRefreshTests(unittest.TestCase):
         cache={}
         def fetched(*_args):
             cache[url]=dict(payload=['newer'],fetched_at=101)
-            return ['older']
-        with patch.object(module,'MARKET_PAYLOAD_CACHE',cache),patch.object(module.MARKET_HTTP,'get_json',side_effect=fetched), \
+            return wire(['older'])
+        with patch.object(module,'MARKET_PAYLOAD_CACHE',cache),patch.object(module.MARKET_HTTP,'get_wire',side_effect=fetched), \
              patch('app.time.monotonic',return_value=100),patch('app.time.time',return_value=1000):
             results,_=module.fetch_market_payloads({'binance_spot':url})
         self.assertEqual(cache[url]['payload'],['newer'])

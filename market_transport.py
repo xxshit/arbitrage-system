@@ -67,6 +67,92 @@ def check_api_success(payload):
         raise ValueError("upstream_api_error")
 
 
+class MarketWireResponse:
+    """Single-use bytes and a pool lease, never a decoded tree in a Future.
+
+    The cache caller decodes and validates on its own thread. Keep the lease
+    until validation finishes so API failures retain the same close/backoff
+    behavior. Explicit discard also covers interrupted batches.
+    """
+    def __init__(self, client, url, started, wall, deadline, host, pool, connection, body, encoding):
+        self._lock = threading.Lock()
+        self._state = "ready"
+        self._client, self._url = client, url
+        self._started, self._wall, self._deadline = started, wall, deadline
+        self._host, self._pool, self._connection = host, pool, connection
+        self._body, self._encoding = body, encoding
+
+    def _finish(self, failed):
+        with self._lock:
+            connection, pool = self._connection, self._pool
+            self._connection = self._pool = self._client = self._body = None
+            self._state = "closed"
+        try:
+            if failed and connection:
+                connection.close()
+        finally:
+            pool.put(None if failed else connection)
+
+    def decode(self):
+        with self._lock:
+            if self._state != "ready":
+                raise RuntimeError("market_response_already_consumed")
+            self._state = "decoding"
+            body, self._body = self._body, None
+        client = self._client
+        failed = True
+        try:
+            if time.monotonic() >= self._deadline:
+                raise TimeoutError("market_deadline_exceeded")
+            payload, decoded_length = decode_json(body, self._encoding)
+            wire_length = len(body)
+            body = None
+            if isinstance(payload, dict) and payload.get("retCode") in (10006, 10018, 10429):
+                with client.lock:
+                    client.cooldowns[self._host] = time.monotonic()+60
+            check_api_success(payload)
+            if time.monotonic() >= self._deadline:
+                raise TimeoutError("market_deadline_exceeded")
+            client._record(self._url, self._started, self._wall, wire_bytes=wire_length,
+                           decoded_bytes=decoded_length, compressed=self._encoding == "gzip")
+            failed = False
+            return payload
+        except BaseException as exc:
+            client._record(self._url, self._started, self._wall,
+                           error=type(exc).__name__+": "+str(exc)[:120])
+            raise
+        finally:
+            self._finish(failed)
+
+    def close(self):
+        with self._lock:
+            if self._state != "ready":
+                return  # an active decode owns its own finally block
+            self._state = "discarding"
+        try:
+            self._client._record(self._url, self._started, self._wall,
+                                 error="market_response_discarded")
+        finally:
+            self._finish(True)
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass  # normal callers explicitly consume or discard their lease
+
+
+def discard_market_response(future):
+    """Release a private batch result that the interrupted caller won't read."""
+    if future.cancelled():
+        return
+    error = future.exception()
+    if error is None:
+        future.result().close()
+    elif isinstance(error, Exception):
+        error.__traceback__ = None
+
+
 class PublicMarketHttp:
     def __init__(self, connections_per_host=6):
         self.context = ssl.create_default_context()
@@ -113,6 +199,9 @@ class PublicMarketHttp:
                 self.metrics.popitem(last=False)
 
     def get_json(self, url, timeout=1.5, weight_limit=None):
+        return self.get_wire(url, timeout, weight_limit).decode()
+
+    def get_wire(self, url, timeout=1.5, weight_limit=None):
         parsed = urlsplit(url)
         if (parsed.scheme != "https" or parsed.hostname not in PUBLIC_PATHS
                 or parsed.path not in PUBLIC_PATHS[parsed.hostname] or parsed.port not in (None, 443)
@@ -191,18 +280,13 @@ class PublicMarketHttp:
                 return response.read1(size)
 
             body = read_bounded_body(read_part)
-            length = len(body)
             remaining()
             encoding = response.getheader("Content-Encoding", "").lower()
-            payload, decoded_length = decode_json(body, encoding)
-            if isinstance(payload, dict) and payload.get("retCode") in (10006, 10018, 10429):
-                with self.lock:
-                    self.cooldowns[host] = time.monotonic()+60
-            check_api_success(payload)
-            remaining()
-            self._record(url, started, wall, wire_bytes=length, decoded_bytes=decoded_length, compressed=encoding == "gzip")
-            return payload
-        except Exception as exc:
+            wire = MarketWireResponse(self, url, started, wall, deadline, host,
+                                      pool, connection, body, encoding)
+            borrowed = False  # the wire result now owns this exact pool slot
+            return wire
+        except BaseException as exc:
             if connection:
                 connection.close()
                 connection = None

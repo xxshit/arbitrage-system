@@ -7,6 +7,7 @@ import threading
 from types import SimpleNamespace
 import unittest
 import weakref
+from market_transport import discard_market_response
 
 
 def load_batch(source=None):
@@ -16,7 +17,8 @@ def load_batch(source=None):
              and node.name in {'MarketPayloads', 'fetch_market_payloads'}]
     namespace = dict(time=SimpleNamespace(monotonic=lambda: 1000., time=lambda: 5000.),
                      as_completed=as_completed, MARKET_PAYLOAD_CACHE={},
-                     MARKET_PAYLOAD_CACHE_LOCK=threading.Lock())
+                     MARKET_PAYLOAD_CACHE_LOCK=threading.Lock(),
+                     discard_market_response=discard_market_response)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), 'exec'), namespace)
     return namespace
 
@@ -44,9 +46,9 @@ class MarketPayloadLifetimeTests(unittest.TestCase):
         self.ns = load_batch()
         self.refs = []
         self.executor = ImmediateExecutor()
-        self.ns.update(MARKET_HTTP=SimpleNamespace(get_json=self.get_json),
+        self.ns.update(MARKET_HTTP=SimpleNamespace(get_wire=self.get_wire),
                        MARKET_HTTP_EXECUTOR=self.executor,
-                       as_completed=lambda futures: iter(futures))
+                       as_completed=lambda futures: iter(list(futures)))
         self.was_enabled = gc.isenabled()
         # Test reference ownership, independently of automatic cyclic collection.
         # Never force collection, and never change GC in application code.
@@ -67,6 +69,11 @@ class MarketPayloadLifetimeTests(unittest.TestCase):
                         body='x' * (256 * 1024))
         self.refs.append(weakref.ref(value))
         return value
+
+    def get_wire(self, url, timeout):
+        if url == 'failure':
+            return self.get_json(url, timeout)
+        return SimpleNamespace(decode=lambda: self.get_json(url, timeout), close=lambda: None)
 
     def test_handled_failure_does_not_retain_other_successful_payloads(self):
         for _ in range(6):
@@ -116,7 +123,7 @@ class MarketPayloadLifetimeTests(unittest.TestCase):
     def test_shutdown_exception_still_propagates_with_its_traceback(self):
         def interrupted(*_):
             raise KeyboardInterrupt('synthetic_shutdown')
-        self.ns['MARKET_HTTP'].get_json = interrupted
+        self.ns['MARKET_HTTP'].get_wire = interrupted
         try:
             self.ns['fetch_market_payloads']({'first': 'a'})
         except KeyboardInterrupt as error:

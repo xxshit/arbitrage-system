@@ -53,7 +53,7 @@ from asset_catalog import NON_CRYPTO_BOOTSTRAP, bootstrap_category, compact_symb
 from equity_spot import EXTRA_URLS as EQUITY_SPOT_URLS, METADATA_TTLS as EQUITY_SPOT_TTLS, build_snapshot as build_equity_spot_snapshot
 from funding_alerts import advance as advance_funding_alert, binance_observations, event_is_active as funding_event_is_active, fresh as funding_fresh, status as funding_alert_status
 from funding_history import DAY_MS, FundingHistoryClient, FundingHistoryError, FundingSyncSchedule, expected_settlement
-from market_transport import PublicMarketHttp, decode_json, read_bounded_body
+from market_transport import PublicMarketHttp, decode_json, read_bounded_body, discard_market_response
 from market_status import snapshot_delays
 from spread_history import (
     HistoryBuffer, HistoryStore, PERIODS as SPREAD_HISTORY_PERIODS,
@@ -1683,31 +1683,45 @@ def fetch_market_payloads(urls, cache_seconds=None, live_timeout=1.5):
         else:
             pending[name] = url
     if pending:
-        futures = {MARKET_HTTP_EXECUTOR.submit(MARKET_HTTP.get_json, url, live_timeout): (name, url) for name, url in pending.items()}
-        for future in as_completed(futures):
-            name, url = futures[future]
-            try:
-                payload = future.result()
-                results[name] = payload
-                with MARKET_PAYLOAD_CACHE_LOCK:
-                    previous = MARKET_PAYLOAD_CACHE.get(url)
-                    if not previous or previous["fetched_at"] <= now:
-                        MARKET_PAYLOAD_CACHE[url] = {"payload": payload, "fetched_at": now}
-                results.observed_at[name] = wall
-            except Exception as exc:
+        futures = {}
+        try:
+            for name, url in pending.items():
+                futures[MARKET_HTTP_EXECUTOR.submit(MARKET_HTTP.get_wire, url, live_timeout)] = (name, url)
+            for future in as_completed(futures):
+                name, url = futures[future]
                 try:
-                    cached = MARKET_PAYLOAD_CACHE.get(url)
-                    if cached:
-                        results[name] = cached["payload"]
-                        results.observed_at[name] = wall - (now - cached["fetched_at"])
-                        errors[name] = f"using cached payload: {exc}"
-                    else:
-                        errors[name] = str(exc)
+                    # Only bounded bytes cross from the network pool. Create
+                    # and replace the JSON tree on the cache consumer's thread.
+                    payload = future.result().decode()
+                    results[name] = payload
+                    with MARKET_PAYLOAD_CACHE_LOCK:
+                        previous = MARKET_PAYLOAD_CACHE.get(url)
+                        if not previous or previous["fetched_at"] <= now:
+                            MARKET_PAYLOAD_CACHE[url] = {"payload": payload, "fetched_at": now}
+                    previous = None
+                    results.observed_at[name] = wall
+                except Exception as exc:
+                    try:
+                        cached = MARKET_PAYLOAD_CACHE.get(url)
+                        if cached:
+                            results[name] = cached["payload"]
+                            results.observed_at[name] = wall - (now - cached["fetched_at"])
+                            errors[name] = f"using cached payload: {exc}"
+                        else:
+                            errors[name] = str(exc)
+                    finally:
+                        # A consumed private Future must not retain this batch
+                        # through its exception traceback until cyclic GC.
+                        exc.__traceback__ = None
                 finally:
-                    # This private future is fully consumed. Its saved exception
-                    # must not retain this batch frame, successful payloads and
-                    # the prior cache generation until cyclic GC runs.
-                    exc.__traceback__ = None
+                    future.add_done_callback(discard_market_response)
+                    futures.pop(future, None)
+        finally:
+            # Submission failure or shutdown can leave completed leases and
+            # still-running reads. Each returns its slot exactly once.
+            for future in futures:
+                future.cancel()
+                future.add_done_callback(discard_market_response)
     return results, errors
 
 

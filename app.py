@@ -5099,6 +5099,9 @@ def valid_admin_csrf():
 from binance_hedge.web import register as register_binance_hedge
 register_binance_hedge(app, db, current_user)
 
+from market_flow_service import register as register_market_flow
+FLOW_MONITOR = register_market_flow(app, db, current_user, lambda: MARKET_PAYLOAD_CACHE)
+
 
 @app.cli.command("create-admin")
 @click.option("--username", default="owner", show_default=True)
@@ -14153,7 +14156,8 @@ def alerts():
 
     if view == "active":
         payload = {"view": "active", "history_loading": history_loading, "checked_at_epoch": time.time(),
-                   "realtime": ALERT_STREAM_HUB.status(), "funding": funding_alert_payload(screening_now)}
+                   "realtime": ALERT_STREAM_HUB.status(), "funding": funding_alert_payload(screening_now),
+                   "market_flow": FLOW_MONITOR.alerts(screening_now)}
         db.session.remove()
         payload["active_events"] = [event_payload(item, alert_round_ids(grouped_events[key], pulses, newest_first=True,
                                        include=lambda event, pulse: event.id == item.id))
@@ -14232,6 +14236,7 @@ def alerts():
     checked_at = time.time()
     realtime = ALERT_STREAM_HUB.status()
     funding = funding_alert_payload(screening_now)
+    market_flow = FLOW_MONITOR.alerts(screening_now)
     # Funding is now plain data. Release the read transaction before building and compressing the response.
     db.session.remove()
     groups, active_payloads = [], []
@@ -14261,6 +14266,7 @@ def alerts():
         "realtime": realtime,
         "window_hours": 24,
         "funding": funding,
+        "market_flow": market_flow,
         "screening": {"notional": notional, "min_net_edge": .30, "version": 3},
         "total_symbols": len(grouped_events),
         "total_alerts": sum(group["alert_count"] for group in groups),
@@ -16605,6 +16611,8 @@ def start_background_workers():
                          name="funding-history-" + exchange.lower()).start()
     background_thread(target=background_binance_settlement_tail, daemon=True, name="binance-settlement-tail").start()
     background_thread(target=background_funding_alerts, daemon=True, name="funding-alerts").start()
+    background_thread(target=FLOW_MONITOR.run, daemon=True, name="market-flow-control").start()
+    background_thread(target=FLOW_MONITOR.run_stream, daemon=True, name="market-flow-stream").start()
     background_thread(target=background_price_history_backfill, daemon=True, name="price-history-backfill").start()
     background_thread(target=background_long_trend_references, daemon=True, name="long-trend-references").start()
     background_thread(target=background_index_component_sync, daemon=True, name="index-component-sync").start()

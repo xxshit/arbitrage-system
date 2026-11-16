@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 
 
 PUBLIC_PATHS = {
-    "api.binance.com": {"/api/v3/ticker/bookTicker", "/api/v3/ticker/24hr"},
+    "api.binance.com": {"/api/v3/ticker/bookTicker", "/api/v3/ticker/24hr", "/api/v3/exchangeInfo", "/api/v3/klines"},
     "fapi.binance.com": {"/fapi/v1/exchangeInfo", "/fapi/v1/ticker/bookTicker", "/fapi/v1/ticker/24hr",
                          "/fapi/v1/premiumIndex", "/fapi/v1/fundingInfo", "/fapi/v1/klines",
                          "/futures/data/openInterestHist", "/futures/data/globalLongShortAccountRatio"},

@@ -86,12 +86,22 @@ class FlowStore:
                     has_more=len(rows)>limit, page_size=limit)
 
 
-def cached_market(cache, now, monotonic_now):
+def cached_market(cache, now, monotonic_now, versions=None):
     values = []
     for endpoint in ("ticker/24hr", "ticker/bookTicker"):
         row = cache.get("https://api.binance.com/api/v3/"+endpoint, {})
         at = row.get("fetched_at")
-        values.append((row.get("payload"), now-(monotonic_now-at) if isinstance(at, (int, float)) else 0))
+        valid = isinstance(at, (int, float)) and not isinstance(at, bool)
+        captured = now-(monotonic_now-at) if valid else 0
+        if versions is not None and valid:
+            # Convert each monotonic cache version once. Small differences in
+            # the two clock reads must not make unchanged payloads look new.
+            previous = versions.get(endpoint)
+            if previous and previous[0] == at:
+                captured = previous[1]
+            else:
+                versions[endpoint] = (at, captured)
+        values.append((row.get("payload"), captured))
     return values
 
 
@@ -108,10 +118,13 @@ class FlowMonitor:
         self.recommendations_at = 0
         self.recommended_symbols = []
         self.manual = []
-        self.published = dict(rows=[], recommended=[], manual=[], checked_at=0)
+        self.published = dict(rows=[], recommended=[], manual=[], checked_at=0, active_events=[])
+        self.market_versions = {}
+        self.active_events = []
+        self.active_dirty = True
         self.health = dict(running=False, stream_connected=False, persistence_error=False,
                            last_error=None, received_frames=0, received_bytes=0, rest_requests=0,
-                           events_written=0,
+                           events_written=0, data_errors=0, data_degraded=False,
                            scope="币安USDT现货；未接链上持仓或转账", status="starting")
         self.retry_at = {}
         self.catalog_retry = 0
@@ -135,8 +148,7 @@ class FlowMonitor:
                     candidate_count=len(payload["recommended"]),
                     control_age_seconds=max(0, now-payload["checked_at"]))
 
-    def payload(self, now=None):
-        now = time.time() if now is None else now
+    def _view(self, now):
         with self.lock:
             published = self.published
         # Recheck freshness at read time, including while a collector is stalled.
@@ -144,14 +156,47 @@ class FlowMonitor:
         for original in published["rows"]:
             row = dict(original)
             stamp = row.get("stream_at")
-            if not stamp or not -2 <= now-stamp <= 10:
+            if row['status'] == 'unavailable':
+                rows.append(row)
+                continue
+            if self.health['status'] == 'resource_paused':
+                row.update(status="stale", status_reason="资源保护暂停采集", candidate=False)
+            elif not stamp or not -2 <= now-stamp <= 10:
                 row.update(status="stale", status_reason="实时汇总已过期，暂停候选与新提醒", candidate=False)
+            elif not -2 <= now-published["checked_at"] <= 15:
+                row.update(status="stale", status_reason="监控更新已过期，暂停候选与新提醒", candidate=False)
+            else:
+                evidence, market = row.get("evidence") or {}, row.get("market") or {}
+                if (now-self.engine.catalog_at > 7200
+                        or (evidence and not 0 <= now-evidence["window_end"] <= 75)):
+                    row.update(status="stale", status_reason="交易目录或已收盘窗口过期", candidate=False)
+                book_at = market.get("quote_at")
+                if (book_at is None or not 0 <= now-book_at <= 20
+                        or not -2 <= now-market.get("market_at", 0) <= 45):
+                    row["candidate"] = False
+                    if row.get("kind") == "suspected_accumulation":
+                        row.update(kind="volume_expansion", status_reason="成交窗口有效；盘口或24H统计过期，不判断吸筹")
             rows.append(row)
         eligible = {r["contract"] for r in rows if r["candidate"] and r["status"] == "live"}
         selected = [s for s in published["recommended"] if s in eligible] if now-published["checked_at"] <= 15 else []
-        return dict(overview=self.engine.overview(now), health=self.status(), rows=rows,
+        return published, rows, selected
+
+    def payload(self, now=None):
+        now = time.time() if now is None else now
+        published, rows, selected = self._view(now)
+        overview = dict(published.get("overview") or self.engine.overview(now))
+        overview["stale"] = (overview["stale"] or now-overview["at"] > 45
+                             or now-self.engine.catalog_at > 7200)
+        expiry = published['checked_at']+15
+        for row in rows:
+            if row['contract'] in selected:
+                market = row['market']
+                expiry = min(expiry, row['stream_at']+10, market['quote_at']+20,
+                             market['market_at']+45, row['evidence']['window_end']+75,
+                             self.engine.catalog_at+7200)
+        return dict(overview=overview, health=self.status(), rows=rows,
                     manual=published["manual"], recommended=selected,
-                    checked_at=published["checked_at"], valid_until=published["checked_at"]+15,
+                    checked_at=published["checked_at"], valid_until=expiry,
                     ranking="已核验候选中的观察优先级，非收益概率；不足3个不补齐",
                     chain_status="未接入链上验证；普通转账不生成吸筹信号")
 
@@ -159,27 +204,36 @@ class FlowMonitor:
         now = time.time() if now is None else now
         if not self.ready:
             return dict(active_events=[], health=self.status())
-        payload = self.payload(now)
-        watch = {r["contract"] for r in payload["manual"]} | set(payload["recommended"])
-        fresh = {r["contract"] for r in payload["rows"] if r["status"] == "live"}
-        if now-payload["checked_at"] > 15 or self.health["persistence_error"]:
+        published, rows, selected = self._view(now)
+        watch = {r["contract"] for r in published["manual"]} | set(selected)
+        fresh = {r["contract"]: r for r in rows if r["status"] == "live"}
+        if not -2 <= now-published["checked_at"] <= 15 or self.health["persistence_error"]:
             return dict(active_events=[], health=self.status())
-        try:
-            events = self.store().history(now, active=True)["items"]
-        except Exception:
-            return dict(active_events=[], health={**self.status(), "persistence_error": True, "status": "storage_unavailable"})
+        # Committed evidence is published once by the collector. Global 5s
+        # readers neither borrow SQL connections nor scan the broad market.
+        events = published.get("active_events", ())
         return dict(active_events=[{**event, "audible": True, "remaining_seconds": max(0, int(120-(now-event["observed_at"])))}
-                                  for event in events if event["contract"] in watch & fresh], health=self.status())
+                                  for event in events if event["contract"] in watch and event["contract"] in fresh
+                                  and 0 <= now-event["observed_at"] < 120
+                                  and (event["kind"] != "suspected_accumulation"
+                                       or fresh[event["contract"]]["kind"] == "suspected_accumulation")], health=self.status())
 
     def cycle(self, now, fetch):
         used_http = False
+        data_error = None
         if now >= self.catalog_retry and now-self.engine.catalog_at >= 3600:
             self.catalog_retry = now+60
             self.health["rest_requests"] += 1
-            self.engine.set_catalog(fetch(CATALOGUE_URL), time.time())
             used_http = True
-        (tickers, at), (books, book_at) = cached_market(self.cache_reader(), now, time.monotonic())
+            try:
+                self.engine.set_catalog(fetch(CATALOGUE_URL), time.time())
+            except Exception as exc:
+                data_error = type(exc).__name__
+                self.health['data_errors'] += 1
+        now = time.time()
+        (tickers, at), (books, book_at) = cached_market(self.cache_reader(), now, time.monotonic(), self.market_versions)
         self.engine.ingest_market(tickers, books, at, now, book_at=book_at)
+        del tickers, books  # Do not retain replaced upstream trees across a REST wait.
         with self.app.app_context():
             store = self.store()
             self.manual = store.tag_list()
@@ -194,13 +248,17 @@ class FlowMonitor:
         # One bounded history fill per control cycle. Steady updates come from
         # one combined public socket; no per-symbol polling every five seconds.
         for symbol in focus:
-            row = self.engine.inspect(symbol, now)
-            needs_seed = row["status"] in {"warming", "gap"} or symbol not in self.engine.seeded_at
-            if not used_http and needs_seed and now >= self.retry_at.get(symbol, 0):
+            if used_http:
+                break
+            if now >= self.retry_at.get(symbol, 0) and self.engine.needs_seed(symbol, now):
                 self.retry_at[symbol] = now+60
                 self.health["rest_requests"] += 1
-                data = fetch("https://api.binance.com/api/v3/klines?"+urlencode(dict(symbol=symbol, interval="1m", limit=MAX_BARS)))
-                self.engine.seed(symbol, data, time.time())
+                try:
+                    data = fetch("https://api.binance.com/api/v3/klines?"+urlencode(dict(symbol=symbol, interval="1m", limit=MAX_BARS)))
+                    self.engine.seed(symbol, data, time.time())
+                except Exception as exc:
+                    data_error = type(exc).__name__
+                    self.health['data_errors'] += 1
                 break
         now = time.time()
         rows = [self.engine.inspect(s, now) for s in focus]
@@ -220,18 +278,28 @@ class FlowMonitor:
                 if row["contract"] in watch and self.processed.get(row["contract"]) != key:
                     if store.advance(row, now):
                         self.health["events_written"] += 1
+                        self.active_dirty = True
                     self.processed[row["contract"]] = key
+            # On restart load at most32 active records; after that reload only
+            # when a new commit was made. A failed reload stays dirty for retry.
+            if self.active_dirty:
+                self.active_events = store.history(now, active=True)["items"]
+                self.active_dirty = False
+        self.active_events = [e for e in self.active_events if 0 <= now-e["observed_at"] < 120]
         # Unsupported delisted manual tags remain visible and are never deleted.
         rows.extend(self.engine.inspect(s, now) for s in manual if s not in focus)
         with self.lock:
             self.published = dict(rows=rows, recommended=list(self.recommended_symbols),
-                                  manual=self.manual, checked_at=now)
-            self.health.update(running=True, persistence_error=False, last_error=None, status="running")
+                                  manual=self.manual, checked_at=now, active_events=self.active_events,
+                                  overview=self.engine.overview(now))
+            self.health.update(running=True, persistence_error=False, last_error=data_error,
+                               status="running", data_degraded=bool(data_error))
 
     def run(self):
         with self.app.app_context():
             self.store().initialize()
         self.ready = True
+        self.active_dirty = True
         logger = logging.getLogger("arbitrage.market_flow")
         logger.setLevel(logging.INFO)
         logger.handlers = list(self.app.logger.handlers) or [logging.StreamHandler()]

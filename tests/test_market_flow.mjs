@@ -7,11 +7,11 @@ const base=new URL('../',import.meta.url),source=readFileSync(new URL('static/ma
 const main=readFileSync(new URL('static/app.js',base),'utf8');
 const html=readFileSync(new URL('templates/index.html',base),'utf8');
 const evidence={quote_volume:150000,expected_5m_quote:50000,volume_ratio:3,taker_buy_quote:97500,taker_sell_quote:52500,taker_delta_quote:45000,buy_share:.65,positive_delta_minutes:4,change_pct:.5,change_15m_pct:1.5,spread_bps:2,drawdown_pct:.3,window_start:1800000000,window_end:1800000300,baseline_start:1799996400,baseline_end:1800000000,baseline_quote_volume:600000,source:'Binance Spot',thresholds:{volume_ratio:2.5,minimum_5m_quote:100000},interpretation:'不是资金净流入',risks:['不代表主力建仓']};
-function harness(){
+function harness(intl=Intl){
   const nodes=new Map(),listeners=new Map(),requests=[];
   const node=id=>{if(!nodes.has(id))nodes.set(id,{innerHTML:'',textContent:'',disabled:false});return nodes.get(id)};
   const read={current:()=>true,assertCurrent(){},json:async url=>{requests.push(url);return {items:[],has_more:false}}};
-  const c={window:{},document:{getElementById:node,addEventListener:(type,fn)=>listeners.set(type,fn)},Intl,Date,console,
+  const c={window:{},document:{getElementById:node,addEventListener:(type,fn)=>listeners.set(type,fn)},Intl:intl,Date,console,
     authState:{is_admin:true,csrf_token:'test'},pageReadContext:()=>read,setPageRefreshSource(){},isPageReadCancelled:()=>false};
   vm.createContext(c);vm.runInContext(source,c);
   return {api:c.window.MarketFlow,node,read,requests,c,listeners};
@@ -56,4 +56,24 @@ test('new view is reachable and its script loads before main initialization',()=
 test('candidate cards keep ranking order rather than subscription order',()=>{
   const h=harness();h.api.render({overview:{},health:{},manual:[],recommended:['BUSDT','AUSDT'],rows:['AUSDT','BUSDT'].map(contract=>({contract,symbol:contract,status:'live',candidate:true,score:70,evidence}))});
   const out=h.node('marketFlowCandidates').innerHTML;assert.ok(out.indexOf('1. BUSDT')<out.indexOf('2. AUSDT'));
+});
+
+test('repeated evidence formatting creates only one date formatter',()=>{
+  let constructors=0;
+  function DateTimeFormat(...args){constructors++;return new Intl.DateTimeFormat(...args)}
+  const h=harness({DateTimeFormat});
+  for(let i=0;i<100;i++)h.api.evidence(evidence);
+  assert.equal(constructors,1);
+});
+
+test('refresh preserves opened evidence by coin and skips unchanged card HTML',()=>{
+  const h=harness(),target=h.node('marketFlowRows');let html='',details=[],writes=0;
+  Object.defineProperty(target,'innerHTML',{get:()=>html,set:value=>{html=value;writes++;details=[...value.matchAll(/<details data-flow-evidence="([^"]*)"/g)].map(m=>({dataset:{flowEvidence:m[1]},open:false}))}});
+  target.querySelectorAll=selector=>selector.endsWith('[open]')?details.filter(d=>d.open):details;
+  const payload={overview:{},health:{},manual:[],recommended:[],rows:[{contract:'DEMOUSDT',symbol:'DEMO/USDT',status:'live',candidate:true,score:70,evidence}]};
+  h.api.render(payload);details[0].open=true;
+  h.api.render({...payload,rows:[{...payload.rows[0],evidence:{...evidence,stream_at:1800000001}}]});
+  assert.equal(details[0].open,true);const count=writes;
+  h.api.render({...payload,rows:[{...payload.rows[0],evidence:{...evidence,stream_at:1800000001}}]});
+  assert.equal(writes,count);
 });

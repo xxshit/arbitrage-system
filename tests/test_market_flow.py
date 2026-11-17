@@ -252,15 +252,16 @@ class FlowWebTests(unittest.TestCase):
         self.assertEqual(store.history(NOW+2)['items'],[])
         self.assertIsNotNone(store.advance(row,NOW+2))
 
-    def test_flow_store_failure_does_not_break_existing_alarm_endpoint(self):
+    def test_alarm_http_path_no_longer_depends_on_store_availability(self):
         self.monitor.published=dict(rows=[],manual=[],recommended=[],checked_at=NOW)
         with patch.object(self.monitor,'store',side_effect=RuntimeError('synthetic')):
             result=self.monitor.alerts(NOW)
         self.assertEqual(result['active_events'],[])
-        self.assertEqual(result['health']['status'],'storage_unavailable')
+        self.assertFalse(result['health']['persistence_error'])
 
     def test_stale_recommendations_are_removed_on_read(self):
         e=engine();row=e.inspect('DEMOUSDT',NOW)
+        self.monitor.engine=e
         self.monitor.published=dict(rows=[row],manual=[],recommended=['DEMOUSDT'],checked_at=NOW)
         self.assertEqual(self.monitor.payload(NOW)['recommended'],['DEMOUSDT'])
         self.assertEqual(self.monitor.payload(NOW+16)['recommended'],[])
@@ -321,9 +322,9 @@ class FlowAlarmIntegrationTests(unittest.TestCase):
             e.ingest_stream(stream(now=now+1,closed=True,raw=raw),now+1)
             row=e.inspect('DEMOUSDT',now+1)
             monitor.ready=True;monitor.engine=e
-            monitor.published=dict(rows=[row],manual=[{'contract':'DEMOUSDT'}],recommended=[],checked_at=now+1)
             with module.app.app_context():
-                monitor.store().initialize();monitor.store().advance(row,now+1)
+                monitor.store().initialize();event=monitor.store().advance(row,now+1)
+            monitor.published=dict(rows=[row],manual=[{'contract':'DEMOUSDT'}],recommended=[],checked_at=now+1,active_events=[event])
             with patch.object(module.time,'time',return_value=now+2):
                 data=case.get(view='active')
                 self.assertEqual(data['market_flow']['active_events'][0]['contract'],'DEMOUSDT')
@@ -332,7 +333,7 @@ class FlowAlarmIntegrationTests(unittest.TestCase):
                     failed=case.get(view='active')
                 self.assertEqual(failed['active_events'],data['active_events'])
                 self.assertEqual(failed['funding'],data['funding'])
-                self.assertEqual(failed['market_flow']['active_events'],[])
+                self.assertEqual(failed['market_flow']['active_events'],data['market_flow']['active_events'])
         finally:
             monitor.ready,monitor.engine,monitor.published=old
             case.tearDown()

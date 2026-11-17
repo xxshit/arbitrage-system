@@ -173,9 +173,10 @@ class FlowEngine:
             if at <= self.market_at:
                 # BBO updates every five seconds while 24h statistics use their
                 # existing slower cache. Do not pretend either is a new trade.
-                self.market = {s: {**v, "spread_bps": quotes.get(s, (None, None))[0],
-                                  "quote_at": quotes.get(s, (None, None))[1]}
-                               for s, v in self.market.items()}
+                # These rows are owned by the engine under this lock. Readers
+                # receive scalar copies, so BBO refresh need not clone every row.
+                for symbol, value in self.market.items():
+                    value["spread_bps"], value["quote_at"] = quotes.get(symbol, (None, None))
                 return True
             latest = {}
             for item in tickers:
@@ -239,6 +240,19 @@ class FlowEngine:
             parsed.update(self.bars.get(symbol, {}))
             self.bars[symbol] = dict(sorted(parsed.items())[-MAX_BARS:])
             self.seeded_at[symbol] = now
+
+    def needs_seed(self, symbol, now):
+        """Check continuity without constructing an evidence tree just to discard it."""
+        with self.lock:
+            if symbol not in self.seeded_at:
+                return True
+            starts = sorted(self.bars.get(symbol, {}))[-65:]
+            if len(starts) < 65 or any(b-a != 60 for a, b in zip(starts, starts[1:])):
+                return True
+            # Repair a missed final frame after a reconnect, even before the
+            # next close creates a visible gap. An offline stream waits to return.
+            return (now-(starts[-1]+60) > 75
+                    and -2 <= now-self.stream_at.get(symbol, 0) <= 10)
 
     def ingest_stream(self, payload, now):
         parsed = ws_bar(payload, now)
